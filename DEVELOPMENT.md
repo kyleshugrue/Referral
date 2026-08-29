@@ -31,7 +31,7 @@ changes are manual and must be reviewed before they are applied.
 | `npm run repo:hygiene` | Validate tracked files and approved assets |
 
 The public tree contains the web application, native source templates,
-migrations, tests, CI, and approved synthetic assets. Credentials, user data,
+migrations, tests, CI, and approved genuine demonstration assets. Credentials, user data,
 private operations, export controls, and the separately deployed Worker are
 outside this showcase boundary.
 

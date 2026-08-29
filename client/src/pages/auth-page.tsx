@@ -109,21 +109,21 @@ function DesktopAuthLayout() {
   const screenshots = [
     {
       src: "/demo-screenshots/IMG_9824_1752622444512.PNG",
-      alt: "Synergy AI matching feature showing professional profile",
+      alt: "Referral Synergy AI screen showing a professional profile and referral-focused connection details",
       title: "AI-Powered Networking",
       description: "Connect based on career and relocation goals",
       icon: SynergyIcon
     },
     {
       src: "/demo-screenshots/IMG_9825_1752622444512.PNG",
-      alt: "Network search with personalized matching features",
+      alt: "Referral Network Search screen showing personalized matching features",
       title: "Browse the Platform",
       description: "Search for connections based on preferences and experience",
       icon: Search
     },
     {
       src: "/demo-screenshots/IMG_9827_1752622444513.PNG",
-      alt: "Connections and messaging interface",
+      alt: "Referral Connections screen showing demonstration conversations between professionals",
       title: "Exchange Referrals",
       description: "Grow your network, exchange referrals, and achieve your goals",
       icon: MessageSquare

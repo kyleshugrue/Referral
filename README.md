@@ -61,13 +61,15 @@ intentionally outside this showcase.
 
 ## Screenshots
 
-These are approved synthetic product screenshots; they contain no real user
-content or personal images.
+These are genuine Referral application screenshots displayed on the live
+marketing site. They show approved demonstration content only; non-visible
+image metadata was removed before publication without changing the displayed
+pixels.
 
 <p>
-  <img src="public/demo-screenshots/IMG_9824_1752622444512.PNG" width="31%" alt="Synthetic Referral profile screen showing a professional profile and referral-focused connection details">
-  <img src="public/demo-screenshots/IMG_9825_1752622444512.PNG" width="31%" alt="Synthetic Referral network screen showing suggested professional connections and match context">
-  <img src="public/demo-screenshots/IMG_9827_1752622444513.PNG" width="31%" alt="Synthetic Referral messaging screen showing a conversation between professionals">
+  <img src="public/demo-screenshots/IMG_9824_1752622444512.PNG" width="31%" alt="Referral Synergy AI screen showing a professional profile and referral-focused connection details">
+  <img src="public/demo-screenshots/IMG_9825_1752622444512.PNG" width="31%" alt="Referral Network Search screen showing personalized matching features">
+  <img src="public/demo-screenshots/IMG_9827_1752622444513.PNG" width="31%" alt="Referral Connections screen showing demonstration conversations between professionals">
 </p>
 
 ## Local development
@@ -105,7 +107,7 @@ Every update reaches public `main` only after both private and public CI pass.
 
 This repository is a fresh, history-free public subset of the canonical
 private application. It contains buildable application source, migrations,
-tests, native templates, CI, and approved synthetic assets. It does not contain
+tests, native templates, CI, and approved genuine demonstration assets. It does not contain
 credentials, user uploads, production data, private operational controls,
 historical Git objects, or the separately deployed Worker implementation.
 
