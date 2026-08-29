@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 
+  TEMPLATE FILE - DO NOT COMMIT ACTUAL CREDENTIALS
+  
+  To use this template:
+  1. Copy this file to GoogleService-Info.plist
+  2. Replace placeholder values with your actual Firebase credentials from the Firebase Console
+  3. Never commit the actual GoogleService-Info.plist file (it's in .gitignore)
+  
+  For CI/CD builds:
+  - Store the real plist content as a secret in your CI system
+  - Inject it during the build process
+-->
+<plist version="1.0">
+<dict>
+        <key>API_KEY</key>
+        <string>YOUR_FIREBASE_API_KEY</string>
+        <key>GCM_SENDER_ID</key>
+        <string>YOUR_GCM_SENDER_ID</string>
+        <key>PLIST_VERSION</key>
+        <string>1</string>
+        <key>BUNDLE_ID</key>
+        <string>YOUR_BUNDLE_ID</string>
+        <key>PROJECT_ID</key>
+        <string>YOUR_PROJECT_ID</string>
+        <key>STORAGE_BUCKET</key>
+        <string>YOUR_STORAGE_BUCKET</string>
+        <key>IS_ADS_ENABLED</key>
+        <false></false>
+        <key>IS_ANALYTICS_ENABLED</key>
+        <false></false>
+        <key>IS_APPINVITE_ENABLED</key>
+        <true></true>
+        <key>IS_GCM_ENABLED</key>
+        <true></true>
+        <key>IS_SIGNIN_ENABLED</key>
+        <true></true>
+        <key>GOOGLE_APP_ID</key>
+        <string>YOUR_GOOGLE_APP_ID</string>
+</dict>
+</plist>

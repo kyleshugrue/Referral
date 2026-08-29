@@ -1,0 +1,24 @@
+export type RegistrationFormData = {
+  fullName: string;
+  birthday: string;
+  email: string;
+  password: string;
+  title: string;
+  currentCompany: string;
+  currentLocation: string;
+  industry: string;
+  yearsOfExperience: number;
+  institution: string;
+  educationLevel: string;
+  bio: string;
+  professionalInterests: string[];
+  languages: string[];
+  interests: string[];
+  desiredLocations: string[];
+  desiredCompanies: string[];
+  matchingRadius: number;
+  photo: string;
+  resumeUrl: string;
+  resumePreviewUrls: string[];
+  firebaseUid?: string;
+};

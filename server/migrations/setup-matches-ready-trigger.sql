@@ -1,0 +1,14 @@
+-- Documentation: Worker emits NOTIFY 'matches_ready' programmatically
+-- No trigger needed - notification sent after completing all high-priority jobs for a user
+--
+-- This file documents the matches_ready notification system:
+-- 
+-- 1. Worker (background-job-queue.ts) emits pg_notify('matches_ready', ...) after each job completion
+--    - Checks if all high-priority jobs (priority ≤5) for a user are complete
+--    - If complete, emits notification with userId and timestamp
+--
+-- 2. Main app (storage.ts) listens for 'matches_ready' channel
+--    - Receives notification when user's high-priority matches are ready
+--    - Broadcasts WebSocket event to user's client for instant UI refresh
+--
+-- No database trigger is required as the logic is handled in application code.

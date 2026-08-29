@@ -1,0 +1,59 @@
+# Local dependencies and generated output
+node_modules/
+dist/
+server/public/
+*.tar.gz
+.DS_Store
+
+# Test/browser artifacts
+.cache/ms-playwright/
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+browser-artifacts/
+browser-test-artifacts/
+
+# Credentials and local configuration
+.env
+.env.*
+*.env
+!.env.example
+!.env.local.example
+**/.replit
+**/.firebaserc
+**/firebase.json
+**/GoogleService-Info.plist
+!ios/App/App/GoogleService-Info.plist.template
+
+# User content, workspace state, and pasted files
+attached_assets/
+uploads/
+.agent-state/
+.agents/
+.local/
+replit_agent/
+archive/
+business/
+functions/
+logs/
+tmp/
+temp/
+
+# Archives, logs, and transient files
+cookies.txt
+cookie.txt
+*.zip
+*.log
+*.tmp
+*.bak
+*.new
+*.old
+*.DISABLED
+*.dump
+*.sql.gz
+*.tgz
+
+# Generated export evidence
+portfolio-export/
+export-manifest.json

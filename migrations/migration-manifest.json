@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "migrations": [
+    {
+      "file": "0000_calm_doctor_octopus.sql",
+      "sha256": "2d5eca55ad2ba01f864c4aeda715ac8c55d2978187c4192f2847a3218c4ed261"
+    },
+    {
+      "file": "0001_violet_mad_thinker.sql",
+      "sha256": "8fd46748a46fc3383e75884543b16b85f6248e0278c24d7a187f06e164fb5ce7"
+    },
+    {
+      "file": "0002_ws_ticket_sessions.sql",
+      "sha256": "8b9aaa7520d36901c6f6fd7e65d6535fd4f96ea935a1f10491aa8313564d0491"
+    },
+    {
+      "file": "0003_session_store.sql",
+      "sha256": "82cf5a0a7b552935849d4d9a34fd24749cbcea233e8dbbafc747d6b5ffd6fbcb"
+    }
+  ]
+}

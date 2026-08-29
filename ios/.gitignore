@@ -1,0 +1,35 @@
+App/build
+App/Pods
+App/output
+DerivedData
+xcuserdata
+
+# iOS web layer: track the committed app content (icons, html, manifest, media),
+# but keep generated web build bundles (web-*.js / index-*.js / index-*.css) ignored.
+App/App/public/*
+!App/App/public/index.html
+!App/App/public/manifest.json
+!App/App/public/cordova.js
+!App/App/public/cordova_plugins.js
+!App/App/public/app-icon-192.png
+!App/App/public/app-icon-512.png
+!App/App/public/app-icon.png
+!App/App/public/assets/
+App/App/public/assets/*
+!App/App/public/assets/ceos_prioritize_referrals_media_hq.png
+!App/App/public/assets/connections_media_splash.png
+!App/App/public/assets/Photoroom_20250223_190416.jpeg
+!App/App/public/assets/referral_connections_media_hq.png
+!App/App/public/assets/referral_connections_media.png
+!App/App/public/assets/referral_media_hq.png
+!App/App/public/assets/you_should_too_media_hq.png
+!App/App/public/attached_assets/
+App/App/public/attached_assets/*
+!App/App/public/attached_assets/IMG_9824_1752622444512.PNG
+!App/App/public/attached_assets/IMG_9825_1752622444512.PNG
+!App/App/public/attached_assets/IMG_9827_1752622444513.PNG
+!App/App/public/attached_assets/IMG_9828_1752622444514.PNG
+
+# Cordova plugins for Capacitor (podspecs + .gitkeep tracked, matching previous state)
+
+# Generated config files (tracked, matching previous state)

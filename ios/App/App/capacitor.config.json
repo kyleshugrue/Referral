@@ -1,0 +1,82 @@
+{
+	"appId": "com.professionalnetwork.app",
+	"appName": "Professional Network",
+	"webDir": "dist/public",
+	"plugins": {
+		"CapacitorHttp": {
+			"enabled": true
+		},
+		"SplashScreen": {
+			"launchShowDuration": 3000,
+			"launchAutoHide": false,
+			"backgroundColor": "#ffffffff",
+			"androidSplashResourceName": "splash",
+			"androidScaleType": "CENTER_CROP",
+			"showSpinner": false,
+			"androidSpinnerStyle": "large",
+			"iosSpinnerStyle": "small",
+			"spinnerColor": "#999999",
+			"splashFullScreen": true,
+			"splashImmersive": true,
+			"layoutName": "launch_screen",
+			"useDialog": false
+		},
+		"App": {},
+		"StatusBar": {
+			"style": "DARK",
+			"backgroundColor": "#ffffff"
+		},
+		"Camera": {
+			"permissions": [
+				"camera",
+				"photos"
+			]
+		},
+		"Filesystem": {
+			"permissions": [
+				"readExternalStorage",
+				"writeExternalStorage"
+			]
+		},
+		"Keyboard": {
+			"resize": "body",
+			"resizeOnFullScreen": true,
+			"style": "light"
+		},
+		"PushNotifications": {
+			"presentationOptions": [
+				"badge",
+				"sound",
+				"alert"
+			]
+		},
+		"FirebaseMessaging": {
+			"presentationOptions": [
+				"badge",
+				"sound",
+				"alert"
+			]
+		}
+	},
+	"ios": {
+		"scheme": "Professional Network"
+	},
+	"android": {
+		"allowMixedContent": false
+	},
+	"packageClassList": [
+		"SecureStorage",
+		"FirebaseMessagingPlugin",
+		"AppPlugin",
+		"CAPCameraPlugin",
+		"DevicePlugin",
+		"FilesystemPlugin",
+		"GeolocationPlugin",
+		"HapticsPlugin",
+		"KeyboardPlugin",
+		"PushNotificationsPlugin",
+		"SplashScreenPlugin",
+		"StatusBarPlugin",
+		"NativeGeocoderPlugin"
+	]
+}

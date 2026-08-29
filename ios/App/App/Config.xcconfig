@@ -1,0 +1,10 @@
+// Firebase Configuration - populate these values at build time
+// These values should be set via environment variables or CI/CD secrets
+// DO NOT commit actual values to this file
+
+FIREBASE_API_KEY = $(FIREBASE_API_KEY)
+FIREBASE_PROJECT_ID = $(FIREBASE_PROJECT_ID)
+FIREBASE_GCM_SENDER_ID = $(FIREBASE_GCM_SENDER_ID)
+FIREBASE_APP_ID = $(FIREBASE_APP_ID)
+FIREBASE_STORAGE_BUCKET = $(FIREBASE_STORAGE_BUCKET)
+FIREBASE_BUNDLE_ID = $(FIREBASE_BUNDLE_ID)
