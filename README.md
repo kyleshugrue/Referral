@@ -2,7 +2,7 @@
 
 **Professional introductions for the jobs you actually want.**
 
-[![CI](https://github.com/kyleshugrue/Referral-App/actions/workflows/ci.yml/badge.svg)](https://github.com/kyleshugrue/Referral-App/actions/workflows/ci.yml)
+[![CI](https://github.com/kyleshugrue/Referral/actions/workflows/ci.yml/badge.svg)](https://github.com/kyleshugrue/Referral/actions/workflows/ci.yml)
 [![Live application](https://img.shields.io/badge/live%20application-referralprofessional.net-0f766e?logo=googlechrome&logoColor=white)](https://referralprofessional.net)
 
 [Referral](https://referralprofessional.net) helps job seekers find relevant
