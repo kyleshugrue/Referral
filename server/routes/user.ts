@@ -10,6 +10,8 @@ import { centralizedMatchDescriptionCommandCenter } from '../services/centralize
 import { snapshotService } from '../services/profile-snapshot-service';
 import type { ProfileData } from '../services/profile-snapshot-service';
 import { requireAuthJWT } from '../auth';
+import { requireCompleteRegistration } from '../middleware/require-complete-registration';
+import { requireAdmin } from '../middleware/require-admin';
 import { logger } from '../lib/logger';
 import { hasRequiredFieldsForMatching, shouldQueueInitialMatchJobs } from '../lib/profile-matching';
 
@@ -788,7 +790,7 @@ router.patch('/', requireAuthJWT, async (req, res) => {
 });
 
 // Admin route to fix missing coordinates for all users in the database
-router.post('/fix-all-coordinates', async (req, res) => {
+router.post('/fix-all-coordinates', requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
     console.log(`[UserRoute] Fixing missing coordinates for all users...`);
 
@@ -846,7 +848,7 @@ router.post('/fix-all-coordinates', async (req, res) => {
 });
 
 // Utility route to ensure all users have geocoded coordinates
-router.post('/ensure-coordinates', async (req, res) => {
+router.post('/ensure-coordinates', requireAuthJWT, requireCompleteRegistration, async (req, res) => {
   try {
     if (!req.user) {
       return res.status(401).json({ message: 'User not found' });

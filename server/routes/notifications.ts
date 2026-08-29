@@ -2,6 +2,7 @@ import { Router } from "express";
 import { storage } from "../storage";
 import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration.js';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -19,7 +20,7 @@ router.get("/counts", async (req, res) => {
     const counts = await storage.getUnreadNotificationCounts(req.user.id);
     res.json(counts);
   } catch (error) {
-    console.error("Error getting notification counts:", error);
+    logger.error("Error getting notification counts:", error);
     res.status(500).json({ error: "Failed to get notification counts" });
   }
 });
@@ -34,28 +35,12 @@ router.get("/", async (req, res) => {
     const notifications = await storage.getUnreadNotifications(req.user.id);
     res.json(notifications);
   } catch (error) {
-    console.error("Error getting notifications:", error);
+    logger.error("Error getting notifications:", error);
     res.status(500).json({ error: "Failed to get notifications" });
   }
 });
 
-// Mark a notification as read
-router.patch("/:id", async (req, res) => {
-  try {
-    const notificationId = parseInt(req.params.id);
-    if (isNaN(notificationId)) {
-      return res.status(400).json({ error: "Invalid notification ID" });
-    }
-
-    const updatedNotification = await storage.markNotificationAsRead(notificationId);
-    res.json(updatedNotification);
-  } catch (error) {
-    console.error("Error marking notification as read:", error);
-    res.status(500).json({ error: "Failed to mark notification as read" });
-  }
-});
-
-// Mark all notifications of a specific type as read
+// Static routes must be registered before parameterized routes.
 router.patch("/read-all/:type?", async (req, res) => {
   try {
     if (!req.user) {
@@ -67,8 +52,30 @@ router.patch("/read-all/:type?", async (req, res) => {
     
     res.json({ success: true });
   } catch (error) {
-    console.error("Error marking all notifications as read:", error);
+    logger.error("Error marking all notifications as read:", error);
     res.status(500).json({ error: "Failed to mark all notifications as read" });
+  }
+});
+
+// Mark a notification as read, scoped to the authenticated owner.
+router.patch("/:id", async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ message: 'User not found' });
+    }
+    const notificationId = parseInt(req.params.id);
+    if (isNaN(notificationId)) {
+      return res.status(400).json({ error: "Invalid notification ID" });
+    }
+
+    const updatedNotification = await storage.markNotificationAsRead(notificationId, req.user.id);
+    if (!updatedNotification) {
+      return res.status(404).json({ error: "Notification not found" });
+    }
+    res.json(updatedNotification);
+  } catch (error) {
+    logger.error("Error marking notification as read:", error);
+    res.status(500).json({ error: "Failed to mark notification as read" });
   }
 });
 
@@ -88,7 +95,7 @@ router.patch("/read-conversation/:conversationId", async (req, res) => {
     
     res.json({ success: true });
   } catch (error) {
-    console.error("Error marking conversation notifications as read:", error);
+    logger.error("Error marking conversation notifications as read:", error);
     res.status(500).json({ error: "Failed to mark conversation notifications as read" });
   }
 });
@@ -109,7 +116,7 @@ router.patch("/read-connection/:connectionId", async (req, res) => {
     
     res.json({ success: true });
   } catch (error) {
-    console.error("Error marking connection notifications as read:", error);
+    logger.error("Error marking connection notifications as read:", error);
     res.status(500).json({ error: "Failed to mark connection notifications as read" });
   }
 });

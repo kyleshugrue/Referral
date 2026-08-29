@@ -2,17 +2,20 @@ import { Router } from "express";
 import { costCalculator } from "../services/cost-calculator";
 import { locationCacheService } from "../services/location-cache";
 import { requireAuthJWT } from '../auth';
+import { requireCompleteRegistration } from '../middleware/require-complete-registration';
+import { requireAdmin } from '../middleware/require-admin';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
 // Get comprehensive cost analysis for all synergy matches
-router.get("/analysis", requireAuthJWT, async (req, res) => {
+router.get("/analysis", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
-    console.log(`[Cost Analysis] Getting comprehensive cost analysis for admin request`);
+    logger.debug('[Cost Analysis] Getting comprehensive cost analysis for admin request');
     
     const analysis = await costCalculator.calculateTotalCosts();
     
-    console.log(`[Cost Analysis] Completed analysis: $${analysis.estimatedCostUSD.toFixed(4)} total cost`);
+    logger.debug('[Cost Analysis] Completed comprehensive analysis');
     
     res.json({
       success: true,
@@ -25,7 +28,7 @@ router.get("/analysis", requireAuthJWT, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("[Cost Analysis] Error getting cost analysis:", error);
+    logger.error("[Cost Analysis] Error getting cost analysis:", error);
     res.status(500).json({ 
       success: false,
       message: "Failed to get cost analysis",
@@ -35,18 +38,18 @@ router.get("/analysis", requireAuthJWT, async (req, res) => {
 });
 
 // Get cost analysis for a specific user
-router.get("/user/:userId", requireAuthJWT, async (req, res) => {
+router.get("/user/:userId", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
     const userId = parseInt(req.params.userId);
     if (isNaN(userId)) {
       return res.status(400).json({ message: "Invalid user ID" });
     }
 
-    console.log(`[Cost Analysis] Getting cost analysis for user ${userId}`);
+    logger.debug('[Cost Analysis] Getting cost analysis for user', { userId });
     
     const userCosts = await costCalculator.calculateCostForUser(userId);
     
-    console.log(`[Cost Analysis] User ${userId} costs: $${userCosts.userCost.toFixed(4)}`);
+    logger.debug('[Cost Analysis] User cost analysis completed', { userId });
     
     res.json({
       success: true,
@@ -60,7 +63,7 @@ router.get("/user/:userId", requireAuthJWT, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error(`[Cost Analysis] Error getting user cost analysis:`, error);
+    logger.error('[Cost Analysis] Error getting user cost analysis:', error);
     res.status(500).json({ 
       success: false,
       message: "Failed to get user cost analysis",
@@ -70,9 +73,9 @@ router.get("/user/:userId", requireAuthJWT, async (req, res) => {
 });
 
 // Get scaling cost analysis for different user scales
-router.get("/scaling", requireAuthJWT, async (req, res) => {
+router.get("/scaling", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
-    console.log(`[Cost Analysis] Getting scaling cost analysis for admin request`);
+    logger.debug('[Cost Analysis] Getting scaling cost analysis for admin request');
     
     // Parse user scales from query parameters, default to standard scales
     const scalesParam = req.query.scales as string;
@@ -80,15 +83,20 @@ router.get("/scaling", requireAuthJWT, async (req, res) => {
     
     if (scalesParam) {
       try {
-        scales = scalesParam.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0);
-      } catch (error) {
-        console.warn('[Cost Analysis] Invalid scales parameter, using defaults:', error);
+        scales = scalesParam
+          .split(',')
+          .slice(0, 20)
+          .map(s => Number.parseInt(s.trim(), 10))
+          .filter(n => Number.isSafeInteger(n) && n > 0 && n <= 10_000_000);
+      } catch {
+        logger.warn('[Cost Analysis] Invalid scales parameter, using defaults');
       }
     }
+    if (scales.length === 0) scales = [10, 100, 1000, 10000, 100000];
     
     const scalingAnalysis = await costCalculator.getScalingCostAnalysis(scales);
     
-    console.log(`[Cost Analysis] Completed scaling analysis for ${scales.length} user scales`);
+    logger.debug('[Cost Analysis] Completed scaling analysis', { scaleCount: scales.length });
     
     res.json({
       success: true,
@@ -105,7 +113,7 @@ router.get("/scaling", requireAuthJWT, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("[Cost Analysis] Error getting scaling cost analysis:", error);
+    logger.error('[Cost Analysis] Error getting scaling cost analysis:', error);
     res.status(500).json({ 
       success: false,
       message: "Failed to get scaling cost analysis",
@@ -122,7 +130,7 @@ router.get("/my-costs", requireAuthJWT, async (req, res) => {
     }
     
     const userId = req.user.id;
-    console.log(`[Cost Analysis] Getting cost analysis for current user ${userId}`);
+    logger.debug('[Cost Analysis] Getting cost analysis for current user', { userId });
     
     const userCosts = await costCalculator.calculateCostForUser(userId);
     
@@ -138,7 +146,7 @@ router.get("/my-costs", requireAuthJWT, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error(`[Cost Analysis] Error getting current user cost analysis:`, error);
+    logger.error('[Cost Analysis] Error getting current user cost analysis:', error);
     res.status(500).json({ 
       success: false,
       message: "Failed to get your cost analysis",
@@ -148,9 +156,9 @@ router.get("/my-costs", requireAuthJWT, async (req, res) => {
 });
 
 // Get detailed cost breakdown and scaling projections
-router.get("/breakdown", requireAuthJWT, async (req, res) => {
+router.get("/breakdown", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
-    console.log(`[Cost Analysis] Getting detailed cost breakdown`);
+    logger.debug('[Cost Analysis] Getting detailed cost breakdown');
     
     const breakdown = await costCalculator.getDetailedCostBreakdown();
     
@@ -171,7 +179,7 @@ router.get("/breakdown", requireAuthJWT, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error(`[Cost Analysis] Error getting cost breakdown:`, error);
+    logger.error('[Cost Analysis] Error getting cost breakdown:', error);
     res.status(500).json({ 
       success: false,
       message: "Failed to get cost breakdown",
@@ -185,10 +193,16 @@ router.get("/estimate", async (req, res) => {
   try {
     const { matches = 1, users = 1 } = req.query;
     
-    const matchCount = Math.max(1, parseInt(matches as string) || 1);
-    const userCount = Math.max(1, parseInt(users as string) || 1);
+    const parsedMatches = Number.parseInt(matches as string, 10);
+    const parsedUsers = Number.parseInt(users as string, 10);
+    const matchCount = Number.isSafeInteger(parsedMatches)
+      ? Math.min(1_000_000, Math.max(1, parsedMatches))
+      : 1;
+    const userCount = Number.isSafeInteger(parsedUsers)
+      ? Math.min(1_000_000, Math.max(1, parsedUsers))
+      : 1;
     
-    console.log(`[Cost Analysis] Estimating costs for ${matchCount} matches across ${userCount} users`);
+    logger.debug('[Cost Analysis] Estimating costs', { matchCount, userCount });
     
     const breakdown = await costCalculator.getDetailedCostBreakdown();
     
@@ -242,7 +256,7 @@ router.get("/estimate", async (req, res) => {
       },
     });
   } catch (error) {
-    console.error(`[Cost Analysis] Error getting cost estimate:`, error);
+    logger.error('[Cost Analysis] Error getting cost estimate:', error);
     res.status(500).json({ 
       success: false,
       message: "Failed to get cost estimate",
@@ -252,13 +266,13 @@ router.get("/estimate", async (req, res) => {
 });
 
 // Get individual costs for every synergy match
-router.get("/individual-matches", requireAuthJWT, async (req, res) => {
+router.get("/individual-matches", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
     const { limit = 100, offset = 0 } = req.query;
     const limitNum = Math.min(1000, Math.max(1, parseInt(limit as string) || 100));
     const offsetNum = Math.max(0, parseInt(offset as string) || 0);
 
-    console.log(`[Cost Analysis] Getting individual match costs (limit: ${limitNum}, offset: ${offsetNum})`);
+    logger.debug('[Cost Analysis] Getting individual match costs', { limit: limitNum, offset: offsetNum });
     
     const individualMatches = await costCalculator.getAllIndividualMatchCosts(limitNum, offsetNum);
     
@@ -284,7 +298,7 @@ router.get("/individual-matches", requireAuthJWT, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error(`[Cost Analysis] Error getting individual match costs:`, error);
+    logger.error('[Cost Analysis] Error getting individual match costs:', error);
     res.status(500).json({ 
       success: false,
       message: "Failed to get individual match costs",
@@ -294,12 +308,12 @@ router.get("/individual-matches", requireAuthJWT, async (req, res) => {
 });
 
 // Get top cost users
-router.get("/top-users", requireAuthJWT, async (req, res) => {
+router.get("/top-users", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
     const { limit = 20 } = req.query;
     const limitNum = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
 
-    console.log(`[Cost Analysis] Getting top cost users (limit: ${limitNum})`);
+    logger.debug('[Cost Analysis] Getting top cost users', { limit: limitNum });
     
     const topUsers = await costCalculator.getTopCostUsers(limitNum);
     
@@ -322,7 +336,7 @@ router.get("/top-users", requireAuthJWT, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error(`[Cost Analysis] Error getting top cost users:`, error);
+    logger.error('[Cost Analysis] Error getting top cost users:', error);
     res.status(500).json({ 
       success: false,
       message: "Failed to get top cost users",
@@ -332,12 +346,12 @@ router.get("/top-users", requireAuthJWT, async (req, res) => {
 });
 
 // Get daily cost breakdown
-router.get("/daily-breakdown", requireAuthJWT, async (req, res) => {
+router.get("/daily-breakdown", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
     const { days = 30 } = req.query;
     const daysNum = Math.min(365, Math.max(1, parseInt(days as string) || 30));
 
-    console.log(`[Cost Analysis] Getting daily cost breakdown for last ${daysNum} days`);
+    logger.debug('[Cost Analysis] Getting daily cost breakdown', { days: daysNum });
     
     const dailyCosts = await costCalculator.getDailyCostBreakdown(daysNum);
     
@@ -360,7 +374,7 @@ router.get("/daily-breakdown", requireAuthJWT, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error(`[Cost Analysis] Error getting daily cost breakdown:`, error);
+    logger.error('[Cost Analysis] Error getting daily cost breakdown:', error);
     res.status(500).json({ 
       success: false,
       message: "Failed to get daily cost breakdown",
@@ -370,7 +384,7 @@ router.get("/daily-breakdown", requireAuthJWT, async (req, res) => {
 });
 
 // Get comprehensive cost report
-router.get("/comprehensive-report", requireAuthJWT, async (req, res) => {
+router.get("/comprehensive-report", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
     const { 
       includeIndividualMatches = 'false',
@@ -386,7 +400,7 @@ router.get("/comprehensive-report", requireAuthJWT, async (req, res) => {
       dailyBreakdownDays: Math.min(365, Math.max(1, parseInt(dailyBreakdownDays as string) || 30)),
     };
 
-    console.log(`[Cost Analysis] Generating comprehensive cost report with options:`, options);
+    logger.debug('[Cost Analysis] Generating comprehensive cost report', { optionKeys: Object.keys(options) });
     
     const report = await costCalculator.getComprehensiveReport(options);
     
@@ -408,7 +422,7 @@ router.get("/comprehensive-report", requireAuthJWT, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error(`[Cost Analysis] Error generating comprehensive report:`, error);
+    logger.error('[Cost Analysis] Error generating comprehensive report:', error);
     res.status(500).json({ 
       success: false,
       message: "Failed to generate comprehensive cost report",
@@ -418,9 +432,9 @@ router.get("/comprehensive-report", requireAuthJWT, async (req, res) => {
 });
 
 // Get location caching optimization statistics
-router.get("/location-cache-stats", requireAuthJWT, async (req, res) => {
+router.get("/location-cache-stats", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
-    console.log(`[Cost Analysis] Getting location cache optimization statistics`);
+    logger.debug('[Cost Analysis] Getting location cache optimization statistics');
     
     const cacheStats = await locationCacheService.getCacheStatistics();
     
@@ -449,7 +463,7 @@ router.get("/location-cache-stats", requireAuthJWT, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("[Cost Analysis] Error getting location cache stats:", error);
+    logger.error('[Cost Analysis] Error getting location cache stats:', error);
     res.status(500).json({ 
       success: false,
       message: "Failed to get location cache statistics",
@@ -459,9 +473,9 @@ router.get("/location-cache-stats", requireAuthJWT, async (req, res) => {
 });
 
 // Get comprehensive optimization report including both bidirectional and location caching
-router.get("/optimization-report", requireAuthJWT, async (req, res) => {
+router.get("/optimization-report", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
-    console.log(`[Cost Analysis] Generating comprehensive optimization report`);
+    logger.debug('[Cost Analysis] Generating comprehensive optimization report');
     
     // Get cost analysis with all optimizations
     const analysis = await costCalculator.calculateTotalCosts();
@@ -523,7 +537,7 @@ router.get("/optimization-report", requireAuthJWT, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("[Cost Analysis] Error generating optimization report:", error);
+    logger.error('[Cost Analysis] Error generating optimization report:', error);
     res.status(500).json({ 
       success: false,
       message: "Failed to generate optimization report",

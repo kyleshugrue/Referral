@@ -20,6 +20,7 @@
  */
 
 import { Request, Response, NextFunction } from 'express';
+import { logger } from '../lib/logger';
 
 /**
  * Middleware function that enforces registration completion
@@ -54,10 +55,11 @@ export function requireCompleteRegistration(
   const isAuthenticated = req.isAuthenticated() || authMethod === 'jwt' || authMethod === 'session';
   
   if (!isAuthenticated) {
-    console.warn(
-      `[Security:RegistrationGuard] [ReqID: ${requestId}] ` +
-      `BLOCKED - Unauthenticated access attempt to ${requestMethod} ${requestPath}`
-    );
+    logger.warn('[Security:RegistrationGuard] Blocked unauthenticated access', {
+      requestId,
+      method: requestMethod,
+      path: requestPath,
+    });
     
     res.status(401).json({
       error: 'Authentication required',
@@ -72,11 +74,11 @@ export function requireCompleteRegistration(
   // SECURITY CHECK 2: User Object Validation
   // Ensure user object exists and has required fields
   if (!user || typeof user.id !== 'number') {
-    console.error(
-      `[Security:RegistrationGuard] [ReqID: ${requestId}] ` +
-      `BLOCKED - Invalid user object for ${requestMethod} ${requestPath}. ` +
-      `User object: ${JSON.stringify(user)}`
-    );
+    logger.error('[Security:RegistrationGuard] Blocked invalid authentication state', {
+      requestId,
+      method: requestMethod,
+      path: requestPath,
+    });
     
     res.status(401).json({
       error: 'Invalid authentication state',
@@ -89,11 +91,13 @@ export function requireCompleteRegistration(
   // This is the PRIMARY DEFENSE against registration bypass attacks
   // The registrationCompleted flag must be explicitly true
   if (user.registrationCompleted !== true) {
-    console.warn(
-      `[Security:RegistrationGuard] [ReqID: ${requestId}] ` +
-      `BLOCKED - User ${user.id} attempted to access ${requestMethod} ${requestPath} ` +
-      `with incomplete registration. registrationCompleted=${user.registrationCompleted}`
-    );
+    logger.warn('[Security:RegistrationGuard] Blocked incomplete registration', {
+      requestId,
+      method: requestMethod,
+      path: requestPath,
+      userId: user.id,
+      registrationCompleted: user.registrationCompleted,
+    });
     
     res.status(403).json({
       error: 'Registration incomplete',
@@ -105,11 +109,12 @@ export function requireCompleteRegistration(
 
   // ALL SECURITY CHECKS PASSED
   // Log successful validation for audit trail
-  console.log(
-    `[Security:RegistrationGuard] [ReqID: ${requestId}] ` +
-    `ALLOWED - User ${user.id} accessing ${requestMethod} ${requestPath} ` +
-    `(registration completed)`
-  );
+  logger.debug('[Security:RegistrationGuard] Registration check passed', {
+    requestId,
+    method: requestMethod,
+    path: requestPath,
+    userId: user.id,
+  });
 
   // Allow request to proceed
   next();

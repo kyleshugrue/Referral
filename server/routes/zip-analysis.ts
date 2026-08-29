@@ -6,8 +6,15 @@
 import { Router } from 'express';
 import { geocodingService } from '../services/geocoding';
 import { zipCodeGeocoder } from '../services/zip-code-geocoder';
+import { requireAuthJWT } from '../auth';
+import { requireCompleteRegistration } from '../middleware/require-complete-registration';
+import { requireAdmin } from '../middleware/require-admin';
+import { logger } from '../lib/logger';
 
 const router = Router();
+router.use(requireAuthJWT);
+router.use(requireCompleteRegistration);
+router.use(requireAdmin);
 
 /**
  * GET /api/zip-analysis/stats
@@ -28,7 +35,7 @@ router.get('/stats', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('[ZipAnalysis] Error getting stats:', error);
+    logger.error('[ZipAnalysis] Error getting stats:', error);
     res.status(500).json({
       success: false,
       error: 'Failed to get ZIP code statistics'
@@ -44,7 +51,7 @@ router.post('/test-location', async (req, res) => {
   try {
     const { location } = req.body;
     
-    if (!location) {
+    if (typeof location !== 'string' || location.length === 0 || location.length > 200) {
       return res.status(400).json({
         success: false,
         error: 'Location is required'
@@ -70,7 +77,7 @@ router.post('/test-location', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('[ZipAnalysis] Error testing location:', error);
+    logger.error('[ZipAnalysis] Error testing location:', error);
     res.status(500).json({
       success: false,
       error: 'Failed to test location'
@@ -137,7 +144,7 @@ router.get('/coverage-report', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('[ZipAnalysis] Error generating coverage report:', error);
+    logger.error('[ZipAnalysis] Error generating coverage report:', error);
     res.status(500).json({
       success: false,
       error: 'Failed to generate coverage report'

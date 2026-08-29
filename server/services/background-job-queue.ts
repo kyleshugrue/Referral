@@ -13,6 +13,10 @@ import { snapshotService, type ProfileData } from './profile-snapshot-service';
 import { logger } from '../lib/logger';
 
 import type { JobStatus } from '../../shared/schema';
+import {
+  buildMatchGenerationIdempotencyKey,
+  getMatchGenerationScope,
+} from '../../shared/match-generation-contract';
 export type { JobStatus };
 export type JobType = 'MATCH_DESCRIPTION' | 'BATCH_PROFILES' | 'USER_PROFILE_UPDATE';
 
@@ -34,6 +38,11 @@ export interface JobMetadata {
   // Generation mode indicator for Worker VM to identify seed/initializer jobs
   // SUMMARY_STUB tells Worker VM to create GENERATING rows before processing per-target jobs
   mode?: 'SUMMARY_STUB' | 'PROFILE_UPDATE';
+  generationScope?: 'TARGETLESS_SEED' | 'DIRECTED_MATCH' | 'BATCH_PROFILES' | 'PROFILE_UPDATE';
+  regenerationEpoch?: number;
+  idempotencyKey?: string;
+  score?: number;
+  scoreEvidence?: string;
 }
 
 export interface JobResult {
@@ -264,8 +273,8 @@ export class BackgroundJobQueue {
     console.log(`[BackgroundJobQueue] Queueing job: ${jobType} for user ${userId}`);
     
     // Fetch current profile versions to populate top-level columns for staleness filtering
-    let userProfileVersion = metadata.userProfileVersion;
-    let targetUserProfileVersion = metadata.targetUserProfileVersion;
+    let userProfileVersion: number | undefined;
+    let targetUserProfileVersion: number | undefined;
     let userSnapshotId: number | undefined;
     let targetUserSnapshotId: number | undefined;
     
@@ -273,7 +282,10 @@ export class BackgroundJobQueue {
     try {
       const user = await this.storage.getUser(userId);
       if (user) {
-        userProfileVersion = user.profileVersion || 1;
+        if (user.profileVersion == null) {
+          throw new Error(`Cannot queue ${jobType}: user ${userId} has no profile version`);
+        }
+        userProfileVersion = user.profileVersion;
         metadata.userProfileVersion = userProfileVersion;
         
         // Check if user has currentSnapshotId, otherwise create new snapshot
@@ -294,18 +306,27 @@ export class BackgroundJobQueue {
           userSnapshotId = newSnapshot.id;
           console.log(`[BackgroundJobQueue] Created new snapshot ${userSnapshotId} for user ${userId}`);
         }
+      } else {
+        throw new Error(`Cannot queue ${jobType}: user ${userId} not found`);
       }
     } catch (error) {
       console.error(`[BackgroundJobQueue] Error creating snapshot for user ${userId}:`, error);
       // Don't fail job creation, continue without snapshot
     }
+
+    if (userProfileVersion == null) {
+      throw new Error(`Cannot queue ${jobType}: user ${userId} has no trustworthy profile version`);
+    }
     
     // Get or create snapshot for target user if present
-    if (metadata.targetUserId) {
+    if (metadata.targetUserId != null) {
       try {
         const targetUser = await this.storage.getUser(metadata.targetUserId);
         if (targetUser) {
-          targetUserProfileVersion = targetUser.profileVersion || 1;
+          if (targetUser.profileVersion == null) {
+            throw new Error(`Cannot queue ${jobType}: target user ${metadata.targetUserId} has no profile version`);
+          }
+          targetUserProfileVersion = targetUser.profileVersion;
           metadata.targetUserProfileVersion = targetUserProfileVersion;
           
           // Check if target user has currentSnapshotId, otherwise create new snapshot
@@ -326,13 +347,32 @@ export class BackgroundJobQueue {
             targetUserSnapshotId = newSnapshot.id;
             console.log(`[BackgroundJobQueue] Created new snapshot ${targetUserSnapshotId} for target user ${metadata.targetUserId}`);
           }
+        } else {
+          throw new Error(`Cannot queue ${jobType}: target user ${metadata.targetUserId} not found`);
         }
       } catch (error) {
         console.error(`[BackgroundJobQueue] Error creating snapshot for target user ${metadata.targetUserId}:`, error);
         // Don't fail job creation, continue without snapshot
       }
     }
+
+    if (metadata.targetUserId != null && targetUserProfileVersion == null) {
+      throw new Error(`Cannot queue ${jobType}: target user ${metadata.targetUserId} has no trustworthy profile version`);
+    }
     
+    const generationScope = getMatchGenerationScope(jobType, metadata.targetUserId, metadata.mode);
+    metadata.generationScope = generationScope;
+    const idempotencyKey = buildMatchGenerationIdempotencyKey({
+      jobType,
+      userId,
+      targetUserId: metadata.targetUserId,
+      userProfileVersion,
+      targetUserProfileVersion,
+      generationScope,
+      regenerationEpoch: metadata.regenerationEpoch
+    });
+    metadata.idempotencyKey = idempotencyKey;
+
     const jobData: InsertMatchGenerationJob = {
       userId,
       targetUserId: metadata.targetUserId,
@@ -342,6 +382,7 @@ export class BackgroundJobQueue {
       priority,
       userProfileVersion,
       targetUserProfileVersion,
+      idempotencyKey,
       userSnapshotId,
       targetUserSnapshotId,
       createdAt: new Date().toISOString(),
@@ -350,7 +391,7 @@ export class BackgroundJobQueue {
     };
 
     const job = await this.storage.createMatchGenerationJob(jobData);
-    console.log(`[BackgroundJobQueue] Created job ${job.id} (userVersion: ${userProfileVersion}, targetVersion: ${targetUserProfileVersion || 'N/A'}, userSnapshot: ${userSnapshotId || 'N/A'}, targetSnapshot: ${targetUserSnapshotId || 'N/A'})`);
+    console.log(`[BackgroundJobQueue] Reused or created job ${job.id} (scope: ${generationScope}, userVersion: ${userProfileVersion}, targetVersion: ${targetUserProfileVersion || 'N/A'}, userSnapshot: ${userSnapshotId || 'N/A'}, targetSnapshot: ${targetUserSnapshotId || 'N/A'})`);
     
     // Send PostgreSQL NOTIFY to alert worker VM that a new job is available
     try {
@@ -415,7 +456,8 @@ export class BackgroundJobQueue {
   async updateJobStatus(
     jobId: number,
     status: JobStatus,
-    result?: JobResult
+    result?: JobResult,
+    expectedStatus?: JobStatus
   ): Promise<void> {
     const updates: Partial<MatchGenerationJob> = {
       status,
@@ -424,7 +466,7 @@ export class BackgroundJobQueue {
       ...(['COMPLETED', 'FAILED'].includes(status)) && { completedAt: new Date().toISOString() }
     };
 
-    await this.storage.updateMatchGenerationJob(jobId, updates);
+    await this.storage.updateMatchGenerationJob(jobId, updates, expectedStatus);
     console.log(`[BackgroundJobQueue] Updated job ${jobId} status to ${status}`);
   }
 
@@ -435,19 +477,25 @@ export class BackgroundJobQueue {
     const job = await this.storage.getMatchGenerationJob(jobId);
     if (!job) return false;
 
+    const safeError = error
+      .replace(/https?:\/\/\S+/gi, '[redacted-url]')
+      .replace(/(?:api[_-]?key|token|secret|password)\s*[:=]\s*\S+/gi, '[redacted]')
+      .slice(0, 500);
     const shouldRetry = job.retryCount < job.maxRetries;
     
     if (shouldRetry) {
       await this.storage.updateMatchGenerationJob(jobId, {
         status: 'RETRYING',
         retryCount: job.retryCount + 1,
-        errorMessage: error
-      });
+        errorMessage: safeError
+      }, job.status);
       console.log(`[BackgroundJobQueue] Job ${jobId} will retry (attempt ${job.retryCount + 1}/${job.maxRetries})`);
       return true;
     } else {
       console.log(`[DeadLetter] Job ${jobId} moved to dead letter queue after ${job.retryCount} failed attempts`);
-      await this.storage.moveJobToDeadLetterQueue(jobId, error);
+      if (job.status === 'PROCESSING') {
+        await this.storage.moveJobToDeadLetterQueue(jobId, safeError);
+      }
       return false;
     }
   }
@@ -535,16 +583,16 @@ export class BackgroundJobQueue {
       }
 
       // Check if profile versions have changed since job creation
-      const userProfileVersion = currentUser.profileVersion || 1;
-      const targetUserProfileVersion = currentTargetUser.profileVersion || 1;
+      const userProfileVersion = currentUser.profileVersion;
+      const targetUserProfileVersion = currentTargetUser.profileVersion;
 
-      if (metadata.userProfileVersion && metadata.userProfileVersion < userProfileVersion) {
-        console.log(`[BackgroundJobQueue] Job ${job.id} is stale: user profile version ${metadata.userProfileVersion} < current ${userProfileVersion}`);
+      if (metadata.userProfileVersion == null || metadata.userProfileVersion !== userProfileVersion) {
+        console.log(`[BackgroundJobQueue] Job ${job.id} is stale: source profile version is missing or differs from current ${userProfileVersion}`);
         return true;
       }
 
-      if (metadata.targetUserProfileVersion && metadata.targetUserProfileVersion < targetUserProfileVersion) {
-        console.log(`[BackgroundJobQueue] Job ${job.id} is stale: target user profile version ${metadata.targetUserProfileVersion} < current ${targetUserProfileVersion}`);
+      if (metadata.targetUserProfileVersion == null || metadata.targetUserProfileVersion !== targetUserProfileVersion) {
+        console.log(`[BackgroundJobQueue] Job ${job.id} is stale: target profile version is missing or differs from current ${targetUserProfileVersion}`);
         return true;
       }
 
@@ -678,7 +726,7 @@ export class BackgroundJobQueue {
         await this.updateJobStatus(job.id, 'CANCELLED', { 
           success: false, 
           error: 'Job cancelled due to stale profile data or match justification' 
-        });
+        }, 'PROCESSING');
         return;
       }
       
@@ -705,7 +753,7 @@ export class BackgroundJobQueue {
       console.log(`${workerPrefix}Job ${job.id} completed in ${processingTime}ms (total ${totalTime}ms from enqueue)`);
       
       if (result.success) {
-        await this.updateJobStatus(job.id, 'COMPLETED', result);
+        await this.updateJobStatus(job.id, 'COMPLETED', result, 'PROCESSING');
         
         await this.checkAndNotifyMatchesReady(job.userId);
       } else {

@@ -18,6 +18,7 @@ describe('job status contract', () => {
       const parsed = insertMatchGenerationJobSchema.safeParse({
         userId: 1,
         jobType: 'MATCH_DESCRIPTION',
+        idempotencyKey: 'test-job-key',
         status,
       });
       expect(parsed.success, `status ${status} should be valid`).toBe(true);
@@ -39,6 +40,7 @@ describe('job status contract', () => {
     const parsed = insertMatchGenerationJobSchema.parse({
       userId: 1,
       jobType: 'MATCH_DESCRIPTION',
+      idempotencyKey: 'test-job-key',
     });
     expect(parsed.status).toBe('PENDING');
   });

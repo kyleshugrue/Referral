@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, index } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { relations, sql } from "drizzle-orm";
@@ -218,6 +218,7 @@ export const matchGenerationJobs = pgTable("match_generation_jobs", {
   priority: integer("priority").notNull().default(5), // 1=highest, 10=lowest
   userProfileVersion: integer("user_profile_version"),
   targetUserProfileVersion: integer("target_user_profile_version"),
+  idempotencyKey: text("idempotency_key").notNull(),
   // Snapshot IDs for rollback-proof job processing
   userSnapshotId: integer("user_snapshot_id"),
   targetUserSnapshotId: integer("target_user_snapshot_id"),
@@ -255,20 +256,25 @@ export const synergyMatches = pgTable("synergy_matches", {
   matchedUserId: integer("matched_user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
-  description: text("description").notNull(),
-  score: integer("score").notNull(),
+  description: text("description"),
+  score: integer("score"),
   matchReasons: text("match_reasons").array(),
+  scoreEvidence: text("score_evidence"),
   generationStatus: text("generation_status").notNull().default("PENDING"), // PENDING, GENERATING, READY, FAILED
   lastProfileUpdate: text("last_profile_update"), // Track when profiles were last updated
   templateUsed: text("template_used"), // Track which template was used
   userProfileVersion: integer("user_profile_version"), // Profile version when this match was generated
   matchedUserProfileVersion: integer("matched_user_profile_version"), // Target user's profile version when this match was generated
+  generationJobKey: text("generation_job_key"),
+  generationError: text("generation_error"),
   apiCallsUsed: integer("api_calls_used").notNull().default(0), // Track API usage
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
 }, (table) => ({
   userIdIdx: index("synergy_matches_user_id_idx").on(table.userId),
   matchedUserIdIdx: index("synergy_matches_matched_user_id_idx").on(table.matchedUserId),
+  directedPairUnique: uniqueIndex("synergy_matches_directed_pair_unique")
+    .on(table.userId, table.matchedUserId),
 }));
 
 // User blocks table to store blocked user relationships
@@ -447,12 +453,15 @@ export const insertSynergyMatchSchema = createInsertSchema(synergyMatches)
   .extend({
     userId: z.number(),
     matchedUserId: z.number(),
-    description: z.string(),
-    score: z.number(),
+    description: z.string().nullable().optional(),
+    score: z.number().nullable().optional(),
     matchReasons: z.array(z.string()).optional(),
+    scoreEvidence: z.string().nullable().optional(),
     generationStatus: z.enum(["PENDING", "GENERATING", "READY", "FAILED"]).default("PENDING"),
     lastProfileUpdate: z.string().optional(),
     templateUsed: z.string().optional(),
+    generationJobKey: z.string().nullable().optional(),
+    generationError: z.string().nullable().optional(),
     apiCallsUsed: z.number().default(0),
     createdAt: z.string(),
     updatedAt: z.string()

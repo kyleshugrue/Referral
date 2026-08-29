@@ -5,8 +5,13 @@
 
 import express from "express";
 import { hybridGeocodingService, type ClientLocationData } from "../services/hybrid-geocoding";
+import { requireAuthJWT } from "../auth";
+import { requireCompleteRegistration } from "../middleware/require-complete-registration";
+import { logger } from "../lib/logger";
 
 const router = express.Router();
+router.use(requireAuthJWT);
+router.use(requireCompleteRegistration);
 
 /**
  * POST /api/hybrid-locations/process
@@ -16,11 +21,13 @@ router.post("/process", async (req, res) => {
   try {
     const locationData: ClientLocationData = req.body;
     
-    if (!locationData.location) {
+    if (!locationData || typeof locationData.location !== "string" || locationData.location.length > 200) {
       return res.status(400).json({ error: "Location is required" });
     }
 
-    console.log('[HybridLocations] Processing location:', locationData);
+    logger.debug('[HybridLocations] Processing location', {
+      locationLength: locationData.location.length,
+    });
 
     // Use platform-aware processing with request headers
     const coordinates = await hybridGeocodingService.processClientLocation(locationData, req.headers);
@@ -39,7 +46,7 @@ router.post("/process", async (req, res) => {
       });
     }
   } catch (error) {
-    console.error('[HybridLocations] Error processing location:', error);
+    logger.error('[HybridLocations] Error processing location:', error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -52,11 +59,11 @@ router.post("/batch-process", async (req, res) => {
   try {
     const { locations }: { locations: ClientLocationData[] } = req.body;
     
-    if (!Array.isArray(locations) || locations.length === 0) {
+    if (!Array.isArray(locations) || locations.length === 0 || locations.length > 50) {
       return res.status(400).json({ error: "Locations array is required" });
     }
 
-    console.log('[HybridLocations] Batch processing', locations.length, 'locations');
+    logger.debug('[HybridLocations] Batch processing locations', { count: locations.length });
 
     const results = new Map<string, unknown>();
     
@@ -71,7 +78,7 @@ router.post("/batch-process", async (req, res) => {
           source: locationData.source || 'unknown'
         });
       } catch (error) {
-        console.error('[HybridLocations] Error processing location:', locationData.location, error);
+        logger.error('[HybridLocations] Error processing location:', error);
         results.set(locationData.location, {
           success: false,
           location: locationData.location,
@@ -87,7 +94,7 @@ router.post("/batch-process", async (req, res) => {
       results: Object.fromEntries(results)
     });
   } catch (error) {
-    console.error('[HybridLocations] Error in batch processing:', error);
+    logger.error('[HybridLocations] Error in batch processing:', error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -107,7 +114,7 @@ router.post("/distance", async (req, res) => {
       return res.status(400).json({ error: "Both location1 and location2 are required" });
     }
 
-    console.log('[HybridLocations] Calculating distance between:', location1, location2);
+    logger.debug('[HybridLocations] Calculating distance between locations');
 
     // Process both locations to get coordinates using platform-aware methods
     const coord1 = typeof location1 === 'string' 
@@ -138,7 +145,7 @@ router.post("/distance", async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('[HybridLocations] Error calculating distance:', error);
+    logger.error('[HybridLocations] Error calculating distance:', error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -159,11 +166,11 @@ router.post("/within-radius", async (req, res) => {
       radiusMiles: number
     } = req.body;
     
-    if (!location1 || !location2 || typeof radiusMiles !== 'number') {
+    if (!location1 || !location2 || typeof radiusMiles !== 'number' || !Number.isFinite(radiusMiles) || radiusMiles <= 0 || radiusMiles > 500) {
       return res.status(400).json({ error: "location1, location2, and radiusMiles are required" });
     }
 
-    console.log('[HybridLocations] Checking radius:', { location1, location2, radiusMiles });
+    logger.debug('[HybridLocations] Checking radius', { radiusMiles });
 
     const withinRadius = await hybridGeocodingService.isWithinRadius(location1, location2, radiusMiles, req.headers);
 
@@ -173,7 +180,7 @@ router.post("/within-radius", async (req, res) => {
       radiusMiles
     });
   } catch (error) {
-    console.error('[HybridLocations] Error checking radius:', error);
+    logger.error('[HybridLocations] Error checking radius:', error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -190,7 +197,7 @@ router.get("/cache-stats", async (req, res) => {
       stats
     });
   } catch (error) {
-    console.error('[HybridLocations] Error getting cache stats:', error);
+    logger.error('[HybridLocations] Error getting cache stats:', error);
     res.status(500).json({ error: "Internal server error" });
   }
 });

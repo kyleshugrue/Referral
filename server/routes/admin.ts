@@ -2,16 +2,22 @@ import { Router } from 'express';
 import { storage } from '../storage';
 import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration.js';
+import { requireAdmin } from '../middleware/require-admin';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
 // Chain both middlewares: auth first, then registration check
 router.use(requireAuthJWT);
 router.use(requireCompleteRegistration);
+router.use(requireAdmin);
 
 router.get('/dead-letters', async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit as string) || 50;
+    const requestedLimit = Number.parseInt(req.query.limit as string, 10);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.min(100, Math.max(1, requestedLimit))
+      : 50;
     
     const deadLetters = await storage.getDeadLetterJobs(limit);
     
@@ -21,7 +27,7 @@ router.get('/dead-letters', async (req, res) => {
       count: deadLetters.length
     });
   } catch (error) {
-    console.error('[Admin] Error fetching dead letter jobs:', error);
+    logger.error('[Admin] Error fetching dead letter jobs:', error);
     res.status(500).json({
       success: false,
       error: 'Failed to fetch dead letter jobs'
@@ -47,10 +53,10 @@ router.post('/dead-letters/:id/retry', async (req, res) => {
       message: `Dead letter job ${deadLetterId} has been re-queued`
     });
   } catch (error) {
-    console.error(`[Admin] Error retrying dead letter job ${req.params.id}:`, error);
+    logger.error('[Admin] Error retrying dead letter job:', error);
     res.status(500).json({
       success: false,
-      error: error instanceof Error ? error.message : 'Failed to retry dead letter job'
+      error: 'Failed to retry dead letter job'
     });
   }
 });

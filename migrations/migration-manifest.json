@@ -16,6 +16,10 @@
     {
       "file": "0003_session_store.sql",
       "sha256": "82cf5a0a7b552935849d4d9a34fd24749cbcea233e8dbbafc747d6b5ffd6fbcb"
+    },
+    {
+      "file": "0004_match_generation_idempotency.sql",
+      "sha256": "f939f44d48fcbc89c31eced60c2372ab5c56d14f33aa96169b106667f59c05e9"
     }
   ]
 }

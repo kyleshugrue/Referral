@@ -1,4 +1,5 @@
 import { Router } from "express";
+import type { Request, Response } from "express";
 import { storage } from "../storage";
 import { db } from "../db";
 import { messages, conversations, users } from "@shared/schema";
@@ -6,6 +7,7 @@ import { eq } from "drizzle-orm";
 import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration';
 import { validateDirectMessageInput, groupMessageSchema } from '../lib/message-validation';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -14,6 +16,10 @@ router.use(requireAuthJWT);
 router.use(requireCompleteRegistration);
 
 // Get messages between current user and another user
+// Register the static group route before the parameterized user route so
+// "/group" cannot be interpreted as a user ID.
+router.post("/group", createGroupMessageHandler);
+
 router.get("/:userId", async (req, res) => {
   try {
     if (!req.user) {
@@ -33,7 +39,7 @@ router.get("/:userId", async (req, res) => {
     res.json(messagesList);
 
   } catch (error) {
-    console.error("Error fetching messages:", error);
+    logger.error("Error fetching messages:", error);
     res.status(500).json({ 
       message: "Failed to fetch messages",
       error: error instanceof Error ? error.message : 'Unknown error'
@@ -57,6 +63,11 @@ router.post("/:userId", async (req, res) => {
       return res.status(400).json({ message: validation.message });
     }
 
+    const connection = await storage.getConnectionBetweenUsers(senderId, receiverId);
+    if (!connection) {
+      return res.status(403).json({ message: "Messages require an accepted connection" });
+    }
+
     // Create message using the storage interface
     const message = await storage.createMessage({
       senderId,
@@ -66,47 +77,33 @@ router.post("/:userId", async (req, res) => {
 
     // Send push notification to iOS native users only
     const pushTimestamp = new Date().toISOString();
-    console.log(`[${pushTimestamp}] [NewMessage-PUSH] 🚀 ENTERING push notification section for user ${receiverId}`);
+    logger.debug('[NewMessage-PUSH] Starting push notification', { pushTimestamp, receiverId });
     
     try {
-      console.log(`[${pushTimestamp}] [NewMessage-PUSH] 📦 Importing push notification service...`);
       const { sendNewMessageNotification } = await import('../services/push-notifications');
-      console.log(`[${pushTimestamp}] [NewMessage-PUSH] ✅ Push notification service imported successfully`);
-      
-      console.log(`[${pushTimestamp}] [NewMessage-PUSH] 📦 Importing storage service...`);
       const { storage: storageService } = await import('../storage');
-      console.log(`[${pushTimestamp}] [NewMessage-PUSH] ✅ Storage service imported successfully`);
-      
-      console.log(`[${pushTimestamp}] [NewMessage-PUSH] 👤 Fetching sender user ${senderId}...`);
       const senderUser = await storageService.getUserById(senderId);
       
       if (senderUser) {
-        const preview = validation.content.substring(0, 50);
-        console.log(`[${pushTimestamp}] [NewMessage-PUSH] ✅ Sender found: ${senderUser.fullName} (ID: ${senderId})`);
-        console.log(`[${pushTimestamp}] [NewMessage-PUSH] 📤 Calling sendNewMessageNotification(${receiverId}, "${senderUser.fullName}", "${preview}...")...`);
-        
         const pushResult = await sendNewMessageNotification(receiverId, senderUser.fullName, validation.content);
-        
-        console.log(`[${pushTimestamp}] [NewMessage-PUSH] 📊 Push notification result:`, pushResult);
-        if (pushResult) {
-          console.log(`[${pushTimestamp}] [NewMessage-PUSH] ✅ Push notification sent successfully to user ${receiverId}`);
-        } else {
-          console.warn(`[${pushTimestamp}] [NewMessage-PUSH] ⚠️ Push notification returned false (no tokens or failed) for user ${receiverId}`);
-        }
+        logger.debug('[NewMessage-PUSH] Push notification completed', {
+          pushTimestamp,
+          receiverId,
+          sent: Boolean(pushResult),
+        });
       } else {
-        console.error(`[${pushTimestamp}] [NewMessage-PUSH] ❌ Sender user ${senderId} not found, cannot send push`);
+        logger.warn('[NewMessage-PUSH] Sender not found; push skipped', { pushTimestamp, senderId });
       }
     } catch (pushError) {
-      console.error(`[${pushTimestamp}] [NewMessage-PUSH] ❌ EXCEPTION in push notification:`, pushError);
-      console.error(`[${pushTimestamp}] [NewMessage-PUSH] ❌ Error stack:`, pushError instanceof Error ? pushError.stack : 'No stack trace');
+      logger.error('[NewMessage-PUSH] Push notification failed:', pushError);
       // Don't fail the request if push notification fails
     }
     
-    console.log(`[${pushTimestamp}] [NewMessage-PUSH] 🏁 EXITING push notification section for user ${receiverId}`);
+    logger.debug('[NewMessage-PUSH] Push notification section finished', { pushTimestamp, receiverId });
 
     res.status(201).json(message);
   } catch (error) {
-    console.error('Error sending message:', error);
+    logger.error('Error sending message:', error);
     res.status(500).json({ 
       message: "Failed to send message",
       error: error instanceof Error ? error.message : 'Unknown error'
@@ -115,7 +112,7 @@ router.post("/:userId", async (req, res) => {
 });
 
 // Group message creation endpoint
-router.post("/group", async (req, res) => {
+async function createGroupMessageHandler(req: Request, res: Response) {
   try {
     if (!req.user) {
       return res.status(401).json({ message: 'User not found' });
@@ -137,18 +134,24 @@ router.post("/group", async (req, res) => {
     const connections = await storage.getConnections(senderId);
     const connectionUserIds = connections.map((conn) => conn.otherUser.id);
     
-    console.log("Group Chat - User connections:", connectionUserIds);
-    console.log("Group Chat - Requested members:", memberIds);
+    logger.debug("Group chat members validated against connections", {
+      connectionCount: connectionUserIds.length,
+      requestedMemberCount: memberIds.length,
+    });
     
     // Filter out the current user ID from the memberIds
     const memberIdsWithoutSelf = memberIds.filter((id: number) => id !== senderId);
-    console.log("Group Chat - Member IDs without self:", memberIdsWithoutSelf);
+    logger.debug("Group chat excluded sender from member list", {
+      memberCount: memberIdsWithoutSelf.length,
+    });
     
     // Get valid connections only (members that the current user is connected to)
     const validMemberIds = memberIdsWithoutSelf.filter((id: number) => 
       connectionUserIds.includes(id)
     );
-    console.log("Group Chat - Valid member IDs:", validMemberIds);
+    logger.debug("Group chat connection membership checked", {
+      validMemberCount: validMemberIds.length,
+    });
     
     // Identify actually invalid members (excluding current user)
     const invalidMembers = memberIdsWithoutSelf.filter((id: number) => 
@@ -156,7 +159,9 @@ router.post("/group", async (req, res) => {
     );
     
     if (invalidMembers.length > 0) {
-      console.log("Group Chat - Invalid members detected:", invalidMembers);
+      logger.warn("Group chat contains invalid members", {
+        invalidMemberCount: invalidMembers.length,
+      });
       return res.status(400).json({ 
         message: "Invalid members", 
         invalidMembers 
@@ -165,24 +170,24 @@ router.post("/group", async (req, res) => {
     
     // If no valid members after filtering, return an error
     if (validMemberIds.length === 0 && memberIdsWithoutSelf.length > 0) {
-      console.log("Group Chat - No valid members after filtering");
+      logger.warn("Group chat contains no valid members");
       return res.status(400).json({
         message: "No valid members found"
       });
     }
     
-    console.log("Group Chat - Proceeding with valid members:", validMemberIds);
+    logger.debug("Group chat proceeding with validated members", {
+      validMemberCount: validMemberIds.length,
+    });
     
     // Create a new conversation for the group chat
     let conversation;
     try {
       // Set user2Id properly - must be a real connection, not self
       const user2Id = validMemberIds.length > 0 ? validMemberIds[0] : senderId;
-      console.log(`Group Chat - Setting user2Id to: ${user2Id}`);
       
       // Create unique list of all members including sender
       const allGroupMembers = [...new Set([...validMemberIds, senderId])];
-      console.log(`Group Chat - All group members: ${allGroupMembers}`);
       
       // Create a group conversation
       conversation = await db.insert(conversations).values({
@@ -194,13 +199,12 @@ router.post("/group", async (req, res) => {
         lastMessageAt: new Date().toISOString()
       }).returning().execute();
       
-      console.log("Created conversation:", conversation);
       
       if (!conversation || conversation.length === 0) {
         throw new Error("Failed to create conversation");
       }
     } catch (err) {
-      console.error("Error creating conversation:", err);
+      logger.error("Error creating group conversation:", err);
       return res.status(500).json({ message: "Failed to create group chat conversation" });
     }
 
@@ -211,7 +215,6 @@ router.post("/group", async (req, res) => {
     
     // Always create at least one message for the sender
     try {
-      console.log("Group Chat - Creating message for sender");
       const senderMessage = await db.insert(messages).values({
         conversationId,
         senderId,
@@ -221,9 +224,8 @@ router.post("/group", async (req, res) => {
       }).returning().execute();
       
       sentMessages.push(senderMessage[0]);
-      console.log("Group Chat - Message created for sender");
     } catch (err) {
-      console.error("Group Chat - Error creating message for sender:", err);
+      logger.error("Group chat sender message creation failed:", err);
     }
     
     // First, verify each receiver ID exists in the database
@@ -238,17 +240,22 @@ router.post("/group", async (req, res) => {
           allMemberDetails.push({ id, valid: false, name: null });
         }
       } catch (err) {
-        console.error(`Group Chat - Error checking user ${id}:`, err);
-        allMemberDetails.push({ id, valid: false, name: null, error: String(err) });
+        logger.error("Group chat member validation failed:", err);
+        allMemberDetails.push({ id, valid: false, name: null });
       }
     }
     
-    console.log(`Group Chat - All member details:`, allMemberDetails);
+    logger.debug("Group chat member validation completed", {
+      memberCount: allMemberDetails.length,
+      validMemberCount: allMemberDetails.filter((member) => member.valid).length,
+    });
     
     // If any receivers are invalid, return an error
     const invalidReceivers = allMemberDetails.filter(m => !m.valid);
     if (invalidReceivers.length > 0) {
-      console.log(`Group Chat - Invalid receivers found:`, invalidReceivers);
+      logger.warn("Group chat contains invalid receivers", {
+        invalidReceiverCount: invalidReceivers.length,
+      });
       return res.status(400).json({ 
         message: "Invalid receiver ID", 
         invalidReceivers 
@@ -260,15 +267,10 @@ router.post("/group", async (req, res) => {
       try {
         // Final verification
         if (!receiverId || isNaN(receiverId) || receiverId === senderId) {
-          console.log(`Group Chat - Skipping invalid receiver ID: ${receiverId}`);
+          logger.warn("Group chat skipped invalid receiver");
           continue;
         }
         
-        console.log(`Group Chat - Sending message to receiver ${receiverId}`);
-        
-        // Find user details from our verified list
-        const userDetails = allMemberDetails.find(u => u.id === receiverId);
-        console.log(`Group Chat - Using verified user details:`, userDetails);
         
         // Create the message
         const message = await db.insert(messages).values({
@@ -280,9 +282,9 @@ router.post("/group", async (req, res) => {
         }).returning().execute();
         
         sentMessages.push(message[0]);
-        console.log(`Group Chat - Message sent successfully to receiver ${receiverId}`);
+        logger.debug("Group chat message sent", { receiverId });
       } catch (err) {
-        console.error(`Group Chat - Error sending message to user ${receiverId}:`, err);
+        logger.error("Group chat message delivery failed:", err);
         // Continue with other members even if one fails
       }
     }
@@ -293,12 +295,12 @@ router.post("/group", async (req, res) => {
       success: true
     });
   } catch (error) {
-    console.error('Error creating group chat:', error);
+    logger.error('Error creating group chat:', error);
     res.status(500).json({ 
       message: "Failed to create group chat",
       error: error instanceof Error ? error.message : 'Unknown error'
     });
   }
-});
+}
 
 export default router;

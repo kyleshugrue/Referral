@@ -1,4 +1,5 @@
 import { users, connections, connectionRequests, messages, conversations, synergyMatches, notifications, userBlocks, matchGenerationJobs, matchGenerationDeadLetters, fcmTokens, callbackNotificationQueue, refreshTokens, refreshTokenReuseEvents, type User, type Connection, type ConnectionRequest, type Message, type Conversation, type SynergyMatch, type InsertSynergyMatch, type Notification, type InsertNotification, type UserBlock, type MatchGenerationJob, type InsertMatchGenerationJob, type MatchGenerationDeadLetter, type InsertMatchGenerationDeadLetter, type CallbackNotification, type RefreshToken, type InsertRefreshToken, type InsertRefreshTokenReuseEvent, type InsertUser } from "@shared/schema";
+import { buildMatchGenerationIdempotencyKey, getMatchGenerationScope } from "@shared/match-generation-contract";
 import { db } from "./db";
 import { eq, or, and, not, inArray, desc, sql, asc, ilike, lte } from "drizzle-orm";
 import session from "express-session";
@@ -23,6 +24,7 @@ type UserWrite = Partial<InsertUser> & Record<string, unknown>;
 export interface IStorage {
   initialize(): Promise<void>;
   getUser(id: number): Promise<User | undefined>;
+  canUserAccessLegacyMedia(userId: number, reference: string): Promise<boolean>;
   getUserByEmail(email: string): Promise<User | undefined>;
   getUsersByFirebaseUid(firebaseUid: string): Promise<User[]>;
   createUser(user: UserWrite): Promise<User>;
@@ -40,11 +42,13 @@ export interface IStorage {
   deleteConnection(userId: number, otherUserId: number): Promise<void>;
   getAllPotentialConnections(userId: number, page?: number, perPage?: number, searchParams?: Partial<User>): Promise<{ profiles: User[], hasMore: boolean }>;
   getAllUsers(): Promise<User[]>;
-  getMatchingSynergies(userId: number): Promise<(User & { matchDescription?: string; matchScore?: number; matchReasons?: string[] })[]>;
-  generateMatchesForUser(userId: number): Promise<(User & { matchDescription?: string; matchScore?: number; matchReasons?: string[] })[]>;
+  getMatchingSynergies(userId: number): Promise<(User & { matchDescription?: string | null; matchScore?: number | null; matchReasons?: string[] })[]>;
+  generateMatchesForUser(userId: number): Promise<(User & { matchDescription?: string | null; matchScore?: number | null; matchReasons?: string[] })[]>;
   getSavedSynergyMatches(userId: number): Promise<(SynergyMatch & { matchedUser: User })[]>;
   getSynergyMatchById(id: number): Promise<SynergyMatch | null>;
   saveSynergyMatch(match: InsertSynergyMatch): Promise<SynergyMatch>;
+  claimSynergyMatchGeneration(match: InsertSynergyMatch & { generationJobKey: string }): Promise<SynergyMatch | undefined>;
+  updateSynergyMatchForJob(id: number, generationJobKey: string, updates: Partial<Omit<SynergyMatch, 'id' | 'userId' | 'matchedUserId' | 'createdAt'>>): Promise<boolean>;
   updateSynergyMatchById(id: number, updates: Partial<Omit<SynergyMatch, 'id' | 'userId' | 'matchedUserId' | 'createdAt'>>): Promise<void>;
   clearSynergyMatchesForUser(userId: number): Promise<void>;
   markMatchesAsGenerating(userId: number): Promise<number>;
@@ -71,7 +75,7 @@ export interface IStorage {
   getNotificationsForRelatedId(userId: number, relatedId: number, type: string): Promise<Notification[]>;
   getUnreadNotifications(userId: number): Promise<Notification[]>;
   getUnreadNotificationCounts(userId: number): Promise<{ messages: number, connectionRequests: number, newConnections: number }>;
-  markNotificationAsRead(notificationId: number): Promise<Notification>;
+  markNotificationAsRead(notificationId: number, userId: number): Promise<Notification | undefined>;
   markAllNotificationsAsRead(userId: number, type?: string): Promise<void>;
   markConversationNotificationsAsRead(userId: number, conversationId: number): Promise<void>;
   markConnectionNotificationsAsRead(userId: number, connectionId: number): Promise<void>;
@@ -81,7 +85,7 @@ export interface IStorage {
   getPendingMatchGenerationJobs(limit: number): Promise<MatchGenerationJob[]>;
   getPendingMatchGenerationJobsByPriority(limit: number, maxPriority: number): Promise<MatchGenerationJob[]>;
   claimPendingJob(maxPriority?: number): Promise<MatchGenerationJob | null>;
-  updateMatchGenerationJob(jobId: number, updates: Partial<MatchGenerationJob>): Promise<void>;
+  updateMatchGenerationJob(jobId: number, updates: Partial<MatchGenerationJob>, expectedStatus?: MatchGenerationJob['status']): Promise<boolean>;
   getMatchGenerationJobStats(): Promise<{ pending: number; processing: number; completed: number; failed: number; }>;
   deleteOldMatchGenerationJobs(cutoffDate: string): Promise<number>;
   // CMDCC: Centralized Match & Description Command Center methods
@@ -370,6 +374,22 @@ export class DatabaseStorage implements IStorage {
       }
       throw error;
     }
+  }
+
+  async canUserAccessLegacyMedia(userId: number, reference: string): Promise<boolean> {
+    const [owner] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(and(
+        eq(users.id, userId),
+        or(
+          eq(users.photo, reference),
+          eq(users.resumeUrl, reference),
+          sql`${reference} = ANY(${users.resumePreviewUrls})`,
+        ),
+      ))
+      .limit(1);
+    return Boolean(owner);
   }
 
   async getUserByEmail(email: string): Promise<User | undefined> {
@@ -931,18 +951,21 @@ export class DatabaseStorage implements IStorage {
             // Get current profile versions for both users
             const receiverUser = await this.getUser(receiverId);
             const senderUser = await this.getUser(senderId);
+            if (!receiverUser || !senderUser) {
+              throw new Error('Cannot create reciprocal synergy match without both current users');
+            }
             
             // Save a new synergy match for the receiver with the sender's description
             await this.saveSynergyMatch({
               userId: receiverId,
               matchedUserId: senderId,
               description: reverseMatch[0].description,
-              score: reverseMatch[0].score,
+              score: reverseMatch[0].score ?? undefined,
               matchReasons: reverseMatch[0].matchReasons ? [...reverseMatch[0].matchReasons] : [],
               generationStatus: 'READY',
               apiCallsUsed: 0,
-              userProfileVersion: receiverUser?.profileVersion || 1,
-              matchedUserProfileVersion: senderUser?.profileVersion || 1,
+              userProfileVersion: receiverUser.profileVersion,
+              matchedUserProfileVersion: senderUser.profileVersion,
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString()
             });
@@ -1315,6 +1338,10 @@ export class DatabaseStorage implements IStorage {
       logger.debug('Creating message:', message);
 
       // Get or create conversation for these users
+      const connection = await this.getConnectionBetweenUsers(message.senderId, message.receiverId);
+      if (!connection) {
+        throw new Error('Users are not connected');
+      }
       const conversation = await this.getOrCreateConversation(message.senderId, message.receiverId);
       logger.debug('Using conversation:', conversation);
 
@@ -1555,7 +1582,7 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-  async getMatchingSynergies(userId: number): Promise<(User & { matchDescription?: string; matchScore?: number; matchReasons?: string[] })[]> {
+  async getMatchingSynergies(userId: number): Promise<(User & { matchDescription?: string | null; matchScore?: number | null; matchReasons?: string[] })[]> {
     try {
       logger.debug(`[getMatchingSynergies] Getting saved matches for user ${userId}`);
       
@@ -1574,7 +1601,7 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-  async generateMatchesForUser(userId: number): Promise<(User & { matchDescription?: string; matchScore?: number; matchReasons?: string[] })[]> {
+  async generateMatchesForUser(userId: number): Promise<(User & { matchDescription?: string | null; matchScore?: number | null; matchReasons?: string[] })[]> {
     try {
       logger.debug(`[generateMatchesForUser] Starting match generation for user ${userId}`);
       const currentUser = await this.getUser(userId);
@@ -1653,11 +1680,14 @@ export class DatabaseStorage implements IStorage {
       const savedMatches = [];
       
       for (const match of matchingResult.matches) {
+        const userA = allUsers.find(u => u.id === match.userAId);
+        const userB = allUsers.find(u => u.id === match.userBId);
+        if (!userA || !userB) {
+          logger.warn(`[generateMatchesForUser] Skipping match with missing profile-version metadata`);
+          continue;
+        }
         // Save match for User A (current user) viewing User B
         try {
-          const userA = allUsers.find(u => u.id === match.userAId);
-          const userB = allUsers.find(u => u.id === match.userBId);
-          
           await this.saveSynergyMatch({
             userId: match.userAId,
             matchedUserId: match.userBId,
@@ -1666,8 +1696,8 @@ export class DatabaseStorage implements IStorage {
             matchReasons: match.matchReasons,
             generationStatus: 'READY',
             apiCallsUsed: 0,
-            userProfileVersion: userA?.profileVersion || 1,
-            matchedUserProfileVersion: userB?.profileVersion || 1,
+            userProfileVersion: userA.profileVersion,
+            matchedUserProfileVersion: userB.profileVersion,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
           });
@@ -1702,8 +1732,8 @@ export class DatabaseStorage implements IStorage {
             matchReasons: match.matchReasons,
             generationStatus: 'READY',
             apiCallsUsed: 0,
-            userProfileVersion: allUsers.find(u => u.id === match.userBId)?.profileVersion || 1,
-            matchedUserProfileVersion: allUsers.find(u => u.id === match.userAId)?.profileVersion || 1,
+            userProfileVersion: userB.profileVersion,
+            matchedUserProfileVersion: userA.profileVersion,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
           });
@@ -1791,7 +1821,10 @@ export class DatabaseStorage implements IStorage {
       
       // Get current user profile version for staleness validation
       const currentUser = await this.getUser(userId);
-      const currentUserProfileVersion = currentUser?.profileVersion || 1;
+      if (!currentUser) {
+        return [];
+      }
+      const currentUserProfileVersion = currentUser.profileVersion;
       
       // Database-level filtering: only select READY matches with current profile versions
       const result = await db
@@ -1805,6 +1838,7 @@ export class DatabaseStorage implements IStorage {
             eq(synergyMatches.userId, userId),
             // Hard constraint: only READY matches with current profile versions
             eq(synergyMatches.generationStatus, 'READY'),
+            sql`${synergyMatches.description} IS NOT NULL`,
             eq(synergyMatches.userProfileVersion, currentUserProfileVersion),
             eq(synergyMatches.matchedUserProfileVersion, users.profileVersion),
             // If we have users to exclude, exclude them from matches
@@ -1916,6 +1950,62 @@ export class DatabaseStorage implements IStorage {
       logger.error('[saveSynergyMatch] Error saving synergy match:', error);
       throw error;
     }
+  }
+
+  async claimSynergyMatchGeneration(
+    match: InsertSynergyMatch & { generationJobKey: string }
+  ): Promise<SynergyMatch | undefined> {
+    const { userId, matchedUserId, generationJobKey, userProfileVersion, matchedUserProfileVersion } = match;
+    const [created] = await db
+      .insert(synergyMatches)
+      .values(match)
+      .onConflictDoNothing({
+        target: [synergyMatches.userId, synergyMatches.matchedUserId]
+      })
+      .returning();
+
+    if (created) return created;
+
+    const [claimed] = await db
+      .update(synergyMatches)
+      .set({
+        ...match,
+        updatedAt: new Date().toISOString()
+      })
+      .where(and(
+        eq(synergyMatches.userId, userId),
+        eq(synergyMatches.matchedUserId, matchedUserId),
+        sql`(
+          ${synergyMatches.generationStatus} <> 'GENERATING'
+          OR ${synergyMatches.generationJobKey} IS NULL
+          OR ${synergyMatches.generationJobKey} = ${generationJobKey}
+          OR ${synergyMatches.userProfileVersion} IS DISTINCT FROM ${userProfileVersion ?? null}
+          OR ${synergyMatches.matchedUserProfileVersion} IS DISTINCT FROM ${matchedUserProfileVersion ?? null}
+        )`
+      ))
+      .returning();
+
+    return claimed;
+  }
+
+  async updateSynergyMatchForJob(
+    id: number,
+    generationJobKey: string,
+    updates: Partial<Omit<SynergyMatch, 'id' | 'userId' | 'matchedUserId' | 'createdAt'>>
+  ): Promise<boolean> {
+    const updated = await db
+      .update(synergyMatches)
+      .set({
+        ...updates,
+        updatedAt: new Date().toISOString()
+      })
+      .where(and(
+        eq(synergyMatches.id, id),
+        eq(synergyMatches.generationJobKey, generationJobKey)
+      ))
+      .returning({ id: synergyMatches.id });
+
+    return updated.length > 0;
   }
 
   async clearSynergyMatchesForUser(userId: number): Promise<void> {
@@ -2086,6 +2176,11 @@ export class DatabaseStorage implements IStorage {
 
   async getOrCreateConversation(user1Id: number, user2Id: number): Promise<Conversation> {
     try {
+      const connection = await this.getConnectionBetweenUsers(user1Id, user2Id);
+      if (!connection) {
+        throw new Error('Users are not connected');
+      }
+
       // Sort user IDs to ensure consistent ordering
       const [smallerId, largerId] = [user1Id, user2Id].sort((a, b) => a - b);
       logger.debug(`[Storage] Looking for conversation between users ${smallerId} and ${largerId}`);
@@ -2746,18 +2841,17 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-  async markNotificationAsRead(notificationId: number): Promise<Notification> {
+  async markNotificationAsRead(notificationId: number, userId: number): Promise<Notification | undefined> {
     try {
-      logger.debug(`[Storage] Marking notification ${notificationId} as read`);
+      logger.debug(`[Storage] Marking notification ${notificationId} as read for user ${userId}`);
       const [updatedNotification] = await db
         .update(notifications)
         .set({ read: true })
-        .where(eq(notifications.id, notificationId))
+        .where(and(
+          eq(notifications.id, notificationId),
+          eq(notifications.userId, userId),
+        ))
         .returning();
-        
-      if (!updatedNotification) {
-        throw new Error(`Notification ${notificationId} not found`);
-      }
       
       return updatedNotification;
     } catch (error) {
@@ -3053,7 +3147,20 @@ export class DatabaseStorage implements IStorage {
       const [newJob] = await db
         .insert(matchGenerationJobs)
         .values(job)
+        .onConflictDoNothing({ target: matchGenerationJobs.idempotencyKey })
         .returning();
+
+      if (!newJob) {
+        const [existingJob] = await db
+          .select()
+          .from(matchGenerationJobs)
+          .where(eq(matchGenerationJobs.idempotencyKey, job.idempotencyKey));
+        if (!existingJob) {
+          throw new Error(`Idempotent job ${job.idempotencyKey} was not found after conflict`);
+        }
+        logger.debug(`[createMatchGenerationJob] Reused existing job ${existingJob.id}`);
+        return existingJob;
+      }
       
       // Emit PostgreSQL NOTIFY to wake worker instantly (<1ms latency)
       try {
@@ -3157,14 +3264,13 @@ export class DatabaseStorage implements IStorage {
           LEFT JOIN users u2 ON j.target_user_id = u2.id
           WHERE j.status IN ('PENDING', 'RETRYING')
           AND ($2::integer IS NULL OR j.priority <= $2)
-          AND (
-            j.user_profile_version IS NULL 
-            OR j.user_profile_version = u1.profile_version
-          )
+          AND j.user_profile_version = u1.profile_version
           AND (
             j.target_user_id IS NULL
-            OR j.target_user_profile_version IS NULL
-            OR j.target_user_profile_version = u2.profile_version
+            OR (
+              j.target_user_profile_version IS NOT NULL
+              AND j.target_user_profile_version = u2.profile_version
+            )
           )
           ORDER BY j.priority ASC, j.created_at ASC
           LIMIT 1
@@ -3184,6 +3290,7 @@ export class DatabaseStorage implements IStorage {
         priority: number;
         user_profile_version: number | null;
         target_user_profile_version: number | null;
+        idempotency_key: string;
         user_snapshot_id: number | null;
         target_user_snapshot_id: number | null;
         created_at: string;
@@ -3211,6 +3318,7 @@ export class DatabaseStorage implements IStorage {
         priority: row.priority,
         userProfileVersion: row.user_profile_version,
         targetUserProfileVersion: row.target_user_profile_version,
+        idempotencyKey: row.idempotency_key,
         userSnapshotId: row.user_snapshot_id,
         targetUserSnapshotId: row.target_user_snapshot_id,
         createdAt: row.created_at,
@@ -3229,14 +3337,23 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-  async updateMatchGenerationJob(jobId: number, updates: Partial<MatchGenerationJob>): Promise<void> {
+  async updateMatchGenerationJob(
+    jobId: number,
+    updates: Partial<MatchGenerationJob>,
+    expectedStatus?: MatchGenerationJob['status']
+  ): Promise<boolean> {
     try {
-      await db
+      const updated = await db
         .update(matchGenerationJobs)
         .set(updates)
-        .where(eq(matchGenerationJobs.id, jobId));
+        .where(and(
+          eq(matchGenerationJobs.id, jobId),
+          expectedStatus ? eq(matchGenerationJobs.status, expectedStatus) : sql`1=1`
+        ))
+        .returning({ id: matchGenerationJobs.id });
       
       logger.debug(`[updateMatchGenerationJob] Updated job ${jobId}:`, updates);
+      return updated.length > 0;
     } catch (error) {
       logger.error(`[updateMatchGenerationJob] Error updating job ${jobId}:`, error);
       throw error;
@@ -3741,22 +3858,15 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-  async getDeadLetterJobs(limit: number): Promise<Array<MatchGenerationDeadLetter & { user: User }>> {
+  async getDeadLetterJobs(limit: number): Promise<MatchGenerationDeadLetter[]> {
     try {
       const deadLetters = await db
-        .select({
-          deadLetter: matchGenerationDeadLetters,
-          user: users
-        })
+        .select()
         .from(matchGenerationDeadLetters)
-        .leftJoin(users, eq(matchGenerationDeadLetters.userId, users.id))
         .orderBy(desc(matchGenerationDeadLetters.failedAt))
         .limit(limit);
 
-      return deadLetters.map(row => ({
-        ...row.deadLetter,
-        user: row.user as User
-      }));
+      return deadLetters;
     } catch (error) {
       logger.error('[DeadLetterQueue] Error fetching dead letter jobs:', error);
       throw error;
@@ -3781,6 +3891,34 @@ export class DatabaseStorage implements IStorage {
         jobType: deadLetter.jobType as InsertMatchGenerationJob['jobType'],
         status: 'PENDING',
         metadata: deadLetter.metadata || undefined,
+        idempotencyKey: (() => {
+          let metadata: {
+            targetUserId?: number;
+            userProfileVersion?: number;
+            targetUserProfileVersion?: number;
+            mode?: 'SUMMARY_STUB' | 'PROFILE_UPDATE';
+            regenerationEpoch?: number;
+          } = {};
+          try {
+            metadata = deadLetter.metadata ? JSON.parse(deadLetter.metadata) : {};
+          } catch {
+            // The canonical unknown-version identity remains deterministic.
+          }
+          const scope = getMatchGenerationScope(
+            deadLetter.jobType as MatchGenerationJob['jobType'],
+            metadata.targetUserId,
+            metadata.mode
+          );
+          return buildMatchGenerationIdempotencyKey({
+            jobType: deadLetter.jobType as MatchGenerationJob['jobType'],
+            userId: deadLetter.userId,
+            targetUserId: metadata.targetUserId,
+            userProfileVersion: metadata.userProfileVersion,
+            targetUserProfileVersion: metadata.targetUserProfileVersion,
+            generationScope: scope,
+            regenerationEpoch: metadata.regenerationEpoch
+          });
+        })(),
         priority: deadLetter.priority,
         createdAt: new Date().toISOString(),
         retryCount: 0,

@@ -293,6 +293,9 @@ class CentralizedMatchDescriptionCommandCenter {
         templateUsed: match.templateUsed,
         userProfileVersion: match.userProfileVersion,
         matchedUserProfileVersion: match.matchedUserProfileVersion,
+        scoreEvidence: match.scoreEvidence,
+        generationJobKey: match.generationJobKey,
+        generationError: match.generationError,
         apiCallsUsed: match.apiCallsUsed,
         createdAt: match.createdAt,
         updatedAt: match.updatedAt
@@ -450,6 +453,9 @@ class CentralizedMatchDescriptionCommandCenter {
           templateUsed: match.templateUsed,
           userProfileVersion: match.userProfileVersion,
           matchedUserProfileVersion: match.matchedUserProfileVersion,
+          scoreEvidence: match.scoreEvidence,
+          generationJobKey: match.generationJobKey,
+          generationError: match.generationError,
           apiCallsUsed: match.apiCallsUsed,
           createdAt: match.createdAt,
           updatedAt: match.updatedAt
@@ -685,7 +691,8 @@ class CentralizedMatchDescriptionCommandCenter {
               userId: updatedUser.id,
               targetUserId: match.matchedUserId,
               userProfileVersion: updatedUser.profileVersion,
-              matchReasons: match.matchReasons || []
+              matchReasons: match.matchReasons || [],
+              regenerationEpoch: Date.now()
             },
             1 // high priority
           );
@@ -788,7 +795,7 @@ class CentralizedMatchDescriptionCommandCenter {
               {
                 userId,
                 targetUserId: match.matchedUserId,
-                userProfileVersion: newProfile.profileVersion || 1,
+                userProfileVersion: newProfile.profileVersion,
                 updateType: 'update_description'
               },
               2 // Priority 2: Updated descriptions for viewing user
@@ -812,7 +819,7 @@ class CentralizedMatchDescriptionCommandCenter {
         {
           userId,
           profileUpdated: true,
-          userProfileVersion: newProfile.profileVersion || 1,
+          userProfileVersion: newProfile.profileVersion,
           updateType: 'new_match'
         },
         1 // Priority 1: New matches for viewing user
@@ -838,7 +845,7 @@ class CentralizedMatchDescriptionCommandCenter {
               {
                 userId: affectedUserId,
                 targetUserId: userId,
-                userProfileVersion: newProfile.profileVersion || 1,
+                userProfileVersion: newProfile.profileVersion,
                 updateType: 'reciprocal_update'
               },
               9 // Priority 9: Updated descriptions for matched users
@@ -875,7 +882,7 @@ class CentralizedMatchDescriptionCommandCenter {
           {
             userId,
             profileUpdated: true,
-            userProfileVersion: newProfile.profileVersion || 1,
+            userProfileVersion: newProfile.profileVersion,
             updateType: 'fallback_full'
           },
           1

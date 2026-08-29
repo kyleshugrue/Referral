@@ -72,7 +72,7 @@ export class SimpleMatchJobHelper {
               {
                 userId: viewingUserId,
                 targetUserId: matchedUserId,
-                userProfileVersion: viewingUser.profileVersion || 1,
+                userProfileVersion: viewingUser.profileVersion,
                 priority: 1
               },
               1,
@@ -91,7 +91,7 @@ export class SimpleMatchJobHelper {
               {
                 userId: matchedUserId,
                 targetUserId: viewingUserId,
-                userProfileVersion: matchedUser.profileVersion || 1,
+                userProfileVersion: matchedUser.profileVersion,
                 priority: 9
               },
               9,

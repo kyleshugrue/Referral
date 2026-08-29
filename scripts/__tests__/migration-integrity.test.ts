@@ -10,6 +10,7 @@ describe('migration integrity evidence', () => {
       '0001_violet_mad_thinker.sql',
       '0002_ws_ticket_sessions.sql',
       '0003_session_store.sql',
+      '0004_match_generation_idempotency.sql',
     ]);
     expect(result.manifestSha256).toMatch(/^[a-f0-9]{64}$/);
   });

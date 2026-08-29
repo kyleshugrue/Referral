@@ -789,7 +789,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         
         // Mark each notification related to this specific request as read
         for (const notification of relatedNotifications) {
-          await storage.markNotificationAsRead(notification.id);
+          await storage.markNotificationAsRead(notification.id, currentUserId);
         }
         
         logger.debug(`[Routes] Marked ${relatedNotifications.length} notification(s) as read for connection request ${requestId}`);
@@ -1268,18 +1268,44 @@ export async function registerRoutes(app: Express): Promise<void> {
   // a web session cookie (sent automatically by <img> tags on same-origin
   // pages) or an iOS JWT Bearer token. Unauthenticated requests get 401 and
   // client <img> onError handlers fall back to initials avatars.
-  // Note: current user photo/resume URLs all point at Firebase Storage; this
-  // gate protects the historical local files in uploads/.
-  app.use(
-    '/uploads',
-    requireAuthJWT,
-    express.static(path.join(process.cwd(), 'uploads'), {
-      setHeaders: (res) => {
-        // Authorized-only content: allow browser caching but never shared caches
-        res.setHeader('Cache-Control', 'private, max-age=3600');
-      },
-    })
-  );
+  // Legacy local media is authorized against the authenticated user's current
+  // database references before the file is served. Unknown or another user's
+  // path returns the same 404 to avoid an existence oracle.
+  app.get('/uploads/*', requireAuthJWT, async (req, res) => {
+    try {
+      const rawRelativePath = req.params[0];
+      if (typeof rawRelativePath !== 'string' || rawRelativePath.length === 0) {
+        return res.status(404).end();
+      }
+      const relativePath = decodeURIComponent(rawRelativePath);
+      const candidate = path.resolve(process.cwd(), 'uploads', relativePath);
+      const uploadRoot = path.resolve(process.cwd(), 'uploads');
+      const relativeToRoot = path.relative(uploadRoot, candidate);
+      if (!relativeToRoot || relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) {
+        return res.status(404).end();
+      }
+
+      const reference = `/uploads/${relativePath}`;
+      if (!await storage.canUserAccessLegacyMedia(req.user!.id, reference)) {
+        return res.status(404).end();
+      }
+
+      const resolvedPath = await fs.promises.realpath(candidate);
+      const resolvedRelativePath = path.relative(uploadRoot, resolvedPath);
+      if (!resolvedRelativePath || resolvedRelativePath.startsWith('..') || path.isAbsolute(resolvedRelativePath)) {
+        return res.status(404).end();
+      }
+
+      res.setHeader('Cache-Control', 'private, max-age=3600');
+      return res.sendFile(resolvedPath);
+    } catch (error) {
+      logger.warn('[Media] Legacy media lookup failed', {
+        requestId: req.requestId,
+        error,
+      });
+      return res.status(404).end();
+    }
+  });
 
   // Stable private media URLs resolve to short-lived Firebase signed URLs only
   // after application authentication. This keeps bucket objects private while

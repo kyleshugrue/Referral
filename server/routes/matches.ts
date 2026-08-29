@@ -75,7 +75,7 @@ router.get("/synergy/:profileVersion?", async (req, res) => {
         try {
           // STEP 1: Queue the "seed" job first (same structure CMDCC uses)
           // Worker VM recognizes mode: 'SUMMARY_STUB' as the signal to create GENERATING rows
-          const userProfileVersion = user.profileVersion || 1;
+          const userProfileVersion = user.profileVersion;
           await backgroundJobQueue.queueJob(req.user.id, 'MATCH_DESCRIPTION', {
             userId: req.user.id,
             userProfileVersion: userProfileVersion,
@@ -203,7 +203,7 @@ router.post("/synergy/trigger", async (req, res) => {
     console.log('[Matches Route] Using seed + prioritized job queueing for triggered match generation');
     try {
       // STEP 1: Queue the seed job first (Worker VM recognizes mode: 'SUMMARY_STUB')
-      const userProfileVersion = user.profileVersion || 1;
+      const userProfileVersion = user.profileVersion;
       await backgroundJobQueue.queueJob(req.user.id, 'MATCH_DESCRIPTION', {
         userId: req.user.id,
         userProfileVersion: userProfileVersion,
@@ -322,6 +322,8 @@ router.post("/synergy/regenerate", async (req, res) => {
     await backgroundJobQueue.queueJob(req.user.id, 'MATCH_DESCRIPTION', {
       userId: req.user.id,
       profileUpdated: true,
+      userProfileVersion: user.profileVersion,
+      regenerationEpoch: Date.now(),
       priority: 1
     }, 1);
     console.log('[Matches Route] Queued match regeneration job for user');
