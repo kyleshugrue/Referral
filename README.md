@@ -99,6 +99,7 @@ The public export is checked for exact file hashes, safe file types, privacy
 findings, and runtime equivalence with the canonical production artifact
 before publication. This protects the public source boundary without
 publishing private export-control policy or operational files.
+Every update reaches public `main` only after both private and public CI pass.
 
 ## Source boundary and limitations
 
