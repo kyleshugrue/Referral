@@ -36,6 +36,13 @@
       "when": 1788048000000,
       "tag": "0004_match_generation_idempotency",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788048001000,
+      "tag": "0005_relational_consistency",
+      "breakpoints": true
     }
   ]
 }

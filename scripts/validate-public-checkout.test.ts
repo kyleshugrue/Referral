@@ -156,7 +156,7 @@ describe("public clean-room orchestration", () => {
       .rejects.toThrow(/not exactly equivalent/);
   });
 
-  test("compares release evidence while excluding only Git identity metadata", async () => {
+  test("compares release evidence while excluding Git identity and public lockfile normalization", async () => {
     const canonical = await mkdtemp(path.join(os.tmpdir(), "canonical-evidence-test-"));
     const publicOutput = await mkdtemp(path.join(os.tmpdir(), "public-evidence-test-"));
     roots.push(canonical, publicOutput);
@@ -165,11 +165,13 @@ describe("public clean-room orchestration", () => {
       git: { commit: "canonical", tree: "canonical-tree", dirty: false },
       package: { name: "referral", version: "1.0.0" },
       runtime: { node: "v24.0.0", npm: "10.8.2" },
+      lockfile: { file: "package-lock.json", sha256: "canonical-lockfile" },
     };
     await writeFile(path.join(canonical, "release-manifest.json"), JSON.stringify(baseManifest));
     await writeFile(path.join(publicOutput, "release-manifest.json"), JSON.stringify({
       ...baseManifest,
       git: { commit: "temporary", tree: "temporary-tree", dirty: false },
+      lockfile: { file: "package-lock.json", sha256: "public-normalized-lockfile" },
     }));
     await expect(compareRuntimeOutputs({ canonicalRoot: canonical, publicRoot: publicOutput }))
       .resolves.toMatchObject({ fileCount: 1 });

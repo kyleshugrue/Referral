@@ -30,6 +30,8 @@ const SYNTHETIC_BUILD_ENV = Object.freeze({
   VITE_FIREBASE_APP_ID: "1:000000000000:web:0000000000000000000000",
   VITE_SMOKE_TEST: "true",
 });
+const REPLIT_LOCKFILE_PREFIX = ["http://package-firewall", ".replit.local/npm/"].join("");
+const PUBLIC_LOCKFILE_PREFIX = "https://registry.npmjs.org/";
 
 const fail = (message) => {
   throw new Error(message);
@@ -394,11 +396,16 @@ const comparableRuntimeFile = async (root, relativePath) => {
   delete normalized.git.commit;
   delete normalized.git.tree;
   delete normalized.git.dirty;
+  // Public exports replace Replit-only package firewall URLs with the public
+  // npm registry, so the public lockfile hash is intentionally different.
+  if (normalized.lockfile && typeof normalized.lockfile === "object") {
+    delete normalized.lockfile.sha256;
+  }
   const normalizedBytes = Buffer.from(JSON.stringify(normalized));
   return {
     size: normalizedBytes.length,
     sha256: sha256(normalizedBytes),
-    ignoredMetadata: ["git.commit", "git.tree", "git.dirty"],
+    ignoredMetadata: ["git.commit", "git.tree", "git.dirty", "lockfile.sha256"],
   };
 };
 
@@ -439,7 +446,21 @@ export const compareRuntimeOutputs = async ({ canonicalRoot, publicRoot }) => {
   const canonical = await runtimeEntries(canonicalRoot);
   const publicOutput = await runtimeEntries(publicRoot);
   if (JSON.stringify(canonical) !== JSON.stringify(publicOutput)) {
-    fail("Canonical and public runtime outputs are not exactly equivalent.");
+    const canonicalByPath = new Map(canonical.map((entry) => [entry.path, entry]));
+    const publicByPath = new Map(publicOutput.map((entry) => [entry.path, entry]));
+    const missing = canonical.filter((entry) => !publicByPath.has(entry.path)).map((entry) => entry.path);
+    const extra = publicOutput.filter((entry) => !canonicalByPath.has(entry.path)).map((entry) => entry.path);
+    const changed = canonical
+      .filter((entry) => publicByPath.has(entry.path) &&
+        JSON.stringify(entry) !== JSON.stringify(publicByPath.get(entry.path)))
+      .map((entry) => entry.path);
+    const summarize = (paths) => paths.length > 10
+      ? `${paths.slice(0, 10).join(", ")} (+${paths.length - 10} more)`
+      : paths.join(", ") || "none";
+    fail(
+      "Canonical and public runtime outputs are not exactly equivalent. " +
+      `Missing: ${summarize(missing)}. Extra: ${summarize(extra)}. Changed: ${summarize(changed)}.`,
+    );
   }
   return { fileCount: canonical.filter((entry) => entry.type === "file").length, entries: canonical.length };
 };
@@ -455,11 +476,27 @@ export const CLEAN_ROOM_COMMANDS = Object.freeze([
   ["bundle budget", ["run", "bundle:budget"]],
 ]);
 
+const normalizeGitHubLockfile = async (root) => {
+  const lockfilePath = path.join(root, "package-lock.json");
+  if (!existsSync(lockfilePath)) return;
+  const original = await readFile(lockfilePath, "utf8");
+  const count = original.split(REPLIT_LOCKFILE_PREFIX).length - 1;
+  const normalized = original.split(REPLIT_LOCKFILE_PREFIX).join(PUBLIC_LOCKFILE_PREFIX);
+  if (normalized.includes("package-firewall.replit.local")) {
+    fail("GitHub clean-room lockfile still contains an internal package firewall URL.");
+  }
+  if (count > 0) {
+    await writeFile(lockfilePath, normalized);
+    console.log(`Normalized ${count} Replit firewall lockfile URLs in disposable clean room.`);
+  }
+};
+
 const runQualityGates = async (root, paths) => {
   await mkdir(path.join(root, ".home"), { recursive: true });
   await mkdir(path.join(root, ".tmp"), { recursive: true });
   await mkdir(path.join(root, ".npm-cache"), { recursive: true });
   const env = buildCommandEnvironment(root, "quality");
+  await normalizeGitHubLockfile(root);
   const beforeInstall = await fileState(root, paths);
   run(root, "npm", CLEAN_ROOM_COMMANDS[0][1], CLEAN_ROOM_COMMANDS[0][0], env);
   run(root, "npm", CLEAN_ROOM_COMMANDS[1][1], CLEAN_ROOM_COMMANDS[1][0], env);

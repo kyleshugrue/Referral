@@ -9,11 +9,20 @@ afterEach(() => {
 
 const DEBUG_ROUTES = [
   '/auth-preview',
-  '/group-chat-debug',
   '/keyboard-test',
   '/device-test',
   '/synergy-button-demo',
 ];
+
+describe('retired group-chat routes stay unreachable', () => {
+  it('does not expose group-chat pages in development or production', () => {
+    for (const env of ['development', 'production']) {
+      process.env.NODE_ENV = env;
+      expect(isSpaRoute('/group-chat')).toBe(false);
+      expect(isSpaRoute('/group-chat-debug')).toBe(false);
+    }
+  });
+});
 
 describe('debug routes are unreachable in production (regression)', () => {
   it('are recognized as SPA routes outside production', () => {

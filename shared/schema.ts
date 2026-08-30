@@ -27,6 +27,13 @@ export const connectionRequests = pgTable("connection_requests", {
 }, (table) => ({
   senderIdIdx: index("connection_requests_sender_id_idx").on(table.senderId),
   receiverIdIdx: index("connection_requests_receiver_id_idx").on(table.receiverId),
+  pendingPairUniqueIdx: uniqueIndex("connection_requests_pending_pair_unique")
+    .using(
+      "btree",
+      sql`LEAST(${table.senderId}, ${table.receiverId})`,
+      sql`GREATEST(${table.senderId}, ${table.receiverId})`,
+    )
+    .where(sql`${table.status} = 'requested'`),
 }));
 
 // Connections table for accepted connections only
@@ -42,6 +49,12 @@ export const connections = pgTable("connections", {
 }, (table) => ({
   user1IdIdx: index("connections_user1_id_idx").on(table.user1Id),
   user2IdIdx: index("connections_user2_id_idx").on(table.user2Id),
+  unorderedPairUniqueIdx: uniqueIndex("connections_unordered_pair_unique")
+    .using(
+      "btree",
+      sql`LEAST(${table.user1Id}, ${table.user2Id})`,
+      sql`GREATEST(${table.user1Id}, ${table.user2Id})`,
+    ),
 }));
 
 // Location coordinates cache table
@@ -151,6 +164,13 @@ export const conversations = pgTable("conversations", {
 }, (table) => ({
   user1IdIdx: index("conversations_user1_id_idx").on(table.user1Id),
   user2IdIdx: index("conversations_user2_id_idx").on(table.user2Id),
+  directPairUniqueIdx: uniqueIndex("conversations_direct_pair_unique")
+    .using(
+      "btree",
+      sql`LEAST(${table.user1Id}, ${table.user2Id})`,
+      sql`GREATEST(${table.user1Id}, ${table.user2Id})`,
+    )
+    .where(sql`COALESCE(${table.isGroup}, false) = false`),
 }));
 
 // Update messages table to include conversation_id
@@ -287,7 +307,10 @@ export const userBlocks = pgTable("user_blocks", {
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
-});
+}, (table) => ({
+  directedPairUniqueIdx: uniqueIndex("user_blocks_directed_pair_unique")
+    .on(table.userId, table.blockedUserId),
+}));
 
 export const userBlocksRelations = relations(userBlocks, ({ one }) => ({
   user: one(users, {
@@ -372,7 +395,37 @@ export const insertUserSchema = createInsertSchema(users)
     readReceipts: z.boolean().default(true),
   });
 
+// Fields a signed-in user may edit through profile endpoints. Keep this
+// allowlist separate from insertUserSchema: authentication, identity,
+// registration state, derived matching state, and server-maintained caches
+// must never be accepted from an HTTP profile update.
+export const editableProfileSchema = insertUserSchema.pick({
+  fullName: true,
+  birthday: true,
+  title: true,
+  currentLocation: true,
+  desiredLocations: true,
+  industry: true,
+  currentCompany: true,
+  desiredCompanies: true,
+  matchingRadius: true,
+  yearsOfExperience: true,
+  bio: true,
+  photo: true,
+  resumeUrl: true,
+  resumePreviewUrls: true,
+  interests: true,
+  professionalInterests: true,
+  languages: true,
+  educationLevel: true,
+  institution: true,
+  profileVisible: true,
+  emailNotifications: true,
+  readReceipts: true,
+}).partial();
+
 export type InsertUser = z.infer<typeof insertUserSchema>;
+export type EditableProfile = z.infer<typeof editableProfileSchema>;
 export type User = typeof users.$inferSelect;
 export type UserProfileSnapshot = typeof userProfileSnapshots.$inferSelect;
 export type Connection = typeof connections.$inferSelect;

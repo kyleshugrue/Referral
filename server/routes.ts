@@ -2,6 +2,7 @@ import type { Express } from "express";
 import express from "express";
 import { storage } from "./storage";
 import { User } from "@shared/schema";
+import { editableProfileSchema } from "@shared/schema";
 import { uploadResume, uploadPhoto, processResumeUpload, verifyUploadedFile } from "./upload";
 import locationRouter from "./routes/locations";
 import messagesRouter from "./routes/messages";
@@ -36,7 +37,16 @@ import {
 } from "./lib/rate-limits";
 import { requireCompleteRegistration } from "./middleware/require-complete-registration";
 import { requireAuthJWT } from "./auth";
+import { requireTrustedOriginForSessionMutation } from "./lib/http-security";
+import { requireVerifiedFirebaseUser, getRegistrant } from "./lib/register-auth";
 import { notifyConnectionRequestRejected } from "./websocket-utils";
+import {
+  toConnectionDto,
+  toConnectionRequestDto,
+  toConversationDto,
+  toPublicProfileDto,
+  toSelfUserDto,
+} from "./lib/privacy-dto";
 import guidesRouter from "./seo/guides-router";
 
 const PRIVACY_LAST_MODIFIED = "2025-01-01";
@@ -396,7 +406,7 @@ export async function registerRoutes(app: Express): Promise<void> {
 
         const conversations = await storage.getUserConversations(currentUserId);
         logger.debug(`[Routes] Found ${conversations.length} conversations for user ${currentUserId}`);
-        res.json(conversations);
+        res.json(conversations.map(toConversationDto));
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         logger.error('[Routes] Error getting conversations:', errorMessage);
@@ -418,11 +428,11 @@ export async function registerRoutes(app: Express): Promise<void> {
             return res.status(400).json({ message: "Search query is required" });
         }
 
-        logger.debug(`[Routes] Searching conversations for user ${currentUserId} with query: "${searchQuery}"`);
+         logger.debug(`[Routes] Searching conversations for user ${currentUserId}`);
 
         const searchResults = await storage.searchConversationMessages(currentUserId, searchQuery.trim());
         logger.debug(`[Routes] Found ${searchResults.length} matching conversations for user ${currentUserId}`);
-        res.json(searchResults);
+        res.json(searchResults.map(toConversationDto));
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         logger.error('[Routes] Error searching conversations:', errorMessage);
@@ -448,7 +458,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         logger.debug(`[Routes] Getting or creating conversation between users ${currentUserId} and ${otherUserId}`);
 
         const conversation = await storage.getOrCreateConversation(currentUserId, otherUserId);
-        logger.debug(`[Routes] Conversation found or created:`, conversation);
+         logger.debug(`[Routes] Conversation found or created: ${conversation.id}`);
         
         // Use the markConversationNotificationsAsRead method to only mark messages 
         // for this specific conversation as read, not all message notifications
@@ -460,10 +470,13 @@ export async function registerRoutes(app: Express): Promise<void> {
             // Don't fail the main request if this fails
         }
         
-        res.json(conversation);
+        res.json(toConversationDto(conversation));
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         logger.error('[Routes] Error getting conversation:', errorMessage);
+        if (error instanceof Error && error.message === "Users are not connected") {
+          return res.status(403).json({ message: "Conversations require an accepted connection" });
+        }
         res.status(500).json({ message: "Failed to get conversation" });
     }
   });
@@ -506,7 +519,10 @@ export async function registerRoutes(app: Express): Promise<void> {
         Object.keys(searchParams).length > 0 ? searchParams : undefined
       );
       
-      res.json(potentialConnections);
+      res.json({
+        ...potentialConnections,
+        profiles: potentialConnections.profiles.map(toPublicProfileDto),
+      });
     } catch (error) {
       logger.error('Get potential connections error:', error);
       res.status(500).json({ message: "Failed to get potential connections" });
@@ -585,7 +601,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         .map(result => result.user);
 
       logger.debug(`[SharedInterests] Found ${filteredUsers.length} users with shared interests within ${radiusInMiles} miles`);
-      res.json({ profiles: filteredUsers, hasMore: false });
+      res.json({ profiles: filteredUsers.map(toPublicProfileDto), hasMore: false });
     } catch (error) {
       logger.error('Get shared interests error:', error);
       res.status(500).json({ message: "Failed to get shared interests" });
@@ -686,6 +702,12 @@ export async function registerRoutes(app: Express): Promise<void> {
         logger.debug("[ConnectionRequest] Duplicate request detected in storage layer");
         return res.status(200).json({ message: "Request already exists", isDuplicate: true });
       }
+      if (error instanceof Error && error.message === "Users are already connected") {
+        return res.status(409).json({ message: "Users are already connected" });
+      }
+      if (error instanceof Error && error.message === "Users cannot connect") {
+        return res.status(403).json({ message: "Connection is unavailable" });
+      }
       res.status(500).json({ message: "Failed to create connection request" });
     }
   });
@@ -702,7 +724,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       // This ensures notifications persist until explicitly acted upon
       // Removed automatic clearing of connection request notifications
       
-      res.json(pendingRequests);
+      res.json(pendingRequests.map(toConnectionRequestDto));
     } catch (error) {
       logger.error('Get pending requests error:', error);
       res.status(500).json({ message: "Failed to get pending requests" });
@@ -714,7 +736,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     if (!req.user) return res.sendStatus(401);
     try {
       const outgoingRequests = await storage.getOutgoingRequests(req.user.id);
-      res.json(outgoingRequests);
+      res.json(outgoingRequests.map(toConnectionRequestDto));
     } catch (error) {
       logger.error('Get outgoing requests error:', error);
       res.status(500).json({ message: "Failed to get outgoing requests" });
@@ -730,7 +752,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       // Removed automatic marking of new connection notifications as read
       // Notifications will now persist until specific connections are clicked
       
-      res.json(connections);
+      res.json(connections.map(toConnectionDto));
     } catch (error) {
       logger.error('Get connections error:', error);
       res.status(500).json({ message: "Failed to get connections" });
@@ -781,6 +803,16 @@ export async function registerRoutes(app: Express): Promise<void> {
         return res.status(400).json({ message: "Invalid status" });
       }
 
+      // Resolve and authorize the request before touching its notification.
+      // The request ID alone is not an authorization boundary.
+      const requestDetails = await storage.getConnectionRequestById(requestId);
+      if (!requestDetails) {
+        return res.status(404).json({ message: "Connection request not found" });
+      }
+      if (requestDetails.receiverId !== currentUserId) {
+        return res.status(403).json({ message: "Not authorized to update this request" });
+      }
+
       // Mark only this specific connection request notification as read
       // This prevents clearing all notification badges when accepting just one request
       try {
@@ -799,14 +831,8 @@ export async function registerRoutes(app: Express): Promise<void> {
       }
 
       if (status === "accepted") {
-        // Get the connection request details before accepting it
-        const requestDetails = await storage.getConnectionRequestById(requestId);
-        if (!requestDetails) {
-          return res.status(404).json({ message: "Connection request not found" });
-        }
-        
         // Accept connection request and create bidirectional connection
-        const connection = await storage.acceptConnectionRequest(requestId);
+        const connection = await storage.acceptConnectionRequest(requestId, currentUserId);
 
         if (!connection) {
           return res.status(404).json({ message: "Connection request not found" });
@@ -860,14 +886,11 @@ export async function registerRoutes(app: Express): Promise<void> {
         logger.debug(`Connection accepted successfully between users ${connection.user1Id} and ${connection.user2Id}`);
         res.json(connection);
       } else {
-        // Get the connection request details before rejecting it
-        const requestDetails = await storage.getConnectionRequestById(requestId);
-        if (!requestDetails) {
+        // Reject the connection request
+        const rejected = await storage.rejectConnectionRequest(requestId, currentUserId);
+        if (!rejected) {
           return res.status(404).json({ message: "Connection request not found" });
         }
-        
-        // Reject the connection request
-        await storage.rejectConnectionRequest(requestId);
         logger.debug(`Connection request ${requestId} rejected`);
         
         // Notify the original requester about the rejection via WebSocket
@@ -939,9 +962,8 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
 
     try {
-      // Log incoming request
-      logger.debug(`[User Update] Received update request for user ID: ${req.params.id}`, {
-        body: req.body,
+      logger.debug(`[User Update] Received profile update request`, {
+        requestedUserId: req.params.id,
         authenticatedUser: req.user.id
       });
       
@@ -962,6 +984,12 @@ export async function registerRoutes(app: Express): Promise<void> {
         logger.error(`[User Update] Empty update data for user ${userId}`);
         return res.status(400).json({ message: "No update data provided" });
       }
+
+      const parseResult = editableProfileSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(422).json({ message: "Invalid profile data" });
+      }
+      const profileData = parseResult.data;
       
       // Check if this is a profile update that would affect matching
       // CRITICAL: Only these 5 fields should trigger match regeneration
@@ -970,12 +998,12 @@ export async function registerRoutes(app: Express): Promise<void> {
         'desiredCompanies', 'desiredLocations'
       ];
       
-      const affectsMatching = Object.keys(req.body).some(key => 
+      const affectsMatching = Object.keys(profileData).some(key => 
         matchingRelatedFields.includes(key)
       );
       
       // Password changes are not supported - Firebase authentication is used exclusively
-      if (req.body.currentPassword || req.body.newPassword) {
+      if ((req.body as Record<string, unknown>).currentPassword || (req.body as Record<string, unknown>).newPassword) {
         logger.error(`[User Update] Password change requested for user ${userId} - not supported with Firebase authentication`);
         return res.status(400).json({ message: "Password changes must be done through Firebase authentication" });
       }
@@ -987,20 +1015,9 @@ export async function registerRoutes(app: Express): Promise<void> {
       }
       
       // Preserve existing AI matching preferences data when empty arrays are sent
-      const updateData = {
-        ...req.body,
-        // Only update AI matching preferences if they have actual content
-        desiredLocations: (req.body.desiredLocations !== undefined && req.body.desiredLocations.length > 0) ? 
-          req.body.desiredLocations : existingUser.desiredLocations,
-        desiredCompanies: (req.body.desiredCompanies !== undefined && req.body.desiredCompanies.length > 0) ? 
-          req.body.desiredCompanies : existingUser.desiredCompanies,
-        interests: (req.body.interests !== undefined && req.body.interests.length > 0) ? 
-          req.body.interests : existingUser.interests,
-        professionalInterests: (req.body.professionalInterests !== undefined && req.body.professionalInterests.length > 0) ? 
-          req.body.professionalInterests : existingUser.professionalInterests,
-        languages: (req.body.languages !== undefined && req.body.languages.length > 0) ? 
-          req.body.languages : existingUser.languages
-      };
+      // Use only the validated allowlist. Explicit empty strings/arrays are
+      // intentional clears and must not be replaced with old values.
+      const updateData = { ...profileData };
       
       logger.debug(`[User Update] Preserving AI matching preferences:`, {
         desiredLocations: updateData.desiredLocations,
@@ -1032,7 +1049,7 @@ export async function registerRoutes(app: Express): Promise<void> {
           logger.debug(`[User Update] Update affects matching criteria. Using CMDCC for bidirectional propagation...`);
           
           // Get the changed fields that affect matching
-          const changedFields = Object.keys(req.body).filter(key => 
+      const changedFields = Object.keys(profileData).filter(key => 
             matchingRelatedFields.includes(key)
           );
           
@@ -1058,13 +1075,10 @@ export async function registerRoutes(app: Express): Promise<void> {
       }
       
       logger.debug(`[User Update] Successfully updated user ${userId}`);
-      res.json(updatedUser);
+      res.json(toSelfUserDto(updatedUser));
     } catch (error) {
       logger.error('[User Update] Error:', error);
-      res.status(500).json({ 
-        message: "Failed to update user", 
-        error: error instanceof Error ? error.message : 'Unknown error'
-      });
+      res.status(500).json({ message: "Failed to update user" });
     }
   });
 
@@ -1109,7 +1123,10 @@ export async function registerRoutes(app: Express): Promise<void> {
       const blockedUsers = await storage.getBlockedUsers(currentUserId);
       logger.debug(`GET /api/users/blocked - Found ${blockedUsers.length} blocked users for user ${currentUserId}`);
       
-      res.status(200).json(blockedUsers);
+      res.status(200).json(blockedUsers.map(({ blockedUser, ...block }) => ({
+        ...block,
+        blockedUser: toPublicProfileDto(blockedUser),
+      })));
     } catch (error) {
       logger.error('Get blocked users error:', error);
       res.status(500).json({ 
@@ -1137,8 +1154,28 @@ export async function registerRoutes(app: Express): Promise<void> {
       if (!user) {
         return res.status(404).json({ message: "User not found" });
       }
-      
-      res.json(user);
+
+      if (user.id === req.user.id) {
+        return res.json(toSelfUserDto(user));
+      }
+
+      const [blockedByViewer, blockedByTarget, connection] = await Promise.all([
+        storage.isUserBlocked(req.user.id, user.id),
+        storage.isUserBlocked(user.id, req.user.id),
+        storage.getConnectionBetweenUsers(req.user.id, user.id),
+      ]);
+      if (
+        blockedByViewer ||
+        blockedByTarget ||
+        !user.emailVerified ||
+        !user.registrationCompleted ||
+        (!user.profileVisible && !connection)
+      ) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      // Peer profile responses intentionally use a narrow public projection.
+      return res.json(toPublicProfileDto(user));
     } catch (error) {
       logger.error('Get user error:', error);
       res.status(500).json({ message: "Failed to get user" });
@@ -1209,22 +1246,16 @@ export async function registerRoutes(app: Express): Promise<void> {
         return res.status(404).json({ message: "User not found" });
       }
       
-      // Check if user is already blocked
-      const isAlreadyBlocked = await storage.isUserBlocked(currentUserId, blockedUserId);
-      if (isAlreadyBlocked) {
-        return res.status(400).json({ message: "User is already blocked" });
-      }
-      
       // Block the user
       await storage.blockUser(currentUserId, blockedUserId);
       
       res.status(200).json({ message: "User blocked successfully" });
     } catch (error) {
       logger.error('Block user error:', error);
-      res.status(500).json({ 
-        message: "Failed to block user",
-        error: error instanceof Error ? error.message : "Unknown error"
-      });
+      if (error instanceof Error && error.message === "Cannot block yourself") {
+        return res.status(400).json({ message: "You cannot block yourself" });
+      }
+      res.status(500).json({ message: "Failed to block user" });
     }
   });
   
@@ -1242,22 +1273,13 @@ export async function registerRoutes(app: Express): Promise<void> {
         return res.status(400).json({ message: "Invalid user ID" });
       }
       
-      // Check if user is actually blocked
-      const isBlocked = await storage.isUserBlocked(currentUserId, blockedUserId);
-      if (!isBlocked) {
-        return res.status(400).json({ message: "User is not blocked" });
-      }
-      
       // Unblock the user
       await storage.unblockUser(currentUserId, blockedUserId);
       
       res.status(200).json({ message: "User unblocked successfully" });
     } catch (error) {
       logger.error('Unblock user error:', error);
-      res.status(500).json({ 
-        message: "Failed to unblock user",
-        error: error instanceof Error ? error.message : "Unknown error"
-      });
+      res.status(500).json({ message: "Failed to unblock user" });
     }
   });
   
@@ -1313,6 +1335,30 @@ export async function registerRoutes(app: Express): Promise<void> {
   app.get('/api/media/:mediaId', requireAuthJWT, async (req, res) => {
     try {
       const { firebaseStorageService } = await import('./services/firebase-storage');
+      const reference = `/api/media/${req.params.mediaId}`;
+      const owner = await storage.getUserByMediaReference(reference);
+      if (!owner) return res.status(404).json({ message: 'Media not found' });
+
+      const isOwner = owner.id === req.user!.id;
+      const isBlocked = !isOwner && (
+        await storage.isUserBlocked(req.user!.id, owner.id) ||
+        await storage.isUserBlocked(owner.id, req.user!.id)
+      );
+      if (isBlocked) return res.status(404).json({ message: 'Media not found' });
+
+      const isPhoto = owner.photo === reference;
+      const isResume = owner.resumeUrl === reference;
+      const isPreview = (owner.resumePreviewUrls ?? []).includes(reference);
+      if (!isPhoto && !isResume && !isPreview) {
+        return res.status(404).json({ message: 'Media not found' });
+      }
+      if (!isOwner && (!owner.emailVerified || !owner.registrationCompleted)) {
+        return res.status(404).json({ message: 'Media not found' });
+      }
+      if (!isOwner && !isPhoto && !(await storage.getConnectionBetweenUsers(req.user!.id, owner.id))) {
+        return res.status(404).json({ message: 'Media not found' });
+      }
+
       const signedUrl = await firebaseStorageService.getSignedReadUrlForMediaId(req.params.mediaId);
       res.setHeader('Cache-Control', 'private, no-store');
       return res.redirect(302, signedUrl);
@@ -1388,13 +1434,19 @@ export async function registerRoutes(app: Express): Promise<void> {
   */
 
   // Resume upload endpoint (for both authenticated and unauthenticated users during registration)
-  app.post('/api/upload/resume', uploadLimiter, uploadResume.single('resume'), async (req, res) => {
+  const requireUploadPrincipal = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (req.isAuthenticated() && req.user) return next();
+    return requireVerifiedFirebaseUser(req, res, next);
+  };
+
+  app.post('/api/upload/resume', uploadLimiter, requireTrustedOriginForSessionMutation, requireUploadPrincipal, uploadResume.single('resume'), async (req, res) => {
     try {
       if (!req.file) {
         return res.status(400).json({ message: 'No file uploaded' });
       }
 
-      const userId = req.isAuthenticated() ? req.user.id : undefined;
+       const userId = req.isAuthenticated() ? req.user.id : undefined;
+       const firebaseUid = !userId ? getRegistrant(req).uid : undefined;
       
       // Log authentication status for debugging
       if (userId) {
@@ -1432,7 +1484,8 @@ export async function registerRoutes(app: Express): Promise<void> {
         const firebaseResult = await firebaseStorageService.uploadResume(
           fileBuffer,
           req.file.originalname,
-          userId
+           userId,
+           firebaseUid
         );
 
         result = {
@@ -1451,7 +1504,9 @@ export async function registerRoutes(app: Express): Promise<void> {
             logger.debug('[Resume Upload] Could not clean up temp file:', error);
           }
         }
-      } else {
+       } else if (!userId) {
+         return res.status(503).json({ message: 'Managed media storage is unavailable' });
+       } else {
         logger.debug('[Resume Upload] Firebase Storage not available, using local processing');
         // Fallback to local processing
         result = await processResumeUpload(req.file);
@@ -1495,10 +1550,11 @@ export async function registerRoutes(app: Express): Promise<void> {
   });
 
   // Profile photo upload endpoint (two routes for backward compatibility)
-  app.post(['/api/upload/photo', '/api/upload/profile-photo'], uploadLimiter, uploadPhoto.single('photo'), async (req, res) => {
+  app.post(['/api/upload/photo', '/api/upload/profile-photo'], uploadLimiter, requireTrustedOriginForSessionMutation, requireUploadPrincipal, uploadPhoto.single('photo'), async (req, res) => {
     // Accept photos even if not authenticated (for registration process)
     // But log the authentication status for debugging
     const userId = req.isAuthenticated() ? req.user.id : undefined;
+    const firebaseUid = !userId ? getRegistrant(req).uid : undefined;
     if (userId) {
       logger.debug('[Photo Upload] Processing photo upload for authenticated user:', userId);
     } else {
@@ -1540,7 +1596,8 @@ export async function registerRoutes(app: Express): Promise<void> {
         const result = await firebaseStorageService.uploadProfilePicture(
           fileBuffer,
           req.file.originalname,
-          userId
+           userId,
+           firebaseUid
         );
 
         fileUrl = result.url;
@@ -1555,7 +1612,9 @@ export async function registerRoutes(app: Express): Promise<void> {
             logger.debug('[Photo Upload] Could not clean up temp file:', error);
           }
         }
-      } else {
+       } else if (!userId) {
+         return res.status(503).json({ message: 'Managed media storage is unavailable' });
+       } else {
         logger.debug('[Photo Upload] Firebase Storage not available, using local storage');
         // Fallback to local storage
         fileUrl = `/uploads/${path.basename(req.file.path)}`.replace(/\\/g, '/');
@@ -1605,7 +1664,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       // Verify internal API secret (constant-time comparison)
       if (!process.env.INTERNAL_API_SECRET) {
         logger.error('[Internal API] INTERNAL_API_SECRET not configured');
-        return res.status(500).json({ error: 'Internal API not configured' });
+        return res.status(401).json({ error: 'Unauthorized' });
       }
 
       if (!verifyInternalAuth(req.headers.authorization, process.env.INTERNAL_API_SECRET)) {
@@ -1654,7 +1713,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       // Verify internal API secret (constant-time comparison)
       if (!process.env.INTERNAL_API_SECRET) {
         logger.error('[Internal API] INTERNAL_API_SECRET not configured');
-        return res.status(500).json({ error: 'Internal API not configured' });
+        return res.status(401).json({ error: 'Unauthorized' });
       }
 
       if (!verifyInternalAuth(req.headers.authorization, process.env.INTERNAL_API_SECRET)) {

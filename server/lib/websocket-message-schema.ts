@@ -19,9 +19,9 @@ export const messageSchema = z.object({
     'matchesUpdated',
   ]),
   content: z.string().max(MAX_WEBSOCKET_CHAT_CONTENT_LENGTH).optional(),
-  receiverId: z.number().optional(),
-  partnerId: z.number().optional(),
-  requestId: z.number().optional(),
+  receiverId: z.number().int().positive().optional(),
+  partnerId: z.number().int().positive().optional(),
+  requestId: z.number().int().positive().optional(),
   timestamp: z.string().optional(),
   matchData: z
     .object({

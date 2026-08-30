@@ -25,6 +25,7 @@ import { verifyAccessToken } from '../lib/jwt-service';
 import { storage } from '../storage';
 import { logger } from '../lib/logger';
 import { logSecurityEvent, extractRequestMetadata } from '../lib/security-logger';
+import { requireTrustedOriginForSessionMutation } from '../lib/http-security';
 
 type AuthRequest = Request & {
   id?: string;
@@ -89,7 +90,8 @@ export async function requireAuthJWT(
               `for user ${user.id} accessing ${requestMethod} ${requestPath}`
             );
             
-            return next();
+             requireTrustedOriginForSessionMutation(req, res, next);
+             return;
           } else {
             // JWT is valid but user not found in database
             logger.warn(
@@ -158,7 +160,8 @@ export async function requireAuthJWT(
       `for user ${req.user.id} accessing ${requestMethod} ${requestPath}`
     );
     
-    return next();
+     requireTrustedOriginForSessionMutation(req, res, next);
+     return;
   }
 
   // AUTHENTICATION FAILED: Neither JWT nor session authentication succeeded

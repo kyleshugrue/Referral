@@ -10,7 +10,6 @@
 // gate rather than delete outright.
 const DEBUG_ROUTE_PATTERNS: RegExp[] = [
   /^\/auth-preview$/,
-  /^\/group-chat-debug$/,
   /^\/keyboard-test$/,
   /^\/device-test$/,
   /^\/synergy-button-demo$/,
@@ -40,7 +39,6 @@ const NO_INDEX_ROUTE_PATTERNS: RegExp[] = [
   /^\/profile$/,
   /^\/connections$/,
   /^\/chat\/[^/]+$/,
-  /^\/group-chat$/,
   /^\/requests$/,
   /^\/settings(\/.*)?$/,
   /^\/resume\/[^/]+(\/[^/]+)?$/,
@@ -66,7 +64,6 @@ const SPA_ROUTE_PATTERNS: RegExp[] = [
   /^\/profile$/,
   /^\/connections$/,
   /^\/chat\/[^/]+$/,
-  /^\/group-chat$/,
   /^\/requests$/,
   /^\/settings(\/blocked-accounts)?$/,
   /^\/resume\/[^/]+(\/[^/]+)?$/,

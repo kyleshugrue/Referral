@@ -36,8 +36,6 @@ const SettingsPage = lazy(() => import("@/pages/settings-page"));
 const BlockedAccountsPage = lazy(() => import("@/pages/blocked-accounts-page"));
 const MatchesSuggestionsPage = lazy(() => import("@/pages/matches-suggestions-page"));
 const ChatPage = lazy(() => import("@/pages/chat-page"));
-const GroupChatPage = lazy(() => import("@/pages/group-chat-page"));
-const GroupChatDebugPage = lazy(() => import("@/pages/group-chat-debug"));
 const ResumeViewPage = lazy(() => import("@/pages/resume-view-page"));
 const KeyboardTestPage = lazy(() => import("@/pages/keyboard-test"));
 const DeviceTestPage = lazy(() => import("@/pages/device-test"));
@@ -139,16 +137,6 @@ function Router() {
           path="/chat/:id" 
           component={() => <ChatPage />} 
         />
-        <ProtectedRoute 
-          path="/group-chat" 
-          component={() => <GroupChatPage />} 
-        />
-        {import.meta.env.DEV && (
-          <ProtectedRoute 
-            path="/group-chat-debug" 
-            component={() => <GroupChatDebugPage />} 
-          />
-        )}
         {import.meta.env.DEV && (
           <ProtectedRoute 
             path="/keyboard-test" 

@@ -53,6 +53,8 @@ interface WebSocketMessage {
   [key: string]: unknown;
 }
 
+const isGroupChatFeatureEnabled = () => false;
+
 export default function ConnectionsPage() {
   // References and state for messaging functionality
   const messageContainerRef = useRef<HTMLDivElement>(null);
@@ -694,7 +696,7 @@ export default function ConnectionsPage() {
                     </form>
                   </div>
                 </div>
-              ) : isCreatingGroupChat ? (
+              ) : isGroupChatFeatureEnabled() && isCreatingGroupChat ? (
                 // Show group chat creation interface in the right panel
                 <div className="w-2/3 h-full flex flex-col bg-background overflow-hidden border-l">
                   {/* Group Chat Header - iOS-inspired style */}
@@ -1221,7 +1223,8 @@ export default function ConnectionsPage() {
         />
       )}
 
-      {/* Group Chat Dialog */}
+      {/* Group chat is intentionally unsupported; keep the retired UI unreachable. */}
+      {isGroupChatFeatureEnabled() && (
       <Dialog open={isGroupChatOpen} onOpenChange={setIsGroupChatOpen}>
         <DialogContent className="sm:max-w-[500px] max-h-[80vh] overflow-hidden flex flex-col">
           <DialogHeader>
@@ -1344,6 +1347,7 @@ export default function ConnectionsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      )}
     </div>
   );
 }

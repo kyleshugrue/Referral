@@ -11,6 +11,7 @@ describe('migration integrity evidence', () => {
       '0002_ws_ticket_sessions.sql',
       '0003_session_store.sql',
       '0004_match_generation_idempotency.sql',
+      '0005_relational_consistency.sql',
     ]);
     expect(result.manifestSha256).toMatch(/^[a-f0-9]{64}$/);
   });

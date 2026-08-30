@@ -4,6 +4,7 @@ import { backgroundJobQueue } from "../services/background-job-queue";
 import { simpleMatchJobHelper } from "../services/simple-match-job-helper";
 import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration';
+import { toMatchDto } from '../lib/privacy-dto';
 
 const router = Router();
 
@@ -143,10 +144,7 @@ router.get("/synergy/:profileVersion?", async (req, res) => {
         .replace(/\s*\(\d+\s*characters?(?:\s+excluding\s+spaces)?\)\s*$/gi, '')
         .trim();
       
-      return {
-        ...match,
-        matchDescription: cleanDescription
-      };
+      return toMatchDto({ ...match, matchDescription: cleanDescription });
     });
 
     return res.json({
@@ -157,7 +155,6 @@ router.get("/synergy/:profileVersion?", async (req, res) => {
     console.error("[Matches Route] Error getting synergy matches:", error);
     return res.status(500).json({ 
       message: "Failed to get synergy matches",
-      error: error instanceof Error ? error.message : 'Unknown error',
       apiConnectionIssue: true
     });
   }
@@ -241,10 +238,9 @@ router.post("/synergy/trigger", async (req, res) => {
       message: 'Match generation started'
     });
   } catch (error) {
-    console.error("[Matches Route] Error triggering synergy match generation:", error);
+    console.error("[Matches Route] Error triggering synergy match generation:", error instanceof Error ? error.name : 'unknown');
     return res.status(500).json({ 
       message: "Failed to trigger synergy match generation",
-      error: error instanceof Error ? error.message : 'Unknown error'
     });
   }
 });
@@ -290,10 +286,9 @@ router.get("/job-status/:userId", async (req, res) => {
       message: 'No active job or matches'
     });
   } catch (error) {
-    console.error("[Matches Route] Error checking job status:", error);
+    console.error("[Matches Route] Error checking job status:", error instanceof Error ? error.name : 'unknown');
     return res.status(500).json({ 
       message: "Failed to check job status",
-      error: error instanceof Error ? error.message : 'Unknown error'
     });
   }
 });
@@ -316,7 +311,7 @@ router.post("/synergy/regenerate", async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
-    console.log(`[Matches Route] Found user ${user.fullName}, forcing regeneration of matches`);
+    console.log(`[Matches Route] Found user ${req.user.id}, forcing regeneration of matches`);
     
     // Queue a job to regenerate matches in background
     await backgroundJobQueue.queueJob(req.user.id, 'MATCH_DESCRIPTION', {
@@ -334,11 +329,10 @@ router.post("/synergy/regenerate", async (req, res) => {
       pending: true
     });
   } catch (error) {
-    console.error("[Matches Route] Error regenerating synergy matches:", error);
+    console.error("[Matches Route] Error regenerating synergy matches:", error instanceof Error ? error.name : 'unknown');
     res.status(500).json({ 
       success: false,
       message: "Failed to regenerate synergy matches",
-      error: error instanceof Error ? error.message : 'Unknown error'
     });
   }
 });
@@ -359,11 +353,10 @@ router.delete("/synergy", async (req, res) => {
       message: "Successfully cleared all synergy matches" 
     });
   } catch (error) {
-    console.error("[Matches Route] Error clearing synergy matches:", error);
+    console.error("[Matches Route] Error clearing synergy matches:", error instanceof Error ? error.name : 'unknown');
     res.status(500).json({ 
       success: false,
       message: "Failed to clear synergy matches",
-      error: error instanceof Error ? error.message : 'Unknown error'
     });
   }
 });

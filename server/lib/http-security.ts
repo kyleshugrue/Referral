@@ -54,6 +54,41 @@ export function isOriginAllowed(
 }
 
 /**
+ * Protect cookie-authenticated unsafe requests from cross-site forgery.
+ *
+ * Native clients authenticate with a bearer token and do not need an Origin
+ * header. Browser sessions, however, must present an Origin that is both
+ * present and on the CORS allowlist.
+ */
+export function requireTrustedOriginForSessionMutation(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) : void {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    next();
+    return;
+  }
+
+  const authMethod = (req as Request & { authMethod?: 'jwt' | 'session' }).authMethod;
+  const isCookieAuthenticated = authMethod === 'session' ||
+    (!authMethod && (req.isAuthenticated?.() ?? false));
+
+  if (!isCookieAuthenticated) {
+    next();
+    return;
+  }
+
+  const origin = req.get('origin');
+  if (!origin || !isOriginAllowed(origin, process.env.NODE_ENV === 'production')) {
+    res.status(403).json({ message: 'Request origin not allowed' });
+    return;
+  }
+
+  next();
+}
+
+/**
  * Baseline security headers.
  *
  * - X-Content-Type-Options: prevents MIME sniffing everywhere.

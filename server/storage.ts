@@ -1,7 +1,7 @@
 import { users, connections, connectionRequests, messages, conversations, synergyMatches, notifications, userBlocks, matchGenerationJobs, matchGenerationDeadLetters, fcmTokens, callbackNotificationQueue, refreshTokens, refreshTokenReuseEvents, type User, type Connection, type ConnectionRequest, type Message, type Conversation, type SynergyMatch, type InsertSynergyMatch, type Notification, type InsertNotification, type UserBlock, type MatchGenerationJob, type InsertMatchGenerationJob, type MatchGenerationDeadLetter, type InsertMatchGenerationDeadLetter, type CallbackNotification, type RefreshToken, type InsertRefreshToken, type InsertRefreshTokenReuseEvent, type InsertUser } from "@shared/schema";
 import { buildMatchGenerationIdempotencyKey, getMatchGenerationScope } from "@shared/match-generation-contract";
 import { db } from "./db";
-import { eq, or, and, not, inArray, desc, sql, asc, ilike, lte } from "drizzle-orm";
+import { eq, or, and, not, inArray, desc, sql, asc, ilike, lte, isNull } from "drizzle-orm";
 import session from "express-session";
 import connectPg from "connect-pg-simple";
 import { pool } from "./db";
@@ -16,7 +16,6 @@ import {
 import { locationCacheService } from './services/location-cache';
 import { broadcastMatchRefresh, broadcastMatchRefreshToUsers } from './websocket-utils';
 import { logger } from './lib/logger';
-import { decideConnectionRequestCreation } from './lib/connection-policy';
 
 const PostgresSessionStore = connectPg(session);
 type UserWrite = Partial<InsertUser> & Record<string, unknown>;
@@ -25,19 +24,21 @@ export interface IStorage {
   initialize(): Promise<void>;
   getUser(id: number): Promise<User | undefined>;
   canUserAccessLegacyMedia(userId: number, reference: string): Promise<boolean>;
+  getUserByMediaReference(reference: string): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
   getUsersByFirebaseUid(firebaseUid: string): Promise<User[]>;
   createUser(user: UserWrite): Promise<User>;
   updateUser(id: number, user: UserWrite): Promise<User>;
   updateUserEmail(id: number, newEmail: string): Promise<User>;
+  linkUserToFirebaseUid(id: number, firebaseUid: string, emailVerified: boolean): Promise<User>;
   deleteUser(id: number): Promise<void>;
   createConnectionRequest(senderId: number, receiverId: number): Promise<ConnectionRequest>;
   getConnectionRequestById(requestId: number): Promise<ConnectionRequest | undefined>;
   getPendingRequestsReceived(userId: number): Promise<(ConnectionRequest & { sender: User })[]>;
   getPendingRequestsSent(userId: number): Promise<(ConnectionRequest & { receiver: User })[]>;
   getOutgoingRequests(userId: number): Promise<(ConnectionRequest & { receiver: User })[]>;
-  acceptConnectionRequest(requestId: number): Promise<Connection>;
-  rejectConnectionRequest(requestId: number): Promise<void>;
+  acceptConnectionRequest(requestId: number, receiverId?: number): Promise<Connection | undefined>;
+  rejectConnectionRequest(requestId: number, receiverId?: number): Promise<boolean>;
   getConnections(userId: number): Promise<(Connection & { otherUser: User })[]>;
   deleteConnection(userId: number, otherUserId: number): Promise<void>;
   getAllPotentialConnections(userId: number, page?: number, perPage?: number, searchParams?: Partial<User>): Promise<{ profiles: User[], hasMore: boolean }>;
@@ -390,6 +391,15 @@ export class DatabaseStorage implements IStorage {
       ))
       .limit(1);
     return Boolean(owner);
+  }
+
+  async getUserByMediaReference(reference: string): Promise<User | undefined> {
+    const allUsers = await db.select().from(users);
+    return allUsers.find((user) =>
+      user.photo === reference ||
+      user.resumeUrl === reference ||
+      (user.resumePreviewUrls ?? []).includes(reference)
+    );
   }
 
   async getUserByEmail(email: string): Promise<User | undefined> {
@@ -863,6 +873,32 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
+  async linkUserToFirebaseUid(id: number, firebaseUid: string, emailVerified: boolean): Promise<User> {
+    const [linked] = await db
+      .update(users)
+      .set({
+        firebaseUid,
+        ...(emailVerified ? { emailVerified: true } : {}),
+      })
+      .where(and(eq(users.id, id), isNull(users.firebaseUid)))
+      .returning();
+    if (linked) return linked;
+
+    const [sameIdentity] = await db.select().from(users).where(and(
+      eq(users.id, id),
+      eq(users.firebaseUid, firebaseUid),
+    )).limit(1);
+    if (sameIdentity) {
+      if (!emailVerified || sameIdentity.emailVerified) return sameIdentity;
+      const [verified] = await db.update(users)
+        .set({ emailVerified: true })
+        .where(eq(users.id, id))
+        .returning();
+      if (verified) return verified;
+    }
+    throw new Error("Firebase identity is already linked to another account");
+  }
+
   async deleteUser(id: number): Promise<void> {
     await db.delete(connections).where(
       or(
@@ -874,115 +910,53 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createConnectionRequest(senderId: number, receiverId: number): Promise<ConnectionRequest> {
-    // Check if there's an existing request in either direction
-    const existingRequest = await db
-      .select()
-      .from(connectionRequests)
-      .where(
-        and(
-          eq(connectionRequests.senderId, senderId),
-          eq(connectionRequests.receiverId, receiverId)
-        )
-      );
+    if (senderId === receiverId) throw new Error("Cannot connect with yourself");
 
-    const decision = decideConnectionRequestCreation(existingRequest.length);
-    if (!decision.allowed) {
-      throw new Error(decision.reason || "Connection request already exists");
-    }
+    const result = await db.transaction(async (tx) => {
+      const [blocked] = await tx
+        .select({ id: userBlocks.id })
+        .from(userBlocks)
+        .where(or(
+          and(eq(userBlocks.userId, senderId), eq(userBlocks.blockedUserId, receiverId)),
+          and(eq(userBlocks.userId, receiverId), eq(userBlocks.blockedUserId, senderId)),
+        ))
+        .limit(1);
+      if (blocked) throw new Error("Users cannot connect");
 
-    // If no request exists, create a new one with explicit status
-    const [request] = await db
-      .insert(connectionRequests)
-      .values({
-        senderId,
-        receiverId,
-        status: "requested", // Explicitly set the status
-        createdAt: new Date().toISOString(),
-      })
-      .returning();
+      const [existingConnection] = await tx
+        .select({ id: connections.id })
+        .from(connections)
+        .where(or(
+          and(eq(connections.user1Id, senderId), eq(connections.user2Id, receiverId)),
+          and(eq(connections.user1Id, receiverId), eq(connections.user2Id, senderId)),
+        ))
+        .limit(1);
+      if (existingConnection) throw new Error("Users are already connected");
 
-    // Create a notification for the receiver
-    try {
-      await this.createNotification({
+      const [request] = await tx
+        .insert(connectionRequests)
+        .values({
+          senderId,
+          receiverId,
+          status: "requested",
+          createdAt: new Date().toISOString(),
+        })
+        .onConflictDoNothing()
+        .returning();
+      if (!request) throw new Error("Connection request already exists");
+
+      await tx.insert(notifications).values({
         userId: receiverId,
         type: "connection_request",
         relatedId: request.id,
         read: false,
-        createdAt: new Date().toISOString()
-      });
-      logger.debug(`[Storage] Created connection request notification for user ${receiverId}`);
-      
-      // Check if the receiver has a synergy match with the sender
-      // This will ensure that when the receiver views the request, the synergy match banner will be displayed
-      try {
-        logger.debug(`[createConnectionRequest] Checking for synergy match between users ${receiverId} and ${senderId}`);
-        
-        // Check if the receiver has the sender as a synergy match
-        const synergyMatch = await db
-          .select()
-          .from(synergyMatches)
-          .where(
-            and(
-              eq(synergyMatches.userId, receiverId),
-              eq(synergyMatches.matchedUserId, senderId)
-            )
-          )
-          .limit(1);
-          
-        // If receiver doesn't have sender as synergy match, check if sender has receiver as synergy match
-        if (synergyMatch.length === 0) {
-          logger.debug(`[createConnectionRequest] No direct match found, checking if sender has receiver as synergy match`);
-          
-          const reverseMatch = await db
-            .select()
-            .from(synergyMatches)
-            .where(
-              and(
-                eq(synergyMatches.userId, senderId),
-                eq(synergyMatches.matchedUserId, receiverId)
-              )
-            )
-            .limit(1);
-            
-          // If sender has receiver as synergy match, create a new match for the receiver using the same description
-          if (reverseMatch.length > 0 && reverseMatch[0].description) {
-            logger.debug(`[createConnectionRequest] Found synergy match from sender to receiver, creating reciprocal match`);
-            
-            // Get current profile versions for both users
-            const receiverUser = await this.getUser(receiverId);
-            const senderUser = await this.getUser(senderId);
-            if (!receiverUser || !senderUser) {
-              throw new Error('Cannot create reciprocal synergy match without both current users');
-            }
-            
-            // Save a new synergy match for the receiver with the sender's description
-            await this.saveSynergyMatch({
-              userId: receiverId,
-              matchedUserId: senderId,
-              description: reverseMatch[0].description,
-              score: reverseMatch[0].score ?? undefined,
-              matchReasons: reverseMatch[0].matchReasons ? [...reverseMatch[0].matchReasons] : [],
-              generationStatus: 'READY',
-              apiCallsUsed: 0,
-              userProfileVersion: receiverUser.profileVersion,
-              matchedUserProfileVersion: senderUser.profileVersion,
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString()
-            });
-            
-            logger.debug(`[createConnectionRequest] Created reciprocal synergy match for connection request ${request.id}`);
-          }
-        }
-      } catch (synergyError) {
-        logger.error(`[createConnectionRequest] Error checking/creating synergy matches:`, synergyError);
-        // Don't throw the error here, this is just an enhancement
-      }
-    } catch (error) {
-      logger.error(`[Storage] Error creating connection request notification:`, error);
-      // Don't throw the error here, as the connection request was created successfully
-    }
+        createdAt: new Date().toISOString(),
+      }).onConflictDoNothing();
 
-    return request;
+      return request;
+    });
+
+    return result;
   }
   
   async getConnectionRequestById(requestId: number): Promise<ConnectionRequest | undefined> {
@@ -1044,7 +1018,15 @@ export class DatabaseStorage implements IStorage {
       }
     }
 
-    return requests;
+    const visibleRequests = [];
+    for (const request of requests) {
+      const [blockedByReceiver, blockedBySender] = await Promise.all([
+        this.isUserBlocked(userId, request.senderId),
+        this.isUserBlocked(request.senderId, userId),
+      ]);
+      if (!blockedByReceiver && !blockedBySender) visibleRequests.push(request);
+    }
+    return visibleRequests;
   }
 
   async getPendingRequestsSent(userId: number): Promise<(ConnectionRequest & { receiver: User })[]> {
@@ -1062,10 +1044,19 @@ export class DatabaseStorage implements IStorage {
       )
       .innerJoin(users, eq(connectionRequests.receiverId, users.id));
 
-    return result.map(({ request, receiver }) => ({
+    const requests = result.map(({ request, receiver }) => ({
       ...request,
       receiver,
     }));
+    const visibleRequests = [];
+    for (const request of requests) {
+      const [blockedBySender, blockedByReceiver] = await Promise.all([
+        this.isUserBlocked(userId, request.receiverId),
+        this.isUserBlocked(request.receiverId, userId),
+      ]);
+      if (!blockedBySender && !blockedByReceiver) visibleRequests.push(request);
+    }
+    return visibleRequests;
   }
 
   async getOutgoingRequests(userId: number): Promise<(ConnectionRequest & { receiver: User })[]> {
@@ -1073,28 +1064,72 @@ export class DatabaseStorage implements IStorage {
     return this.getPendingRequestsSent(userId);
   }
 
-  async acceptConnectionRequest(requestId: number): Promise<Connection> {
-    const [request] = await db
-      .select()
-      .from(connectionRequests)
-      .where(eq(connectionRequests.id, requestId));
+  async acceptConnectionRequest(requestId: number, receiverId?: number): Promise<Connection | undefined> {
+    const result = await db.transaction(async (tx) => {
+      const conditions = [
+        eq(connectionRequests.id, requestId),
+        eq(connectionRequests.status, "requested"),
+      ];
+      if (receiverId !== undefined) {
+        conditions.push(eq(connectionRequests.receiverId, receiverId));
+      }
 
-    if (!request) {
-      throw new Error("Connection request not found");
-    }
+      const [request] = await tx
+        .select()
+        .from(connectionRequests)
+        .where(and(...conditions))
+        .for("update");
 
-    const [connection] = await db
-      .insert(connections)
-      .values({
-        user1Id: request.senderId,
-        user2Id: request.receiverId,
-        createdAt: new Date().toISOString(),
-      })
-      .returning();
+      if (!request) return undefined;
 
-    await db
-      .delete(connectionRequests)
-      .where(eq(connectionRequests.id, requestId));
+      const [smallerId, largerId] = [request.senderId, request.receiverId].sort((a, b) => a - b);
+      let [connection] = await tx
+        .insert(connections)
+        .values({
+          user1Id: smallerId,
+          user2Id: largerId,
+          createdAt: new Date().toISOString(),
+        })
+        .onConflictDoNothing()
+        .returning();
+
+      if (!connection) {
+        [connection] = await tx
+          .select()
+          .from(connections)
+          .where(and(
+            eq(connections.user1Id, smallerId),
+            eq(connections.user2Id, largerId),
+          ))
+          .limit(1);
+      }
+
+      await tx
+        .delete(connectionRequests)
+        .where(eq(connectionRequests.id, requestId));
+
+      await tx.insert(notifications).values([
+        {
+          userId: request.senderId,
+          type: "new_connection",
+          relatedId: connection.id,
+          read: false,
+          createdAt: new Date().toISOString(),
+        },
+        {
+          userId: request.receiverId,
+          type: "new_connection",
+          relatedId: connection.id,
+          read: false,
+          createdAt: new Date().toISOString(),
+        },
+      ]).onConflictDoNothing();
+
+      return { connection, request };
+    });
+
+    if (!result) return undefined;
+    const { connection, request } = result;
       
     // Clear synergy matches for both users to ensure connected users don't appear in matches
     try {
@@ -1106,39 +1141,35 @@ export class DatabaseStorage implements IStorage {
       // Don't throw here - we still want to return the successful connection
     }
     
-    // Create notifications for new connection for both users
-    try {
-      // Create notification for the sender of the original request
-      await this.createNotification({
-        userId: request.senderId,
-        type: "new_connection",
-        relatedId: connection.id,
-        read: false,
-        createdAt: new Date().toISOString()
-      });
-      
-      // Also create a notification for the receiver who accepted the request
-      await this.createNotification({
-        userId: request.receiverId,
-        type: "new_connection",
-        relatedId: connection.id,
-        read: false,
-        createdAt: new Date().toISOString()
-      });
-      
-      logger.debug(`[Storage] Created new connection notifications for users ${request.senderId} and ${request.receiverId}`);
-    } catch (error) {
-      logger.error(`[Storage] Error creating new connection notifications:`, error);
-      // Don't throw the error here, as the connection was created successfully
-    }
-
     return connection;
   }
 
-  async rejectConnectionRequest(requestId: number): Promise<void> {
-    await db
-      .delete(connectionRequests)
-      .where(eq(connectionRequests.id, requestId));
+  async rejectConnectionRequest(requestId: number, receiverId?: number): Promise<boolean> {
+    const conditions = [
+      eq(connectionRequests.id, requestId),
+      eq(connectionRequests.status, "requested"),
+    ];
+    if (receiverId !== undefined) {
+      conditions.push(eq(connectionRequests.receiverId, receiverId));
+    }
+
+    return db.transaction(async (tx) => {
+      const deleted = await tx
+        .delete(connectionRequests)
+        .where(and(...conditions))
+        .returning({ id: connectionRequests.id, receiverId: connectionRequests.receiverId });
+      if (deleted.length === 0) return false;
+
+      await tx
+        .update(notifications)
+        .set({ read: true })
+        .where(and(
+          eq(notifications.userId, deleted[0].receiverId),
+          eq(notifications.type, "connection_request"),
+          eq(notifications.relatedId, requestId),
+        ));
+      return true;
+    });
   }
 
   async getConnections(userId: number): Promise<(Connection & { otherUser: User, isNew?: boolean })[]> {
@@ -1176,6 +1207,12 @@ export class DatabaseStorage implements IStorage {
     const result = [];
     for (const conn of userConnections) {
       const otherUserId = conn.user1Id === userId ? conn.user2Id : conn.user1Id;
+      const [blockedByViewer, blockedByOther] = await Promise.all([
+        this.isUserBlocked(userId, otherUserId),
+        this.isUserBlocked(otherUserId, userId),
+      ]);
+      if (blockedByViewer || blockedByOther) continue;
+
       const [otherUser] = await db
         .select()
         .from(users)
@@ -1335,64 +1372,74 @@ export class DatabaseStorage implements IStorage {
 
   async createMessage(message: { senderId: number; receiverId: number; content: string; }): Promise<Message & { sender: User, receiver: User }> {
     try {
-      logger.debug('Creating message:', message);
+      return await db.transaction(async (tx) => {
+        const [connection] = await tx
+          .select({ id: connections.id })
+          .from(connections)
+          .where(or(
+            and(eq(connections.user1Id, message.senderId), eq(connections.user2Id, message.receiverId)),
+            and(eq(connections.user1Id, message.receiverId), eq(connections.user2Id, message.senderId)),
+          ))
+          .limit(1);
+        if (!connection) throw new Error("Users are not connected");
 
-      // Get or create conversation for these users
-      const connection = await this.getConnectionBetweenUsers(message.senderId, message.receiverId);
-      if (!connection) {
-        throw new Error('Users are not connected');
-      }
-      const conversation = await this.getOrCreateConversation(message.senderId, message.receiverId);
-      logger.debug('Using conversation:', conversation);
+        const [smallerId, largerId] = [message.senderId, message.receiverId].sort((a, b) => a - b);
+        let [conversation] = await tx
+          .insert(conversations)
+          .values({
+            user1Id: smallerId,
+            user2Id: largerId,
+            isGroup: false,
+            createdAt: new Date().toISOString(),
+            lastMessageAt: new Date().toISOString(),
+          })
+          .onConflictDoNothing()
+          .returning();
+        if (!conversation) {
+          [conversation] = await tx
+            .select()
+            .from(conversations)
+            .where(and(
+              eq(conversations.user1Id, smallerId),
+              eq(conversations.user2Id, largerId),
+              or(eq(conversations.isGroup, false), isNull(conversations.isGroup)),
+            ))
+            .limit(1);
+        }
+        if (!conversation) throw new Error("Failed to create conversation");
 
-      // Create the message
-      const [newMessage] = await db
-        .insert(messages)
-        .values({
-          senderId: message.senderId,
-          receiverId: message.receiverId,
-          content: message.content,
-          conversationId: conversation.id,
-          createdAt: new Date().toISOString(),
-        })
-        .returning();
+        const [newMessage] = await tx
+          .insert(messages)
+          .values({
+            senderId: message.senderId,
+            receiverId: message.receiverId,
+            content: message.content,
+            conversationId: conversation.id,
+            createdAt: new Date().toISOString(),
+          })
+          .returning();
 
-      // Update conversation's lastMessageAt
-      await db
-        .update(conversations)
-        .set({ lastMessageAt: new Date().toISOString() })
-        .where(eq(conversations.id, conversation.id));
+        await tx
+          .update(conversations)
+          .set({ lastMessageAt: new Date().toISOString() })
+          .where(eq(conversations.id, conversation.id));
 
-      // Get sender and receiver details
-      const [[sender], [receiver]] = await Promise.all([
-        db.select().from(users).where(eq(users.id, message.senderId)),
-        db.select().from(users).where(eq(users.id, message.receiverId))
-      ]);
+        const [[sender], [receiver]] = await Promise.all([
+          tx.select().from(users).where(eq(users.id, message.senderId)),
+          tx.select().from(users).where(eq(users.id, message.receiverId)),
+        ]);
+        if (!sender || !receiver) throw new Error("Could not find sender or receiver");
 
-      if (!sender || !receiver) {
-        throw new Error('Could not find sender or receiver');
-      }
-      
-      // Create a notification for the receiver
-      try {
-        await this.createNotification({
+        await tx.insert(notifications).values({
           userId: message.receiverId,
           type: "message",
           relatedId: newMessage.id,
           read: false,
-          createdAt: new Date().toISOString()
-        });
-        logger.debug(`[Storage] Created message notification for user ${message.receiverId}`);
-      } catch (notificationError) {
-        logger.error(`[Storage] Error creating message notification:`, notificationError);
-        // Don't throw here, as the message was created successfully
-      }
+          createdAt: new Date().toISOString(),
+        }).onConflictDoNothing();
 
-      return {
-        ...newMessage,
-        sender,
-        receiver
-      };
+        return { ...newMessage, sender, receiver };
+      });
     } catch (error) {
       logger.error('Error in createMessage:', error);
       throw error;
@@ -1516,6 +1563,9 @@ export class DatabaseStorage implements IStorage {
       
       // Base condition - exclude users who are already connected and blocked users
       conditions.push(not(inArray(users.id, excludeUserIds)));
+      conditions.push(eq(users.profileVisible, true));
+      conditions.push(eq(users.registrationCompleted, true));
+      conditions.push(eq(users.emailVerified, true));
       
       // Add name search if provided
       if (searchParams?.fullName && searchParams.fullName.trim() !== '') {
@@ -1639,6 +1689,9 @@ export class DatabaseStorage implements IStorage {
           and(
             not(eq(users.id, userId)),
             excludeUserIds.length > 0 ? not(inArray(users.id, excludeUserIds)) : sql`1=1`,
+            eq(users.profileVisible, true),
+            eq(users.registrationCompleted, true),
+            eq(users.emailVerified, true),
             // Filter out users with the same current employer (case-insensitive comparison)
             currentUser.currentCompany ? 
               sql`LOWER(${users.currentCompany}) != LOWER(${currentUser.currentCompany})` : 
@@ -1841,6 +1894,9 @@ export class DatabaseStorage implements IStorage {
             sql`${synergyMatches.description} IS NOT NULL`,
             eq(synergyMatches.userProfileVersion, currentUserProfileVersion),
             eq(synergyMatches.matchedUserProfileVersion, users.profileVersion),
+            eq(users.profileVisible, true),
+            eq(users.registrationCompleted, true),
+            eq(users.emailVerified, true),
             // If we have users to exclude, exclude them from matches
             excludeUserIds.length > 0 
               ? not(inArray(synergyMatches.matchedUserId, excludeUserIds)) 
@@ -2176,84 +2232,44 @@ export class DatabaseStorage implements IStorage {
 
   async getOrCreateConversation(user1Id: number, user2Id: number): Promise<Conversation> {
     try {
-      const connection = await this.getConnectionBetweenUsers(user1Id, user2Id);
-      if (!connection) {
-        throw new Error('Users are not connected');
-      }
+      return await db.transaction(async (tx) => {
+        const [connection] = await tx
+          .select({ id: connections.id })
+          .from(connections)
+          .where(or(
+            and(eq(connections.user1Id, user1Id), eq(connections.user2Id, user2Id)),
+            and(eq(connections.user1Id, user2Id), eq(connections.user2Id, user1Id)),
+          ))
+          .limit(1);
+        if (!connection) throw new Error("Users are not connected");
 
-      // Sort user IDs to ensure consistent ordering
-      const [smallerId, largerId] = [user1Id, user2Id].sort((a, b) => a - b);
-      logger.debug(`[Storage] Looking for conversation between users ${smallerId} and ${largerId}`);
-
-      // Check for existing conversations (might be multiple due to race conditions)
-      const existingConversations = await db
-        .select()
-        .from(conversations)
-        .where(
-          and(
-            eq(conversations.user1Id, smallerId),
-            eq(conversations.user2Id, largerId),
-            or(
-              eq(conversations.isGroup, false),
-              sql`is_group IS NULL`
-            )
-          )
-        )
-        .orderBy(desc(conversations.lastMessageAt));
-
-      // If any conversations exist, return the most recently active one
-      if (existingConversations.length > 0) {
-        const primaryConversation = existingConversations[0];
-        logger.debug(`[Storage] Found existing conversation:`, primaryConversation);
-        
-        // If we found multiple conversations for the same user pair, log it
-        if (existingConversations.length > 1) {
-          logger.debug(`[Storage] Found ${existingConversations.length} duplicate conversations between users ${smallerId} and ${largerId}`);
-        }
-        
-        return primaryConversation;
-      }
-
-      // If no conversation exists, create a new one with a transaction to prevent race conditions
-      logger.debug(`[Storage] Creating new conversation between users ${smallerId} and ${largerId}`);
-      
-      // Use a SQL transaction to prevent race conditions
-      const [newConversation] = await db.transaction(async (tx) => {
-        // Check again inside transaction
-        const [existingWithLock] = await tx
-          .select()
-          .from(conversations)
-          .where(
-            and(
-              eq(conversations.user1Id, smallerId),
-              eq(conversations.user2Id, largerId),
-              or(
-                eq(conversations.isGroup, false),
-                sql`is_group IS NULL`
-              )
-            )
-          );
-        
-        // If we found one with the lock, return it
-        if (existingWithLock) {
-          return [existingWithLock];
-        }
-        
-        // Otherwise insert a new one
-        return tx
+        const [smallerId, largerId] = [user1Id, user2Id].sort((a, b) => a - b);
+        let [conversation] = await tx
           .insert(conversations)
           .values({
             user1Id: smallerId,
             user2Id: largerId,
-            isGroup: false, // Explicitly set as non-group conversation
+            isGroup: false,
             createdAt: new Date().toISOString(),
             lastMessageAt: new Date().toISOString(),
           })
+          .onConflictDoNothing()
           .returning();
+        if (!conversation) {
+          [conversation] = await tx
+            .select()
+            .from(conversations)
+            .where(and(
+              eq(conversations.user1Id, smallerId),
+              eq(conversations.user2Id, largerId),
+              or(eq(conversations.isGroup, false), isNull(conversations.isGroup)),
+            ))
+            .orderBy(desc(conversations.lastMessageAt))
+            .limit(1);
+        }
+        if (!conversation) throw new Error("Failed to create conversation");
+        return conversation;
       });
-
-      logger.debug(`[Storage] Created new conversation:`, newConversation);
-      return newConversation;
     } catch (error) {
       logger.error('[Storage] Error in getOrCreateConversation:', error);
       throw error;
@@ -2264,7 +2280,10 @@ export class DatabaseStorage implements IStorage {
     const [conversation] = await db
       .select()
       .from(conversations)
-      .where(eq(conversations.id, conversationId));
+      .where(and(
+        eq(conversations.id, conversationId),
+        or(eq(conversations.isGroup, false), isNull(conversations.isGroup)),
+      ));
     return conversation;
   }
 
@@ -2276,9 +2295,12 @@ export class DatabaseStorage implements IStorage {
       const userConversations = await db.select()
         .from(conversations)
         .where(
-          or(
-            eq(conversations.user1Id, userId),
-            eq(conversations.user2Id, userId)
+          and(
+            or(
+              eq(conversations.user1Id, userId),
+              eq(conversations.user2Id, userId)
+            ),
+            or(eq(conversations.isGroup, false), isNull(conversations.isGroup)),
           )
         )
         .orderBy(desc(conversations.lastMessageAt));
@@ -2401,9 +2423,12 @@ export class DatabaseStorage implements IStorage {
       const userConversations = await db.select()
         .from(conversations)
         .where(
-          or(
-            eq(conversations.user1Id, userId),
-            eq(conversations.user2Id, userId)
+          and(
+            or(
+              eq(conversations.user1Id, userId),
+              eq(conversations.user2Id, userId)
+            ),
+            or(eq(conversations.isGroup, false), isNull(conversations.isGroup)),
           )
         );
 
@@ -2550,13 +2575,19 @@ export class DatabaseStorage implements IStorage {
   // Notification methods
   async createNotification(notification: InsertNotification): Promise<Notification> {
     try {
-      logger.debug('[Storage] Creating notification:', notification);
       const [newNotification] = await db
         .insert(notifications)
         .values(notification)
+        .onConflictDoNothing()
         .returning();
-        
-      return newNotification;
+      if (newNotification) return newNotification;
+      const [existing] = await db.select().from(notifications).where(and(
+        eq(notifications.userId, notification.userId),
+        eq(notifications.type, notification.type),
+        eq(notifications.relatedId, notification.relatedId),
+      )).limit(1);
+      if (!existing) throw new Error("Failed to create notification");
+      return existing;
     } catch (error) {
       logger.error('[Storage] Error creating notification:', error);
       throw error;
@@ -2949,6 +2980,61 @@ export class DatabaseStorage implements IStorage {
 
   // User block methods implementation
   async blockUser(userId: number, blockedUserId: number): Promise<UserBlock> {
+    if (userId === blockedUserId) throw new Error("Cannot block yourself");
+    return db.transaction(async (tx) => {
+      let [block] = await tx
+        .insert(userBlocks)
+        .values({ userId, blockedUserId, createdAt: new Date().toISOString() })
+        .onConflictDoNothing()
+        .returning();
+      if (!block) {
+        [block] = await tx.select().from(userBlocks).where(and(
+          eq(userBlocks.userId, userId),
+          eq(userBlocks.blockedUserId, blockedUserId),
+        )).limit(1);
+      }
+
+      await tx.delete(connections).where(or(
+        and(eq(connections.user1Id, userId), eq(connections.user2Id, blockedUserId)),
+        and(eq(connections.user1Id, blockedUserId), eq(connections.user2Id, userId)),
+      ));
+      await tx.delete(conversations).where(and(
+        or(
+          and(eq(conversations.user1Id, userId), eq(conversations.user2Id, blockedUserId)),
+          and(eq(conversations.user1Id, blockedUserId), eq(conversations.user2Id, userId)),
+        ),
+        or(eq(conversations.isGroup, false), isNull(conversations.isGroup)),
+      ));
+
+      const requestRows = await tx.delete(connectionRequests).where(or(
+        and(eq(connectionRequests.senderId, userId), eq(connectionRequests.receiverId, blockedUserId)),
+        and(eq(connectionRequests.senderId, blockedUserId), eq(connectionRequests.receiverId, userId)),
+      )).returning({ id: connectionRequests.id });
+      const messageRows = await tx.select({ id: messages.id }).from(messages).where(and(
+        eq(messages.senderId, blockedUserId),
+        eq(messages.receiverId, userId),
+      ));
+      const requestIds = requestRows.map(({ id }) => id);
+      const messageIds = messageRows.map(({ id }) => id);
+      if (requestIds.length || messageIds.length) {
+        await tx.update(notifications).set({ read: true }).where(and(
+          eq(notifications.userId, userId),
+          or(
+            requestIds.length
+              ? and(eq(notifications.type, "connection_request"), inArray(notifications.relatedId, requestIds))
+              : sql`false`,
+            messageIds.length
+              ? and(eq(notifications.type, "message"), inArray(notifications.relatedId, messageIds))
+              : sql`false`,
+          ),
+        ));
+      }
+      if (!block) throw new Error("Failed to create block");
+      return block;
+    });
+  }
+
+  async blockUserLegacy(userId: number, blockedUserId: number): Promise<UserBlock> {
     try {
       logger.debug(`[blockUser] Blocking user ${blockedUserId} by user ${userId}`);
       
@@ -3053,6 +3139,13 @@ export class DatabaseStorage implements IStorage {
   }
   
   async unblockUser(userId: number, blockedUserId: number): Promise<void> {
+    await db.delete(userBlocks).where(and(
+      eq(userBlocks.userId, userId),
+      eq(userBlocks.blockedUserId, blockedUserId),
+    ));
+  }
+
+  async unblockUserLegacy(userId: number, blockedUserId: number): Promise<void> {
     try {
       logger.debug(`[unblockUser] Unblocking user ${blockedUserId} by user ${userId}`);
       

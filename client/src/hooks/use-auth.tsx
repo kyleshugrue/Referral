@@ -159,9 +159,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         emailVerified: updatedVerificationStatus,
         platform: isIOS ? 'ios' : 'web' // Include platform for iOS token generation
       };
-      logger.debug("📤 [SYNC DEBUG] Request payload:", { 
-        ...requestPayload, 
-        hasToken: !!token
+      logger.debug("📤 [SYNC DEBUG] Firebase sync request prepared", {
+        hasToken: !!token,
+        platform: requestPayload.platform,
       });
       
       const res = await apiRequest("POST", "/api/firebase-auth", requestPayload);
@@ -365,10 +365,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
         return result;
       } catch (error) {
-        logger.error("❌ [QUERY DEBUG] /api/user fetch failed:", {
-          error: error instanceof Error ? error.message : error,
-          timestamp: new Date().toISOString()
-        });
+        // React Query may cancel an in-flight duplicate during StrictMode
+        // remounts or a refetch transition. That is not an authentication
+        // failure and should not pollute browser error telemetry.
+        if (!context.signal?.aborted) {
+          logger.error("❌ [QUERY DEBUG] /api/user fetch failed:", {
+            error: error instanceof Error ? error.message : error,
+            timestamp: new Date().toISOString()
+          });
+        }
         throw error;
       }
     },
@@ -1051,6 +1056,7 @@ export function useAuth() {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`,
             },
             body: JSON.stringify({
               token,

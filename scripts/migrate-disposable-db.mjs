@@ -11,7 +11,7 @@ if (!connectionString) {
 }
 
 const parsed = new URL(connectionString);
-const localHost = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(parsed.hostname.toLowerCase());
+const localHost = ['localhost', '127.0.0.1', '::1', '[::1]', 'helium'].includes(parsed.hostname.toLowerCase());
 const databaseName = parsed.pathname.replace(/^\/+/, '').toLowerCase();
 const disposableName = /^(postgres|test|ci|disposable|tmp|scratch)([-_a-z0-9]*)$/.test(databaseName);
 if (parsed.protocol !== 'postgres:' || !localHost || !disposableName) {

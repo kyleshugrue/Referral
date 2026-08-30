@@ -11,6 +11,7 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 import { User } from '@shared/schema';
 import { logger } from '../lib/logger';
+import { extractBearerToken } from '../lib/register-auth';
 
 const router = Router();
 
@@ -132,19 +133,15 @@ async function completeAuthResponse(
 // Process Firebase authentication tokens and sync with database
 router.post('/', async (req, res) => {
   logger.debug("🔥 [FIREBASE-AUTH DEBUG] Starting Firebase auth processing...", {
-    hasToken: !!req.body.token,
-    email: req.body.email,
-    hasDisplayName: !!req.body.displayName,
-    hasPhotoURL: !!req.body.photoURL,
+    hasBearerToken: !!extractBearerToken(req.headers.authorization),
     timestamp: new Date().toISOString()
   });
 
   try {
-    const { token, email, displayName, photoURL } = req.body;
+    const token = extractBearerToken(req.headers.authorization);
     
     if (!token) {
-      logger.debug("❌ [FIREBASE-AUTH DEBUG] No token provided");
-      return res.status(400).json({ message: 'Firebase token is required' });
+      return res.status(401).json({ message: 'Authentication required' });
     }
     
     try {
@@ -154,12 +151,36 @@ router.post('/', async (req, res) => {
         aud?: string;
         iss?: string;
         email_verified?: boolean;
+         name?: string;
+         picture?: string;
       };
       const firebaseUid = decodedToken.uid;
+       const email = decodedToken.email;
+       const displayName = decodedToken.name;
+       const photoURL = decodedToken.picture;
+
+       if (!firebaseUid || !email) {
+         return res.status(401).json({ message: 'Invalid Firebase token' });
+       }
+
+       // Legacy clients may echo Firebase claims in JSON, but those values are
+       // never used as identity. Reject conflicts instead of silently accepting
+       // a request that tries to switch accounts.
+       const body = req.body && typeof req.body === 'object' ? req.body : {};
+       const claimConflicts = [
+         typeof body.firebaseUid === 'string' && body.firebaseUid !== firebaseUid,
+         typeof body.email === 'string' && body.email !== email,
+         typeof body.emailVerified === 'boolean' && body.emailVerified !== (decodedToken.email_verified === true),
+         typeof body.displayName === 'string' && displayName !== undefined && body.displayName !== displayName,
+         typeof body.photoURL === 'string' && photoURL !== undefined && body.photoURL !== photoURL,
+       ];
+       if (claimConflicts.some(Boolean)) {
+         logger.warn('[FIREBASE-AUTH] Rejected request with conflicting identity claims');
+         return res.status(400).json({ message: 'Authentication claims do not match' });
+       }
       
       logger.debug('✅ [FIREBASE-AUTH DEBUG] Firebase token verified successfully:', {
         uid: firebaseUid,
-        email: decodedToken.email,
         aud: decodedToken.aud,
         iss: decodedToken.iss
       });
@@ -174,9 +195,8 @@ router.post('/', async (req, res) => {
       const maxAttempts = 3;
       
       logger.debug('🔍 [FIREBASE-AUTH DEBUG] Searching for existing user...', {
-        email,
         firebaseUid,
-        searchMethods: ['by email', 'by Firebase UID']
+         searchMethods: ['by Firebase UID', 'by verified email']
       });
       
       // CRITICAL SEARCH: Check if user exists by Firebase UID FIRST
@@ -184,29 +204,18 @@ router.post('/', async (req, res) => {
         const usersByFirebaseUid = await storage.getUsersByFirebaseUid(firebaseUid);
         if (usersByFirebaseUid && usersByFirebaseUid.length > 0) {
           const existingUser = usersByFirebaseUid[0]; // Take the first match
-          logger.debug('✅ [FIREBASE-AUTH DEBUG] FOUND USER BY FIREBASE UID:', {
-            userId: existingUser.id,
-            emailMismatch: existingUser.email !== email,
-            hasRealData: existingUser.fullName !== existingUser.email.split('@')[0] && existingUser.birthday !== ''
-          });
+           logger.debug('✅ [FIREBASE-AUTH DEBUG] Found user by Firebase UID:', {
+             userId: existingUser.id
+           });
           
           // Use the existing user - this solves the cross-device problem!
           user = existingUser;
           
-          // If there's an email mismatch, update the database with the current email from Firebase
+           // A Firebase UID is a stable account binding. Never let a later
+           // token silently replace the email on that account.
           if (existingUser.email !== email) {
-            logger.debug('📧 [FIREBASE-AUTH DEBUG] Email mismatch detected - updating database email');
-            const updateData: { email: string; emailVerified?: boolean } = { email };
-            
-            // Also update email verification status if Firebase confirms it
-            const isEmailVerified = decodedToken.email_verified || false;
-            if (isEmailVerified && !user.emailVerified) {
-              updateData.emailVerified = true;
-              logger.debug('✅ [FIREBASE-AUTH DEBUG] Also updating emailVerified to true');
-            }
-            
-            user = await storage.updateUser(existingUser.id, updateData);
-            logger.debug('✅ [FIREBASE-AUTH DEBUG] Email updated successfully');
+             logger.warn('[FIREBASE-AUTH] Firebase UID/email ownership conflict');
+             return res.status(409).json({ message: 'Authentication account conflict' });
           } else if (decodedToken.email_verified && !existingUser.emailVerified) {
             // Just update email verification status
             user = await storage.updateUser(existingUser.id, { emailVerified: true });
@@ -221,7 +230,7 @@ router.post('/', async (req, res) => {
       while (!user && attempts < maxAttempts) {
         attempts++;
         try {
-          // Try to find by email (fallback case for partial registration)
+           // Fallback linking uses only the verified email claim.
           logger.debug(`🔍 [FIREBASE-AUTH DEBUG] Attempt ${attempts}: Searching by email...`);
           user = await storage.getUserByEmail(email);
           
@@ -233,6 +242,14 @@ router.post('/', async (req, res) => {
               emailVerified: user.emailVerified,
               registrationCompleted: user.registrationCompleted
             });
+
+             if (user.firebaseUid && user.firebaseUid !== firebaseUid) {
+               logger.warn('[FIREBASE-AUTH] Firebase email/UID ownership conflict');
+               return res.status(409).json({ message: 'Authentication account conflict' });
+             }
+             if (!user.firebaseUid && !isEmailVerified) {
+               return res.status(409).json({ message: 'Email verification required' });
+             }
             
             // Update Firebase UID and email verification status
             const updateData: { firebaseUid?: string; emailVerified?: boolean } = {};
@@ -249,7 +266,7 @@ router.post('/', async (req, res) => {
             
             // Only update if we have changes to make
             if (Object.keys(updateData).length > 0) {
-              logger.debug('📝 [FIREBASE-AUTH DEBUG] Updating existing user with:', updateData);
+             logger.debug('📝 [FIREBASE-AUTH DEBUG] Updating authenticated user linkage');
               const updatedUser = await storage.updateUser(user.id, updateData);
               logger.debug('✅ [FIREBASE-AUTH DEBUG] User updated successfully:', !!updatedUser);
               user = updatedUser;
@@ -312,7 +329,7 @@ router.post('/', async (req, res) => {
           user = await storage.createUser({
             email,
             password: 'FIREBASE_AUTH', // Placeholder since Firebase handles auth
-            fullName: displayName || email.split('@')[0], // Limited - no real full name
+             fullName: displayName || email.split('@')[0], // Limited - no real full name
             birthday: '', // Missing - no birthday data
             title: '',
             currentLocation: '',
@@ -322,7 +339,7 @@ router.post('/', async (req, res) => {
             interests: [],
             professionalInterests: [],
             languages: [],
-            photo: photoURL || '/placeholder.jpg',
+             photo: photoURL || '/placeholder.jpg',
             profileVisible: true,
             emailNotifications: true,
             readReceipts: true,
@@ -436,13 +453,8 @@ router.post('/', async (req, res) => {
       return res.status(401).json({ message: 'Invalid Firebase token' });
     }
   } catch (error) {
-    logger.error('💥 [FIREBASE-AUTH DEBUG] Critical error in Firebase auth processing:', {
-      error: error instanceof Error ? error.message : error,
-      stack: error instanceof Error ? error.stack : undefined
-    });
-    return res.status(500).json({ 
-      message: error instanceof Error ? error.message : 'Authentication failed'
-    });
+    logger.error('💥 [FIREBASE-AUTH DEBUG] Critical error in Firebase auth processing:', { error });
+    return res.status(500).json({ message: 'Authentication failed' });
   }
 });
 

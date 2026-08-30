@@ -238,6 +238,71 @@ async function main() {
     logger.info('[%s] Setting up auth...', new Date().toISOString());
     await setupAuth(app);
 
+    // CI-only authenticated browser fixture. It is enabled only for the
+    // synthetic smoke build and is deliberately registered before production
+    // API routes. No real Firebase, database user, email, upload, or message
+    // service is touched by this path.
+    if (process.env.SMOKE_TEST === 'true') {
+      const smokeUser = {
+        id: 900001,
+        email: 'ci-smoke-user@example.invalid',
+        fullName: 'CI Smoke User',
+        birthday: '1990-01-01',
+        title: 'Synthetic Tester',
+        currentLocation: 'New York',
+        currentLocationLat: null,
+        currentLocationLng: null,
+        desiredLocations: [],
+        desiredLocationCoords: [],
+        industry: 'Technology',
+        currentCompany: 'Synthetic Co',
+        desiredCompanies: [],
+        matchingRadius: 25,
+        yearsOfExperience: 5,
+        bio: 'Synthetic browser smoke identity',
+        photo: '/placeholder.jpg',
+        resumeUrl: null,
+        resumePreviewUrls: [],
+        interests: [],
+        professionalInterests: [],
+        languages: ['English'],
+        profileVisible: true,
+        emailNotifications: false,
+        readReceipts: true,
+        emailVerificationStarted: true,
+        emailVerified: true,
+        registrationCompleted: true,
+        hasMinimumMatchData: true,
+        profileVersion: 1,
+        currentSnapshotId: null,
+        initialMatchJobsQueued: false,
+        initialMatchJobsQueuedAt: null,
+        firebaseUid: 'ci-smoke-firebase-uid',
+      };
+
+      app.get('/__smoke/session', (_req, res) => {
+        // This is deliberately a separate fixture cookie rather than a
+        // production session. It makes the smoke test independent of the
+        // external PostgreSQL session store and is enabled only in CI.
+        res.cookie('smoke-auth', '1', {
+          httpOnly: true,
+          sameSite: 'lax',
+          secure: false,
+          path: '/',
+        });
+        res.status(200).type('text/plain').send('Synthetic smoke session ready');
+      });
+      app.get('/api/user', (req, res) => {
+        if (!req.headers.cookie?.split(';').some((cookie) => cookie.trim() === 'smoke-auth=1')) {
+          return res.sendStatus(401);
+        }
+        res.json(smokeUser);
+      });
+      app.get('/api/notifications/counts', (_req, res) => {
+        res.json({ messages: 0, connectionRequests: 0, newConnections: 0 });
+      });
+    }
+
     logger.info('[%s] Registering routes...', new Date().toISOString());
     await registerRoutes(app);
 

@@ -19,6 +19,28 @@ export default defineConfig({
       ['client/src/**/*.test.tsx', 'jsdom'],
     ],
     setupFiles: ['./client/src/test/vitest-setup.ts'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json-summary'],
+      include: [
+        'server/lib/http-security.ts',
+        'server/lib/internal-auth.ts',
+        'server/lib/register-auth.ts',
+        'server/lib/upload-validation.ts',
+        'server/lib/websocket-security.ts',
+        'server/lib/websocket-tickets.ts',
+        'server/middleware/auth-jwt.ts',
+        'server/middleware/require-admin.ts',
+        'server/middleware/require-complete-registration.ts',
+      ],
+      exclude: ['**/*.test.ts', '**/*.test.tsx', '**/test-support/**'],
+      thresholds: {
+        lines: 70,
+        functions: 70,
+        statements: 70,
+        branches: 55,
+      },
+    },
   },
   resolve: {
     alias: {

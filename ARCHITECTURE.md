@@ -27,6 +27,7 @@ Referral is a monolithic full-stack TypeScript application with a separate Worke
 - All data access goes through the storage layer (`server/storage.ts`, Drizzle ORM)
 - Shared types and Zod schemas live in `shared/schema.ts` — the single source of truth for both frontend and backend
 - Cross-cutting middleware: CORS allowlist + security headers (`server/lib/http-security.ts`), rate limiting (`server/lib/rate-limits.ts`), dual-mode auth (`server/middleware/auth-jwt.ts`)
+- Security integration tests use the test-only in-process app factory in `server/test-support/p0-http-harness.ts`; it injects synthetic identity, sessions, storage, and Firebase verification without starting workers or opening production services.
 
 ## Auth: Sessions, JWT, and Firebase
 
@@ -82,3 +83,5 @@ The UI renders cached matches immediately while fresh ones generate.
 ## Real-Time Notifications
 
 A WebSocket server (`ws`) attached to the Express HTTP server handles chat messages, match-ready notifications, and connection events. iOS push notifications are sent by the Worker VM through APNs.
+
+Direct conversations are the only supported chat contract. Conversation and message authorization requires an accepted connection, group-chat routes return `410 Gone`, and WebSocket admission uses the same authenticated identity/privacy rules.

@@ -26,7 +26,7 @@ export function isDisposableDatabaseUrl(connectionString: string): boolean {
     const url = new URL(connectionString);
     const hostname = url.hostname.toLowerCase();
     const databaseName = url.pathname.replace(/^\/+/, '').toLowerCase();
-    const localHost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
+    const localHost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]' || hostname === 'helium';
     const disposableName = /^(postgres|test|ci|disposable|tmp|scratch)([-_a-z0-9]*)$/.test(databaseName);
     return url.protocol === 'postgres:' && localHost && disposableName;
   } catch {

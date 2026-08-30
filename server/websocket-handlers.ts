@@ -366,7 +366,24 @@ export function setupWebSocketServer(server: HTTPServer) {
                 logger.debug(`[WebSocket] Loaded ${messages.length} messages for user ${userId} with partner ${partnerId}, conversation ID: ${conversation.id}`);
                 ws.send(JSON.stringify({
                   type: 'messagesLoaded',
-                  messages,
+                  messages: messages.map((message) => ({
+                    id: message.id,
+                    conversationId: message.conversationId,
+                    senderId: message.senderId,
+                    receiverId: message.receiverId,
+                    content: message.content,
+                    createdAt: message.createdAt,
+                    sender: {
+                      id: message.sender.id,
+                      fullName: message.sender.fullName,
+                      photo: message.sender.photo,
+                    },
+                    receiver: {
+                      id: message.receiver.id,
+                      fullName: message.receiver.fullName,
+                      photo: message.receiver.photo,
+                    },
+                  })),
                   conversationId: conversation.id
                 }));
               } catch (error) {
@@ -415,7 +432,7 @@ export function setupWebSocketServer(server: HTTPServer) {
                   logger.debug(`[WebSocket] Sending message to online recipient ${receiverId}`);
                   recipientClient.ws.send(JSON.stringify({
                     type: 'chat',
-                    message: savedMessage
+                    message: toSafeMessage(savedMessage)
                   }));
                 } else {
                   logger.debug(`[WebSocket] Recipient ${receiverId} is offline, message stored only`);
@@ -425,7 +442,7 @@ export function setupWebSocketServer(server: HTTPServer) {
                 ws.send(JSON.stringify({
                   type: 'messageConfirm',
                   messageId: savedMessage.id,
-                  message: savedMessage
+                  message: toSafeMessage(savedMessage)
                 }));
               } catch (error) {
                 if (error instanceof Error && error.message === 'Users must be connected to exchange messages') {
@@ -461,25 +478,18 @@ export function setupWebSocketServer(server: HTTPServer) {
                   throw new Error('Invalid connection request data');
                 }
                 
-                logger.debug(`[WebSocket] Notifying user ${receiverId} about rejected connection request ${requestId}`);
-                
-                // Send to the original requester if they're online
-                const requesterClient = connectedClients.get(receiverId);
-                if (requesterClient?.ws.readyState === WebSocket.OPEN) {
-                  logger.debug(`[WebSocket] Sending connection rejection notification to user ${receiverId}`);
-                  // Include both sender ID (the user rejecting the request) and receiver ID (user who sent the request)
-                  // This allows the client to remove the correct user ID from the pending connection cache
-                  requesterClient.ws.send(JSON.stringify({
-                    type: 'connectionRejected',
-                    requestId: requestId,
-                    senderId: userId,          // User who initiated the rejection (rejector)
-                    receiverId: receiverId,    // User who originally sent the request
-                    receivedRejection: true    // Flag to indicate this notification was sent to the original requester
-                  }));
-                } else {
-                  logger.debug(`[WebSocket] User ${receiverId} is offline, cannot notify about rejected request`);
+                const request = await storage.getConnectionRequestById(requestId);
+                if (!request || request.status !== 'requested' ||
+                    request.receiverId !== userId || request.senderId !== receiverId) {
+                  throw new Error('Invalid connection request data');
                 }
+                const rejected = await storage.rejectConnectionRequest(requestId, userId);
+                if (!rejected) throw new Error('Invalid connection request data');
+                const { notifyConnectionRequestRejected } = await import('./websocket-utils');
+                await notifyConnectionRequestRejected(request.senderId, request.id, request.receiverId);
                 
+                // Notification was already sent to the database-derived requester.
+
                 // Confirm to the user who rejected the request
                 ws.send(JSON.stringify({
                   type: 'connectionRejectionSent',
@@ -534,7 +544,7 @@ export function setupWebSocketServer(server: HTTPServer) {
     } catch (error) {
       logger.error('[WebSocket] Setup error:', error);
       handleError(ws, 'Connection failed', error);
-      ws.close(1008, error instanceof Error ? error.message : 'Setup failed');
+      ws.close(1008, 'Connection failed');
     }
   });
 
@@ -566,7 +576,6 @@ export function setupWebSocketServer(server: HTTPServer) {
 
 // Helper function for consistent error handling
 function handleError(ws: WebSocket, message: string, error: unknown) {
-  const errorMessage = error instanceof Error ? error.message : 'Unknown error';
   logger.error(`[WebSocket] ${message}:`, error);
 
   if (ws.readyState === WebSocket.OPEN) {
@@ -574,10 +583,40 @@ function handleError(ws: WebSocket, message: string, error: unknown) {
       ws.send(JSON.stringify({
         type: 'error',
         message,
-        details: errorMessage
+        details: 'Request could not be completed'
       }));
     } catch (sendError) {
       logger.error('[WebSocket] Failed to send error message:', sendError);
     }
   }
+}
+
+function toSafeMessage(message: {
+  id: number;
+  conversationId: number;
+  senderId: number;
+  receiverId: number;
+  content: string;
+  createdAt: string;
+  sender: { id: number; fullName: string; photo: string };
+  receiver: { id: number; fullName: string; photo: string };
+}) {
+  return {
+    id: message.id,
+    conversationId: message.conversationId,
+    senderId: message.senderId,
+    receiverId: message.receiverId,
+    content: message.content,
+    createdAt: message.createdAt,
+    sender: {
+      id: message.sender.id,
+      fullName: message.sender.fullName,
+      photo: message.sender.photo,
+    },
+    receiver: {
+      id: message.receiver.id,
+      fullName: message.receiver.fullName,
+      photo: message.receiver.photo,
+    },
+  };
 }

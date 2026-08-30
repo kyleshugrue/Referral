@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { storage } from '../storage';
 import { locationCacheService } from '../services/location-cache';
 import { db } from '../db';
-import { users, insertUserSchema } from '@shared/schema';
+import { users, editableProfileSchema } from '@shared/schema';
 import type { User } from '@shared/schema';
 import { eq, and } from 'drizzle-orm';
 import { simpleMatchJobHelper } from '../services/simple-match-job-helper';
@@ -14,20 +14,9 @@ import { requireCompleteRegistration } from '../middleware/require-complete-regi
 import { requireAdmin } from '../middleware/require-admin';
 import { logger } from '../lib/logger';
 import { hasRequiredFieldsForMatching, shouldQueueInitialMatchJobs } from '../lib/profile-matching';
+import { toSelfUserDto } from '../lib/privacy-dto';
 
 const router = Router();
-
-// Schema for validating profile updates - all fields optional, sensitive fields omitted
-// Note: id is already omitted by insertUserSchema, password doesn't exist in schema
-const updateProfileSchema = insertUserSchema.partial().omit({
-  email: true,
-  firebaseUid: true,
-  emailVerified: true,
-  hasMinimumMatchData: true,
-  initialMatchJobsQueued: true,
-  initialMatchJobsQueuedAt: true,
-  profileVersion: true
-});
 
 // `hasRequiredFieldsForMatching` and `shouldQueueInitialMatchJobs` live in
 // ../lib/profile-matching so they can be unit tested without importing this
@@ -96,16 +85,14 @@ router.get('/', requireAuthJWT, async (req, res) => {
       hasEmailVerified: user.emailVerified,
       responseTime: new Date().toISOString()
     });
-    return res.json(user);
+    return res.json(toSelfUserDto(user));
   } catch (error) {
     logger.error('💥 [USER-ROUTE DEBUG] Critical error fetching user data:', {
       error: error instanceof Error ? error.message : error,
       stack: error instanceof Error ? error.stack : undefined,
       userId: req.user?.id
     });
-    return res.status(500).json({ 
-      message: error instanceof Error ? error.message : "Failed to fetch user data"
-    });
+    return res.status(500).json({ message: "Failed to fetch user data" });
   }
 });
 
@@ -128,19 +115,13 @@ router.patch('/', requireAuthJWT, async (req, res) => {
     
     const userId = req.user.id;
 
-    // PRODUCTION-GRADE: Sanitize input data before validation
-    // Convert empty strings to undefined for enum fields (client may send '' which fails enum validation)
-    const enumFields = ['educationLevel', 'industry', 'genderIdentity', 'pronouns'];
     const sanitizedBody = { ...req.body };
-    for (const field of enumFields) {
-      if (sanitizedBody[field] === '') {
-        console.log(`[UserRoute][${operationId}] Sanitizing empty string for enum field: ${field}`);
-        delete sanitizedBody[field];
-      }
+    if (sanitizedBody.educationLevel === '') {
+      delete sanitizedBody.educationLevel;
     }
 
     // Validate request body with Zod schema
-    const parseResult = updateProfileSchema.safeParse(sanitizedBody);
+    const parseResult = editableProfileSchema.safeParse(sanitizedBody);
     if (!parseResult.success) {
       console.error(`[UserRoute][${operationId}] ❌ Validation error for user ${req.user?.id}:`, parseResult.error.flatten());
       return res.status(422).json({
@@ -294,7 +275,7 @@ router.patch('/', requireAuthJWT, async (req, res) => {
     // Preserve scalar fields ONLY if they were NOT explicitly sent in the request
     // If a field was explicitly sent (even as empty string), allow clearing it
     if (!explicitlySentFields.has('fullName') && existingUser.fullName) {
-      console.log(`[UserRoute] Preserving existing fullName: "${existingUser.fullName}" (field not sent in request)`);
+      logger.debug(`[UserRoute] Preserving existing fullName for user ${userId}`);
       finalUpdateData.fullName = existingUser.fullName;
     } else if (explicitlySentFields.has('fullName') && (updateData.fullName === '' || updateData.fullName === undefined)) {
       console.log(`[UserRoute] Intentionally clearing fullName (explicitly sent as empty)`);
@@ -315,7 +296,7 @@ router.patch('/', requireAuthJWT, async (req, res) => {
     }
     
     if (!explicitlySentFields.has('currentLocation') && existingUser.currentLocation) {
-      console.log(`[UserRoute] Preserving existing currentLocation (field not sent in request)`);
+      logger.debug(`[UserRoute] Preserving existing currentLocation for user ${userId}`);
       finalUpdateData.currentLocation = existingUser.currentLocation;
     } else if (explicitlySentFields.has('currentLocation') && (updateData.currentLocation === '' || updateData.currentLocation === undefined)) {
       console.log(`[UserRoute] Intentionally clearing currentLocation (explicitly sent as empty)`);
@@ -345,7 +326,7 @@ router.patch('/', requireAuthJWT, async (req, res) => {
     // Preserve array fields ONLY if they were NOT explicitly sent in the request
     // If a field was explicitly sent (even as empty array), allow clearing it
     if (!explicitlySentFields.has('desiredLocations') && existingUser.desiredLocations && existingUser.desiredLocations.length > 0) {
-      console.log(`[UserRoute] Preserving existing desiredLocations (field not sent in request)`);
+      logger.debug(`[UserRoute] Preserving existing desiredLocations for user ${userId}`);
       finalUpdateData.desiredLocations = existingUser.desiredLocations;
     } else if (explicitlySentFields.has('desiredLocations') && Array.isArray(updateData.desiredLocations) && updateData.desiredLocations.length === 0) {
       console.log(`[UserRoute] Intentionally clearing desiredLocations (explicitly sent as empty array)`);
@@ -489,7 +470,7 @@ router.patch('/', requireAuthJWT, async (req, res) => {
         
         // Check current location coordinates
         if (!updatedUser.currentLocationLat || !updatedUser.currentLocationLng) {
-          console.log(`[UserRoute] ⚠️ Current location missing coordinates, geocoding: ${updatedUser.currentLocation}`);
+          logger.debug(`[UserRoute] Current location coordinates missing for user ${userId}`);
           needsGeocodingFix = true;
           try {
             await locationCacheService.updateUserCurrentLocation(userId, updatedUser.currentLocation!);
@@ -503,7 +484,7 @@ router.patch('/', requireAuthJWT, async (req, res) => {
         // Check desired location coordinates
         if (!updatedUser.desiredLocationCoords || 
             updatedUser.desiredLocationCoords.length !== updatedUser.desiredLocations?.length) {
-          console.log(`[UserRoute] ⚠️ Desired locations missing coordinates, geocoding: ${updatedUser.desiredLocations?.join(', ')}`);
+          logger.debug(`[UserRoute] Desired location coordinates missing for user ${userId}`);
           needsGeocodingFix = true;
           try {
             await locationCacheService.updateUserDesiredLocations(userId, updatedUser.desiredLocations!);
@@ -604,14 +585,14 @@ router.patch('/', requireAuthJWT, async (req, res) => {
           // Check if we won the race
           if (!updateResult || updateResult.length === 0) {
             console.log(`[UserRoute] ⚠️ FALLBACK: Race condition - jobs already queued by another request`);
-            return res.json(updatedUser); // Exit early
+            return res.json(toSelfUserDto(updatedUser)); // Exit early
           }
           
           // Ensure geocoding complete
           let needsGeocodingFix = false;
           
           if (!updatedUser.currentLocationLat || !updatedUser.currentLocationLng) {
-            console.log(`[UserRoute] Current location missing coordinates, geocoding: ${updatedUser.currentLocation}`);
+            logger.debug(`[UserRoute] Current location coordinates missing for user ${userId}`);
             needsGeocodingFix = true;
             try {
               await locationCacheService.updateUserCurrentLocation(userId, updatedUser.currentLocation!);
@@ -622,7 +603,7 @@ router.patch('/', requireAuthJWT, async (req, res) => {
           
           if (!updatedUser.desiredLocationCoords || 
               updatedUser.desiredLocationCoords.length !== updatedUser.desiredLocations?.length) {
-            console.log(`[UserRoute] Desired locations missing coordinates, geocoding: ${updatedUser.desiredLocations?.join(', ')}`);
+            logger.debug(`[UserRoute] Desired location coordinates missing for user ${userId}`);
             needsGeocodingFix = true;
             try {
               await locationCacheService.updateUserDesiredLocations(userId, updatedUser.desiredLocations!);
@@ -719,7 +700,7 @@ router.patch('/', requireAuthJWT, async (req, res) => {
     // Automatically geocode coordinates after successful user update
     if (isCurrentLocationUpdated) {
       const currentLocation = finalUpdateData.currentLocation as string;
-      console.log(`[UserRoute] Current location changed for user ${userId}, updating coordinates for: ${currentLocation}`);
+      logger.debug(`[UserRoute] Current location changed for user ${userId}`);
       try {
         await locationCacheService.updateUserCurrentLocation(userId, currentLocation);
         console.log(`[UserRoute] Successfully geocoded current location for user ${userId}`);
@@ -731,7 +712,7 @@ router.patch('/', requireAuthJWT, async (req, res) => {
 
     if (isDesiredLocationsUpdated && finalUpdateData.desiredLocations) {
       const desiredLocations = finalUpdateData.desiredLocations as string[];
-      console.log(`[UserRoute] Desired locations changed for user ${userId}, updating coordinates for: ${desiredLocations.join(', ')}`);
+      logger.debug(`[UserRoute] Desired locations changed for user ${userId}`);
       try {
         await locationCacheService.updateUserDesiredLocations(userId, desiredLocations);
         console.log(`[UserRoute] Successfully geocoded desired locations for user ${userId}`);
@@ -777,15 +758,13 @@ router.patch('/', requireAuthJWT, async (req, res) => {
     });
     
     return res.json({
-      ...updatedUser,
+      ...toSelfUserDto(updatedUser),
       matchRefreshQueued: hasMatchRelevantChanges,
       queuedJobId
     });
   } catch (error) {
     console.error(`[UserRoute][${operationId}] ❌ Error updating user:`, error);
-    return res.status(500).json({ 
-      message: error instanceof Error ? error.message : "Failed to update user"
-    });
+    return res.status(500).json({ message: "Failed to update user" });
   }
 });
 
@@ -811,14 +790,14 @@ router.post('/fix-all-coordinates', requireAuthJWT, requireCompleteRegistration,
       try {
         // Fix current location coordinates
         if (user.currentLocation && (!user.currentLocationLat || !user.currentLocationLng)) {
-          console.log(`[UserRoute] Fixing current location for user ${user.id}: ${user.currentLocation}`);
+          logger.debug(`[UserRoute] Fixing current location coordinates for user ${user.id}`);
           await locationCacheService.updateUserCurrentLocation(user.id, user.currentLocation);
           fixedCurrent++;
         }
 
         // Fix desired location coordinates
         if (user.desiredLocations?.length && (!user.desiredLocationCoords?.length || user.desiredLocationCoords.length !== user.desiredLocations.length)) {
-          console.log(`[UserRoute] Fixing desired locations for user ${user.id}: ${user.desiredLocations.join(', ')}`);
+          logger.debug(`[UserRoute] Fixing desired location coordinates for user ${user.id}`);
           await locationCacheService.updateUserDesiredLocations(user.id, user.desiredLocations);
           fixedDesired++;
         }
@@ -867,7 +846,7 @@ router.post('/ensure-coordinates', requireAuthJWT, requireCompleteRegistration, 
 
     // Check if current location needs geocoding
     if (user.currentLocation && (!user.currentLocationLat || !user.currentLocationLng)) {
-      console.log(`[UserRoute] Geocoding missing current location coordinates for user ${userId}: ${user.currentLocation}`);
+      logger.debug(`[UserRoute] Geocoding missing current location coordinates for user ${userId}`);
       try {
         await locationCacheService.updateUserCurrentLocation(userId, user.currentLocation);
         coordinatesUpdated = true;
@@ -879,7 +858,7 @@ router.post('/ensure-coordinates', requireAuthJWT, requireCompleteRegistration, 
 
     // Check if desired locations need geocoding
     if (user.desiredLocations?.length && (!user.desiredLocationCoords?.length || user.desiredLocationCoords.length !== user.desiredLocations.length)) {
-      console.log(`[UserRoute] Geocoding missing desired location coordinates for user ${userId}: ${user.desiredLocations.join(', ')}`);
+      logger.debug(`[UserRoute] Geocoding missing desired location coordinates for user ${userId}`);
       try {
         await locationCacheService.updateUserDesiredLocations(userId, user.desiredLocations);
         coordinatesUpdated = true;

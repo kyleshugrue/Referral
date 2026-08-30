@@ -4,6 +4,7 @@ import { User, educationLevels } from '@shared/schema';
 import { simpleMatchJobHelper } from '../services/simple-match-job-helper';
 import { requireVerifiedFirebaseUser, getRegistrant } from '../lib/register-auth';
 import { firebaseStorageService } from '../services/firebase-storage';
+import { toSelfUserDto } from '../lib/privacy-dto';
 
 const router = Router();
 
@@ -34,6 +35,15 @@ function normalizeEducationLevel(value: string | null | undefined): typeof educa
 }
 
 function normalizeRegistrationMediaReferences(body: RegistrationBody): RegistrationBody {
+  const previewInput = body.resumePreviewUrls;
+  if (Array.isArray(previewInput) && previewInput.some((url) => typeof url !== 'string')) {
+    throw new Error('Invalid media reference');
+  }
+  for (const value of [body.photo, body.resumeUrl]) {
+    if (value !== undefined && value !== null && typeof value !== 'string') {
+      throw new Error('Invalid media reference');
+    }
+  }
   const previewUrls = Array.isArray(body.resumePreviewUrls)
     ? body.resumePreviewUrls.map((url) => firebaseStorageService.normalizeMediaReference(url) || url)
     : body.resumePreviewUrls;
@@ -43,6 +53,39 @@ function normalizeRegistrationMediaReferences(body: RegistrationBody): Registrat
     resumeUrl: firebaseStorageService.normalizeMediaReference(body.resumeUrl) || body.resumeUrl,
     resumePreviewUrls: previewUrls,
   };
+}
+
+async function registrationMediaBelongsTo(
+  reference: unknown,
+  firebaseUid: string,
+  allowPlaceholder = false,
+): Promise<boolean> {
+  if (reference === undefined || reference === null || reference === '') return true;
+  if (allowPlaceholder && reference === '/placeholder.jpg') return true;
+  if (typeof reference !== 'string' || !reference.startsWith('/api/media/')) return false;
+
+  if (await firebaseStorageService.isMediaReferenceOwnedByFirebaseUid(reference, firebaseUid)) {
+    return true;
+  }
+
+  const existingOwner = await storage.getUserByMediaReference(reference);
+  return existingOwner?.firebaseUid === firebaseUid;
+}
+
+async function validateRegistrationMediaReferences(
+  body: RegistrationBody,
+  firebaseUid: string,
+): Promise<boolean> {
+  if (!await registrationMediaBelongsTo(body.photo, firebaseUid, true)) return false;
+  if (!await registrationMediaBelongsTo(body.resumeUrl, firebaseUid)) return false;
+  if (Array.isArray(body.resumePreviewUrls)) {
+    for (const reference of body.resumePreviewUrls) {
+      if (!await registrationMediaBelongsTo(reference, firebaseUid)) return false;
+    }
+  } else if (body.resumePreviewUrls !== undefined && body.resumePreviewUrls !== null) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -81,7 +124,7 @@ async function respondWithRegisteredUser(
   if (res.registrationSuccessResponder) {
     return res.registrationSuccessResponder(user, status);
   }
-  return status === 201 ? res.status(201).json(user) : res.json(user);
+  return status === 201 ? res.status(201).json(toSelfUserDto(user)) : res.json(toSelfUserDto(user));
 }
 
 export async function registerFirebaseUser(req: Request, res: RegistrationResponse) {
@@ -91,6 +134,9 @@ export async function registerFirebaseUser(req: Request, res: RegistrationRespon
     const userData = normalizeRegistrationMediaReferences(
       stripUntrustedFields(req.body as RegistrationBody),
     );
+    if (!await validateRegistrationMediaReferences(userData, firebaseUid)) {
+      return res.status(400).json({ message: 'Invalid media reference' });
+    }
 
     const email = registrant.email;
     if (!email) {
@@ -119,10 +165,11 @@ export async function registerFirebaseUser(req: Request, res: RegistrationRespon
         if (!existingUser.firebaseUid && !registrant.emailVerified) {
           return res.status(409).json({ message: 'An account with this email already exists. Verify your email to continue.' });
         }
-        const linkedUser = await storage.updateUser(existingUser.id, {
+        const linkedUser = await storage.linkUserToFirebaseUid(
+          existingUser.id,
           firebaseUid,
-          ...(registrant.emailVerified ? { emailVerified: true } : {}),
-        });
+          registrant.emailVerified,
+        );
         return respondWithRegisteredUser(res, linkedUser, 200);
       }
     }
@@ -163,9 +210,9 @@ export async function registerFirebaseUser(req: Request, res: RegistrationRespon
     const newUser = await storage.createUser(processedUserData);
     return respondWithRegisteredUser(res, newUser, 201);
   } catch (error) {
-    console.error('Registration error:', error);
+    console.error('Registration error:', error instanceof Error ? error.name : 'unknown');
     return res.status(500).json({
-      message: error instanceof Error ? error.message : 'Registration failed'
+      message: 'Registration failed'
     });
   }
 }
@@ -181,6 +228,9 @@ router.post('/partial', requireVerifiedFirebaseUser, async (req, res) => {
     const userData = normalizeRegistrationMediaReferences(
       stripUntrustedFields(req.body as RegistrationBody),
     );
+    if (!await validateRegistrationMediaReferences(userData, firebaseUid)) {
+      return res.status(400).json({ message: 'Invalid media reference' });
+    }
 
     // Check if a user with this Firebase UID already exists in our database
     let existingUser: User | undefined;
@@ -253,32 +303,37 @@ router.post('/partial', requireVerifiedFirebaseUser, async (req, res) => {
       };
 
       // Update existing user with processed data
-      const updatedUser = await storage.updateUser(existingUser.id, processedData);
+      await storage.linkUserToFirebaseUid(
+        existingUser.id,
+        firebaseUid,
+        registrant.emailVerified,
+      );
+      const completedUser = await storage.updateUser(existingUser.id, processedData);
 
       // Check if user now has minimum match data and queue initial AI match jobs
       // This happens automatically when Step 3 is completed (fullName, currentCompany, currentLocation, industry, desiredCompanies, desiredLocations)
-      if (updatedUser.hasMinimumMatchData && !updatedUser.initialMatchJobsQueued && updatedUser.emailVerified) {
+      if (completedUser.hasMinimumMatchData && !completedUser.initialMatchJobsQueued && completedUser.emailVerified) {
         try {
           const timestamp = new Date().toISOString();
 
           // Queue prioritized AI match jobs (same logic as PATCH /api/user)
-          await simpleMatchJobHelper.queuePrioritizedMatchJobs(updatedUser.id);
+          await simpleMatchJobHelper.queuePrioritizedMatchJobs(completedUser.id);
 
           // Mark that initial match jobs have been queued
-          await storage.updateUser(updatedUser.id, {
+          await storage.updateUser(completedUser.id, {
             initialMatchJobsQueued: true,
             initialMatchJobsQueuedAt: timestamp
           });
 
           // Update the user object to reflect the change
-          updatedUser.initialMatchJobsQueued = true;
-          updatedUser.initialMatchJobsQueuedAt = timestamp;
+          completedUser.initialMatchJobsQueued = true;
+          completedUser.initialMatchJobsQueuedAt = timestamp;
         } catch {
           // Don't fail the entire request - match jobs will queue on next update
         }
       }
 
-      return res.json(updatedUser);
+      return res.json(toSelfUserDto(completedUser));
     } else {
       // Create a temporary user with the partial data
 
@@ -339,13 +394,11 @@ router.post('/partial', requireVerifiedFirebaseUser, async (req, res) => {
         }
       }
 
-      return res.status(201).json(newUser);
+      return res.status(201).json(toSelfUserDto(newUser));
     }
   } catch (error) {
     console.error('[Partial Registration] Error:', error);
-    return res.status(500).json({
-      message: error instanceof Error ? error.message : 'Partial registration failed'
-    });
+    return res.status(500).json({ message: 'Partial registration failed' });
   }
 });
 

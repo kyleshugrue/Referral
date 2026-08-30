@@ -10,7 +10,6 @@ import ProfileDialog from "@/components/profile-dialog";
 import { useLocation } from "wouter";
 import { getInitials } from "@/lib/avatar-utils";
 import { getDisplayName } from "@/lib/name-utils";
-import { useGlobalWebSocket } from "@/hooks/use-global-websocket";
 import { SynergyIcon } from "@/components/icons/synergy-icon";
 import { useDeviceType } from "@/hooks/use-device-type";
 
@@ -46,7 +45,6 @@ export default function RequestsPage() {
   }, []);
 
   // Initialize WebSocket connection
-  const { sendMessage, isConnected } = useGlobalWebSocket();
 
   // Query to fetch pending requests
   const { data: requests = [], isLoading } = useQuery<RequestWithSender[]>({
@@ -156,15 +154,6 @@ export default function RequestsPage() {
           description: "The connection request has been declined and removed",
         });
         
-        // If WebSocket is connected and we're rejecting a request, notify the sender
-        if (isConnected && data.connection?.senderId) {
-          console.log('[RequestsPage] Sending connection rejection notification via WebSocket');
-          sendMessage({
-            type: 'connectionRejected',
-            requestId: data.id,
-            receiverId: data.connection.senderId
-          });
-        }
       } else {
         toast({
           title: "Connection accepted",

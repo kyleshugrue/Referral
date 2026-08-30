@@ -37,6 +37,8 @@ test.describe('primary journey smoke test', () => {
     });
     page.on('requestfailed', (request) => {
       if (isExpectedAnalyticsRequest(request.url())) return;
+      const pathname = new URL(request.url()).pathname;
+      if (pathname === '/api/user' && request.failure()?.errorText === 'net::ERR_ABORTED') return;
       failedRequests.push(`${request.method()} ${request.url()}: ${request.failure()?.errorText ?? 'unknown failure'}`);
     });
     page.on('response', (response) => {
@@ -82,6 +84,49 @@ test.describe('primary journey smoke test', () => {
     );
     expect(expectedResourceErrors.length).toBeLessThanOrEqual(expectedUnauthenticatedUserProbes);
     expect(consoleErrors.filter((message) => !expectedResourceErrors.includes(message))).toEqual([]);
+    expect(pageErrors).toEqual([]);
+    expect(failedRequests).toEqual([]);
+    expect(unexpectedResponses).toEqual([]);
+  });
+
+  test('synthetic authenticated session -> profile on desktop and mobile', async ({ page }) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    const failedRequests: string[] = [];
+    const unexpectedResponses: string[] = [];
+    const isExpectedAnalyticsRequest = (url: string) => {
+      const parsedUrl = new URL(url);
+      return parsedUrl.hostname === 'www.googletagmanager.com' && parsedUrl.pathname === '/gtag/js';
+    };
+
+    page.on('console', (message) => {
+      if (message.type() === 'error') consoleErrors.push(message.text());
+    });
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    page.on('requestfailed', (request) => {
+      if (isExpectedAnalyticsRequest(request.url())) return;
+      const pathname = new URL(request.url()).pathname;
+      if (pathname === '/api/user' && request.failure()?.errorText === 'net::ERR_ABORTED') return;
+      failedRequests.push(`${request.method()} ${request.url()}: ${request.failure()?.errorText ?? 'unknown failure'}`);
+    });
+    page.on('response', (response) => {
+      if (response.status() >= 400) {
+        unexpectedResponses.push(`${response.status()} ${response.url()}`);
+      }
+    });
+
+    // The server exposes this endpoint only when SMOKE_TEST=true. It creates
+    // a disposable HttpOnly fixture cookie and never contacts Firebase or
+    // production data services. The CI smoke build also skips Firebase init.
+    await page.goto('/__smoke/session');
+    await expect(page).toHaveURL(/__smoke\/session/);
+
+    await page.goto('/profile');
+    await expect(page).toHaveURL(/\/profile/);
+    await expect(page.getByText('CI Smoke User', { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole('tab', { name: /preview/i }).first()).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+    expect(consoleErrors).toEqual([]);
     expect(pageErrors).toEqual([]);
     expect(failedRequests).toEqual([]);
     expect(unexpectedResponses).toEqual([]);

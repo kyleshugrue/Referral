@@ -378,6 +378,7 @@ export function useGlobalWebSocket(options: UseGlobalWebSocketOptions = {}) {
 
   // Initialize connection when user is available
   useEffect(() => {
+    if (import.meta.env.VITE_SMOKE_TEST === 'true') return;
     if (!user?.id) return;
 
     // Create message handler

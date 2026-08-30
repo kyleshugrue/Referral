@@ -51,6 +51,21 @@ export class FirebaseStorageService {
     return fileName;
   }
 
+  getFileNameForMediaId(mediaId: string): string {
+    return this.fromMediaId(mediaId);
+  }
+
+  async isMediaReferenceOwnedByFirebaseUid(reference: string, firebaseUid: string): Promise<boolean> {
+    if (!this.bucket || !reference.startsWith('/api/media/')) return false;
+    try {
+      const fileName = this.fromMediaId(reference.slice('/api/media/'.length));
+      const [metadata] = await this.bucket.file(fileName).getMetadata();
+      return metadata.metadata?.firebaseUid === firebaseUid;
+    } catch {
+      return false;
+    }
+  }
+
   getPrivateMediaUrl(fileName: string): string {
     return `/api/media/${this.toMediaId(fileName)}`;
   }
@@ -106,13 +121,14 @@ export class FirebaseStorageService {
     }
   }
 
-  private async responseUrl(fileName: string, userId?: number): Promise<string> {
+  private async responseUrl(fileName: string, userId?: number, firebaseUid?: string): Promise<string> {
     return userId
+      || firebaseUid
       ? this.getPrivateMediaUrl(fileName)
       : this.getSignedReadUrl(fileName);
   }
 
-  async uploadProfilePicture(fileBuffer: Buffer, originalName: string, userId?: number): Promise<UploadResult> {
+  async uploadProfilePicture(fileBuffer: Buffer, originalName: string, userId?: number, firebaseUid?: string): Promise<UploadResult> {
     if (!this.bucket) {
       throw new Error('Firebase Storage not initialized');
     }
@@ -132,7 +148,7 @@ export class FirebaseStorageService {
 
       // Generate unique filename
       const timestamp = Date.now();
-      const userPrefix = userId ? `user-${userId}` : 'temp';
+       const userPrefix = userId ? `user-${userId}` : 'temp';
       const fileName = `profile-pictures/${userPrefix}-${timestamp}-${uuidv4()}.jpg`;
 
       // Create file reference
@@ -147,12 +163,13 @@ export class FirebaseStorageService {
           metadata: {
             originalName,
             uploadedAt: new Date().toISOString(),
-            userId: userId?.toString() || 'unknown'
+             userId: userId?.toString() || 'unknown',
+             ...(firebaseUid ? { firebaseUid } : {}),
           }
         }
       });
 
-      const mediaUrl = await this.responseUrl(fileName, userId);
+       const mediaUrl = await this.responseUrl(fileName, userId, firebaseUid);
       logger.info('[Firebase Storage] Private profile picture uploaded', { fileName });
 
       return {
@@ -190,7 +207,7 @@ export class FirebaseStorageService {
     }
   }
 
-  async uploadResume(fileBuffer: Buffer, originalName: string, userId?: number): Promise<ResumeUploadResult> {
+  async uploadResume(fileBuffer: Buffer, originalName: string, userId?: number, firebaseUid?: string): Promise<ResumeUploadResult> {
     if (!this.bucket) {
       throw new Error('Firebase Storage not initialized');
     }
@@ -224,19 +241,20 @@ export class FirebaseStorageService {
           metadata: {
             originalName,
             uploadedAt: new Date().toISOString(),
-            userId: userId?.toString() || 'unknown'
+             userId: userId?.toString() || 'unknown',
+             ...(firebaseUid ? { firebaseUid } : {}),
           }
         }
       });
 
-      const mediaUrl = await this.responseUrl(fileName, userId);
+       const mediaUrl = await this.responseUrl(fileName, userId, firebaseUid);
       logger.info('[Firebase Storage] Private resume uploaded', { fileName });
 
       // Generate preview URLs if it's a PDF
       let previewUrls: string[] = [];
       if (fileExtension === '.pdf') {
         try {
-          previewUrls = await this.generatePdfPreviewsFromBuffer(fileBuffer, fileName, userId);
+           previewUrls = await this.generatePdfPreviewsFromBuffer(fileBuffer, fileName, userId, firebaseUid);
         } catch (previewError) {
           console.error('[Firebase Storage] Error generating PDF previews:', previewError);
           // Continue without previews rather than failing the entire upload
@@ -254,7 +272,7 @@ export class FirebaseStorageService {
     }
   }
 
-  private async generatePdfPreviewsFromBuffer(pdfBuffer: Buffer, fileName: string, userId?: number): Promise<string[]> {
+  private async generatePdfPreviewsFromBuffer(pdfBuffer: Buffer, fileName: string, userId?: number, firebaseUid?: string): Promise<string[]> {
     const tempDir = '/tmp';
     const tempPdfPath = path.join(tempDir, `temp-${Date.now()}.pdf`);
     const previewUrls: string[] = [];
@@ -316,12 +334,13 @@ export class FirebaseStorageService {
             metadata: {
               originalPdf: fileName,
               uploadedAt: new Date().toISOString(),
-              userId: userId?.toString() || 'unknown'
+               userId: userId?.toString() || 'unknown',
+               ...(firebaseUid ? { firebaseUid } : {}),
             }
           }
         });
 
-        const previewUrl = await this.responseUrl(previewFileName, userId);
+         const previewUrl = await this.responseUrl(previewFileName, userId, firebaseUid);
         previewUrls.push(previewUrl);
       }
 

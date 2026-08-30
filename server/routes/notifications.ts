@@ -3,6 +3,7 @@ import { storage } from "../storage";
 import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration.js';
 import { logger } from '../lib/logger';
+import { toNotificationDto } from "../lib/privacy-dto";
 
 const router = Router();
 
@@ -33,7 +34,7 @@ router.get("/", async (req, res) => {
     }
     
     const notifications = await storage.getUnreadNotifications(req.user.id);
-    res.json(notifications);
+    res.json(notifications.map(toNotificationDto));
   } catch (error) {
     logger.error("Error getting notifications:", error);
     res.status(500).json({ error: "Failed to get notifications" });
@@ -72,7 +73,7 @@ router.patch("/:id", async (req, res) => {
     if (!updatedNotification) {
       return res.status(404).json({ error: "Notification not found" });
     }
-    res.json(updatedNotification);
+    res.json(toNotificationDto(updatedNotification));
   } catch (error) {
     logger.error("Error marking notification as read:", error);
     res.status(500).json({ error: "Failed to mark notification as read" });

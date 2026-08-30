@@ -8,6 +8,7 @@ import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration';
 import { validateDirectMessageInput, groupMessageSchema } from '../lib/message-validation';
 import { logger } from '../lib/logger';
+import { toMessageDto, toMessageSummaryDto } from "../lib/privacy-dto";
 
 const router = Router();
 
@@ -18,7 +19,11 @@ router.use(requireCompleteRegistration);
 // Get messages between current user and another user
 // Register the static group route before the parameterized user route so
 // "/group" cannot be interpreted as a user ID.
-router.post("/group", createGroupMessageHandler);
+router.post("/group", (_req, res) => {
+  res.status(410).json({
+    message: "Group chat is not supported. Use a direct connection chat instead.",
+  });
+});
 
 router.get("/:userId", async (req, res) => {
   try {
@@ -36,25 +41,26 @@ router.get("/:userId", async (req, res) => {
     // Get messages between users using the storage interface
     const messagesList = await storage.getMessages(currentUserId, otherUserId);
 
-    res.json(messagesList);
+    res.json(messagesList.map(toMessageDto));
 
   } catch (error) {
     logger.error("Error fetching messages:", error);
-    res.status(500).json({ 
-      message: "Failed to fetch messages",
-      error: error instanceof Error ? error.message : 'Unknown error'
-    });
+    if (error instanceof Error && error.message === "Users are not connected") {
+      return res.status(403).json({ message: "Messages require an accepted connection" });
+    }
+    res.status(500).json({ message: "Failed to fetch messages" });
   }
 });
 
 // Message creation endpoint
 router.post("/:userId", async (req, res) => {
   try {
-    if (!req.user) {
+    const authenticatedUser = req.user;
+    if (!authenticatedUser) {
       return res.status(401).json({ message: 'User not found' });
     }
     
-    const senderId = req.user.id;
+    const senderId = req.user!.id;
     const receiverId = parseInt(req.params.userId);
     const { content } = req.body;
 
@@ -101,24 +107,31 @@ router.post("/:userId", async (req, res) => {
     
     logger.debug('[NewMessage-PUSH] Push notification section finished', { pushTimestamp, receiverId });
 
-    res.status(201).json(message);
+    res.status(201).json(toMessageDto(message));
   } catch (error) {
     logger.error('Error sending message:', error);
-    res.status(500).json({ 
-      message: "Failed to send message",
-      error: error instanceof Error ? error.message : 'Unknown error'
-    });
+    if (error instanceof Error && error.message === "Users are not connected") {
+      return res.status(403).json({ message: "Messages require an accepted connection" });
+    }
+    res.status(500).json({ message: "Failed to send message" });
   }
 });
 
 // Group message creation endpoint
-async function createGroupMessageHandler(req: Request, res: Response) {
+export async function legacyCreateGroupMessageHandler(req: Request, res: Response) {
+  if (req.method === "POST") {
+    return res.status(410).json({
+      message: "Group chat is not supported. Use a direct connection chat instead.",
+    });
+  }
+
   try {
-    if (!req.user) {
+    const authenticatedUser = req.user;
+    if (!authenticatedUser) {
       return res.status(401).json({ message: 'User not found' });
     }
     
-    const senderId = req.user.id;
+    const senderId = req.user!.id;
     const { content, memberIds } = req.body;
 
     // Validate request data
@@ -126,7 +139,7 @@ async function createGroupMessageHandler(req: Request, res: Response) {
     if (!validation.success) {
       return res.status(400).json({ 
         message: "Invalid request data", 
-        errors: validation.error.format() 
+        errors: validation.error?.format()
       });
     }
 
@@ -291,15 +304,12 @@ async function createGroupMessageHandler(req: Request, res: Response) {
 
     res.status(201).json({ 
       conversationId, 
-      messages: sentMessages,
+      messages: sentMessages.map(toMessageSummaryDto),
       success: true
     });
   } catch (error) {
     logger.error('Error creating group chat:', error);
-    res.status(500).json({ 
-      message: "Failed to create group chat",
-      error: error instanceof Error ? error.message : 'Unknown error'
-    });
+    res.status(500).json({ message: "Failed to create group chat" });
   }
 }
 

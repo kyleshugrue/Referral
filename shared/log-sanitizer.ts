@@ -45,6 +45,10 @@ const SENSITIVE_KEY_SUBSTRINGS = [
   'connectionstring',
   'databaseurl',
   'upload',
+  'url',
+  'href',
+  'signature',
+  'stack',
   // Push-notification and messaging payloads commonly carry another user's
   // identity or private message content under keys like `sender_name`,
   // `accepter_name`, `message_preview` - these are PII/private content, not
@@ -92,6 +96,14 @@ const COOKIE_PATTERN = /\b(?:set-cookie|cookie)\s*:\s*[^\r\n]+/gi;
  */
 export function scrubSensitiveText(text: string): string {
   let result = text;
+
+  // Cloud storage signed URLs use several provider-specific credential
+  // parameters. Keep the URL shape for diagnostics, but never retain the
+  // credential-bearing values.
+  result = result.replace(
+    /([?&](?:x-goog-[^=&\s]+|x-amz-[^=&\s]+|googleaccessid|signature|expires)=)[^&\s]+/gi,
+    '$1[REDACTED]',
+  );
 
   for (const param of SENSITIVE_URL_PARAMS) {
     const paramPattern = new RegExp(`([?&]${param}=)[^&\\s]+`, 'gi');

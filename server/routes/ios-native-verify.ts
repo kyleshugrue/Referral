@@ -2,12 +2,20 @@ import { Router } from 'express';
 import { storage } from '../storage';
 import { auth } from '../lib/firebase-admin';
 import { logger } from '../lib/logger';
+import { requireTrustedOriginForSessionMutation } from '../lib/http-security';
 
 const router = Router();
 
 // Dedicated secure endpoint for iOS native email verification bypass
 // This endpoint requires proper Firebase token verification before setting emailVerified=true
-router.post('/', async (req, res) => {
+router.post('/', requireTrustedOriginForSessionMutation, async (req, res) => {
+  if (
+    req.get('X-Platform') !== 'ios-native' ||
+    req.get('X-Capacitor-Platform') !== 'ios'
+  ) {
+    return res.status(403).json({ message: 'Native verification is restricted to iOS clients' });
+  }
+
   logger.debug("📱 [IOS-NATIVE-VERIFY] Starting iOS native verification...", {
     hasToken: !!req.body.token,
     timestamp: new Date().toISOString(),
@@ -33,6 +41,10 @@ router.post('/', async (req, res) => {
       logger.debug(`🎟️ [IOS-NATIVE-VERIFY] Verifying Firebase token for user ${userId}...`);
       const decodedToken = await auth.verifyIdToken(token);
       const firebaseUid = decodedToken.uid;
+
+      if (!('email_verified' in decodedToken) || decodedToken.email_verified !== true) {
+        return res.status(403).json({ message: 'Firebase email is not verified' });
+      }
       
       logger.debug('✅ [IOS-NATIVE-VERIFY] Firebase token verified successfully:', {
         userId: userId
@@ -95,13 +107,10 @@ router.post('/', async (req, res) => {
     }
   } catch (error) {
     logger.error('💥 [IOS-NATIVE-VERIFY] Critical error:', {
-      error: error instanceof Error ? error.message : error,
-      stack: error instanceof Error ? error.stack : undefined,
+      error,
       userId: req.user?.id
     });
-    return res.status(500).json({ 
-      message: error instanceof Error ? error.message : "iOS native verification failed"
-    });
+    return res.status(500).json({ message: "iOS native verification failed" });
   }
 });
 

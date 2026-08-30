@@ -16,6 +16,8 @@ import { Request, Response, NextFunction } from 'express';
 import { registerLimiter } from './lib/rate-limits';
 import { legacyFirebaseTokenAuthorization, requireVerifiedFirebaseUser } from './lib/register-auth';
 import { registerFirebaseUser } from './routes/register';
+import { toSelfUserDto } from './lib/privacy-dto';
+import { requireTrustedOriginForSessionMutation } from './lib/http-security';
 
 // Export session middleware for WebSocket authentication
 export let sessionMiddleware: ReturnType<typeof session>;
@@ -28,7 +30,7 @@ const configuredApps = new WeakSet<Express>();
 // Eventually, most routes should migrate to requireAuthJWT.
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   if (req.isAuthenticated() && req.user) {
-    return next();
+    return requireTrustedOriginForSessionMutation(req, res, next);
   }
   res.status(401).json({ message: 'Authentication required' });
 }
@@ -145,7 +147,7 @@ export function setupAuth(app: Express) {
   // The local strategy was removed during Firebase migration (Oct 21, 2025)
   // All login functionality now uses Firebase Authentication via /api/firebase-auth
 
-  app.post("/api/logout", (req, res, next) => {
+  app.post("/api/logout", requireTrustedOriginForSessionMutation, (req, res, next) => {
     req.logout((err) => {
       if (err) {
         return next(err);
@@ -197,7 +199,9 @@ export function setupAuth(app: Express) {
               logger.error('[Firebase register] Session save failed:', saveErr);
               return res.status(500).json({ error: 'Session save failed' });
             }
-            return status === 201 ? res.status(201).json(user) : res.json(user);
+            return status === 201
+              ? res.status(201).json(toSelfUserDto(user))
+              : res.json(toSelfUserDto(user));
           });
         });
       });

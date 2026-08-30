@@ -207,7 +207,7 @@ router.post('/refresh', async (req, res) => {
       details: { error: error instanceof Error ? error.message : 'Unknown error' }
     });
     return res.status(500).json({ 
-      message: error instanceof Error ? error.message : 'Failed to refresh token' 
+      message: 'Failed to refresh token'
     });
   }
 });
@@ -264,7 +264,7 @@ router.post('/revoke', async (req, res) => {
       details: { error: error instanceof Error ? error.message : 'Unknown error' }
     });
     return res.status(500).json({ 
-      message: error instanceof Error ? error.message : 'Failed to revoke token' 
+      message: 'Failed to revoke token'
     });
   }
 });
@@ -307,7 +307,7 @@ router.post('/revoke-all', requireAuth, async (req, res) => {
       details: { error: error instanceof Error ? error.message : 'Unknown error' }
     });
     return res.status(500).json({ 
-      message: error instanceof Error ? error.message : 'Failed to revoke all tokens' 
+      message: 'Failed to revoke all tokens'
     });
   }
 });
