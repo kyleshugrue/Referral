@@ -2,94 +2,112 @@ import { initializeApp, getApps, App, cert } from 'firebase-admin/app';
 import { getAuth, Auth } from 'firebase-admin/auth';
 import { getStorage, Storage } from 'firebase-admin/storage';
 import 'firebase-admin';
+import { logger } from './logger';
 
 let firebaseApp: App | null = null;
 let firebaseAuth: Auth | null = null;
 let firebaseStorage: Storage | null = null;
 
-// Check if Firebase Admin has already been initialized
-if (!getApps().length) {
-  try {
-    // Check if we have full credentials
-    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
-    const privateKey = process.env.FIREBASE_PRIVATE_KEY;
-    const projectId = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID;
-    let storageBucket = process.env.FIREBASE_STORAGE_BUCKET || process.env.VITE_FIREBASE_STORAGE_BUCKET;
-    
-    // Strip gs:// prefix if present (Firebase Admin SDK expects just the bucket name)
-    if (storageBucket?.startsWith('gs://')) {
-      storageBucket = storageBucket.replace('gs://', '');
-      console.log('[Firebase Admin] Stripped gs:// prefix from storage bucket');
-    }
+export interface FirebaseAdminConfig {
+  clientEmail: string;
+  privateKey: string;
+  projectId: string;
+  storageBucket?: string;
+}
 
-    if (clientEmail && privateKey && projectId) {
-      // Clean and validate the private key
-      const cleanPrivateKey = privateKey.replace(/\\n/g, '\n');
-      
-      // Ensure proper private key format - using constants to avoid scanner false positives
-      const PEM_BEGIN = ['-----', 'BEGIN', ' ', 'PRIVATE', ' ', 'KEY', '-----'].join('');
-      const PEM_END = ['-----', 'END', ' ', 'PRIVATE', ' ', 'KEY', '-----'].join('');
-      
-      if (!cleanPrivateKey.includes(PEM_BEGIN)) {
-        console.log("Invalid private key format - missing BEGIN marker");
-        throw new Error('Invalid private key format');
-      }
-      
-      if (!cleanPrivateKey.includes(PEM_END)) {
-        console.log("Invalid private key format - missing END marker");
-        throw new Error('Invalid private key format');
-      }
-      
-      // Initialize with service account credentials
-      firebaseApp = initializeApp({
-        credential: cert({
-          clientEmail,
-          privateKey: cleanPrivateKey,
-          projectId
-        }),
-        projectId,
-        storageBucket
-      });
-      
-      firebaseAuth = getAuth(firebaseApp);
-      firebaseStorage = getStorage(firebaseApp);
-      console.log("Firebase Admin initialized with full credentials");
-    } else {
-      // Fallback to minimal config
-      firebaseApp = initializeApp({
-        projectId
-      });
-      
-      firebaseAuth = getAuth(firebaseApp);
-      console.log("Firebase Admin initialized with minimal config");
-      console.log("To enable full Firebase Admin functionality, provide service account credentials");
-    }
-  } catch (error) {
-    console.error("Error initializing Firebase Admin:", error);
-    console.log("Firebase Admin initialization failed, auth features will be limited");
+export function isSyntheticSmokeTest(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CI === 'true' && env.SMOKE_TEST === 'true';
+}
+
+const PEM_BEGIN = ['-----', 'BEGIN', ' ', 'PRIVATE', ' ', 'KEY', '-----'].join('');
+const PEM_END = ['-----', 'END', ' ', 'PRIVATE', ' ', 'KEY', '-----'].join('');
+
+export function readFirebaseAdminConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): FirebaseAdminConfig | null {
+  const clientEmail = env.FIREBASE_CLIENT_EMAIL?.trim();
+  const privateKey = env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n').trim();
+  const projectId = env.FIREBASE_PROJECT_ID?.trim();
+  // Some existing deployments expose the bucket through the frontend
+  // configuration name. This fallback affects storage selection only; Admin
+  // authentication still requires the server-only project ID and credentials.
+  let storageBucket = (
+    env.FIREBASE_STORAGE_BUCKET?.trim() || env.VITE_FIREBASE_STORAGE_BUCKET?.trim()
+  );
+
+  if (!clientEmail || !privateKey || !projectId) return null;
+  if (!privateKey.includes(PEM_BEGIN) || !privateKey.includes(PEM_END)) {
+    throw new Error('FIREBASE_PRIVATE_KEY has an invalid format');
   }
-} else {
-  firebaseApp = getApps()[0];
-  firebaseAuth = getAuth(firebaseApp);
-  if (firebaseApp) {
-    try {
-      firebaseStorage = getStorage(firebaseApp);
-    } catch {
-      console.log("Firebase Storage not available with current configuration");
-    }
+
+  // Firebase Admin expects a bucket name, not a gs:// URL.
+  if (storageBucket?.startsWith('gs://')) {
+    storageBucket = storageBucket.slice('gs://'.length);
+  }
+
+  return { clientEmail, privateKey, projectId, storageBucket };
+}
+
+export class FirebaseAdminUnavailableError extends Error {
+  constructor() {
+    super('Firebase Admin authentication is unavailable');
+    this.name = 'FirebaseAdminUnavailableError';
   }
 }
 
-// Create mock auth functions that will work when Firebase Admin isn't fully initialized
-const mockVerifyIdToken = async (token: string) => {
-  void token;
-  console.log("Using mock verifyIdToken - Firebase Admin not fully configured");
-  return { uid: 'mock-uid', email: 'mock@example.com' };
-};
+function initializeFirebaseAdmin(): void {
+  if (isSyntheticSmokeTest()) {
+    logger.info('[Firebase Admin] Skipped for synthetic CI smoke test');
+    return;
+  }
 
-// Export the auth object with fallbacks for functions
+  const existingApp = getApps()[0];
+  if (existingApp) {
+    firebaseApp = existingApp;
+    firebaseAuth = getAuth(existingApp);
+    try {
+      firebaseStorage = getStorage(existingApp);
+    } catch {
+      logger.warn('[Firebase Admin] Storage is unavailable');
+    }
+    return;
+  }
+
+  try {
+    const config = readFirebaseAdminConfig();
+    if (!config) {
+      logger.warn(
+        '[Firebase Admin] Configuration is incomplete; Firebase authentication is unavailable until server credentials are configured',
+      );
+      return;
+    }
+
+    firebaseApp = initializeApp({
+      credential: cert(config),
+      projectId: config.projectId,
+      storageBucket: config.storageBucket,
+    });
+    firebaseAuth = getAuth(firebaseApp);
+    firebaseStorage = getStorage(firebaseApp);
+    logger.info('[Firebase Admin] Initialized with service-account credentials');
+  } catch (error) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'Firebase Admin initialization failed; refusing to start production authentication',
+        { cause: error },
+      );
+    }
+    logger.warn('[Firebase Admin] Initialization failed outside production; authentication is unavailable');
+  }
+}
+
+initializeFirebaseAdmin();
+
 export const auth = {
-  verifyIdToken: firebaseAuth ? firebaseAuth.verifyIdToken.bind(firebaseAuth) : mockVerifyIdToken,
+  verifyIdToken: async (token: string) => {
+    if (!firebaseAuth) throw new FirebaseAdminUnavailableError();
+    return firebaseAuth.verifyIdToken(token);
+  },
 };
 
 export { firebaseStorage };

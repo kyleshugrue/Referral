@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { storage } from '../storage';
+import { storage, FirebaseIdentityConflictError } from '../storage';
 import { User, educationLevels } from '@shared/schema';
 import { simpleMatchJobHelper } from '../services/simple-match-job-helper';
 import { requireVerifiedFirebaseUser, getRegistrant } from '../lib/register-auth';
@@ -143,35 +143,15 @@ export async function registerFirebaseUser(req: Request, res: RegistrationRespon
       return res.status(400).json({ message: 'Email is required' });
     }
 
-    // Idempotency: if this Firebase account already has a user, return it
-    try {
-      const usersByUid = await storage.getUsersByFirebaseUid(firebaseUid);
-      if (usersByUid && usersByUid.length > 0) {
-        return respondWithRegisteredUser(res, usersByUid[0], 200);
-      }
-    } catch {
-      // Continue — user lookup failure falls through to creation path
-    }
-
-    // Account linking: only via the email inside the verified token, and
-    // only when that email is verified (prevents claiming someone else's
-    // account with an unverified Firebase signup using their address).
-    if (registrant.email) {
-      const existingUser = await storage.getUserByEmail(registrant.email);
-      if (existingUser) {
-        if (existingUser.firebaseUid && existingUser.firebaseUid !== firebaseUid) {
-          return res.status(409).json({ message: 'An account with this email already exists' });
-        }
-        if (!existingUser.firebaseUid && !registrant.emailVerified) {
-          return res.status(409).json({ message: 'An account with this email already exists. Verify your email to continue.' });
-        }
-        const linkedUser = await storage.linkUserToFirebaseUid(
-          existingUser.id,
-          firebaseUid,
-          registrant.emailVerified,
-        );
-        return respondWithRegisteredUser(res, linkedUser, 200);
-      }
+    // Resolve an existing identity and any email link in one transaction.
+    // Database failures must not fall through to account creation.
+    const existingUser = await storage.resolveUserForFirebaseIdentity(
+      firebaseUid,
+      email,
+      registrant.emailVerified,
+    );
+    if (existingUser) {
+      return respondWithRegisteredUser(res, existingUser, 200);
     }
 
     // Create new user in database with properly formatted data
@@ -207,14 +187,43 @@ export async function registerFirebaseUser(req: Request, res: RegistrationRespon
       password: undefined,
     };
 
-    const newUser = await storage.createUser(processedUserData);
-    return respondWithRegisteredUser(res, newUser, 201);
+    try {
+      const newUser = await storage.createUser(processedUserData);
+      return respondWithRegisteredUser(res, newUser, 201);
+    } catch (error) {
+      // A concurrent registration may win the unique UID/email constraint.
+      // Only that expected conflict may re-resolve the identity; all other
+      // database failures remain errors and do not trigger account fallback.
+      if (isUniqueConstraintViolation(error)) {
+        const concurrentUser = await storage.resolveUserForFirebaseIdentity(
+          firebaseUid,
+          email,
+          registrant.emailVerified,
+        );
+        if (concurrentUser) {
+          return respondWithRegisteredUser(res, concurrentUser, 200);
+        }
+      }
+      throw error;
+    }
   } catch (error) {
+    if (error instanceof FirebaseIdentityConflictError) {
+      return res.status(409).json({ message: error.message });
+    }
     console.error('Registration error:', error instanceof Error ? error.name : 'unknown');
     return res.status(500).json({
       message: 'Registration failed'
     });
   }
+}
+
+function isUniqueConstraintViolation(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === 'object' &&
+    'code' in error &&
+    (error as { code?: unknown }).code === '23505',
+  );
 }
 
 router.post('/', requireVerifiedFirebaseUser, registerFirebaseUser);
@@ -232,24 +241,20 @@ router.post('/partial', requireVerifiedFirebaseUser, async (req, res) => {
       return res.status(400).json({ message: 'Invalid media reference' });
     }
 
-    // Check if a user with this Firebase UID already exists in our database
+    // Resolve identity and email linking transactionally. A database failure
+    // must not fall through to creating a second account.
     let existingUser: User | undefined;
     try {
-      const users = await storage.getUsersByFirebaseUid(firebaseUid);
-      existingUser = users?.[0];
-
-      // Fallback lookup only by the token's email — never client input
-      if (!existingUser && registrant.email) {
-        const byEmail = await storage.getUserByEmail(registrant.email);
-        if (byEmail) {
-          if (byEmail.firebaseUid && byEmail.firebaseUid !== firebaseUid) {
-            return res.status(409).json({ message: 'An account with this email already exists' });
-          }
-          existingUser = byEmail;
-        }
+      existingUser = await storage.resolveUserForFirebaseIdentity(
+        firebaseUid,
+        registrant.email,
+        registrant.emailVerified,
+      );
+    } catch (error) {
+      if (error instanceof FirebaseIdentityConflictError) {
+        return res.status(409).json({ message: error.message });
       }
-    } catch {
-      // If user not found, continue with creation
+      throw error;
     }
 
     if (existingUser) {
@@ -370,7 +375,25 @@ router.post('/partial', requireVerifiedFirebaseUser, async (req, res) => {
         emailVerified: registrant.emailVerified
       };
 
-      const newUser = await storage.createUser(userDataWithDefaults);
+      let newUser: User;
+      try {
+        newUser = await storage.createUser(userDataWithDefaults);
+      } catch (error) {
+        if (isUniqueConstraintViolation(error)) {
+          const concurrentUser = await storage.resolveUserForFirebaseIdentity(
+            firebaseUid,
+            registrant.email,
+            registrant.emailVerified,
+          );
+          if (concurrentUser) {
+            newUser = concurrentUser;
+          } else {
+            throw error;
+          }
+        } else {
+          throw error;
+        }
+      }
 
       // Check if user now has minimum match data and queue initial AI match jobs
       if (newUser.hasMinimumMatchData && !newUser.initialMatchJobsQueued && newUser.emailVerified) {
@@ -397,6 +420,9 @@ router.post('/partial', requireVerifiedFirebaseUser, async (req, res) => {
       return res.status(201).json(toSelfUserDto(newUser));
     }
   } catch (error) {
+    if (error instanceof FirebaseIdentityConflictError) {
+      return res.status(409).json({ message: error.message });
+    }
     console.error('[Partial Registration] Error:', error);
     return res.status(500).json({ message: 'Partial registration failed' });
   }

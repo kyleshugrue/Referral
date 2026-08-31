@@ -27,6 +27,7 @@ export interface IStorage {
   getUserByMediaReference(reference: string): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
   getUsersByFirebaseUid(firebaseUid: string): Promise<User[]>;
+  resolveUserForFirebaseIdentity(firebaseUid: string, email: string | null, emailVerified: boolean): Promise<User | undefined>;
   createUser(user: UserWrite): Promise<User>;
   updateUser(id: number, user: UserWrite): Promise<User>;
   updateUserEmail(id: number, newEmail: string): Promise<User>;
@@ -128,6 +129,13 @@ export interface IStorage {
   updateRefreshTokenLastUsed(tokenHash: string): Promise<void>;
   cleanupExpiredTokens(): Promise<number>;
   logRefreshTokenReuse(reuseEvent: InsertRefreshTokenReuseEvent): Promise<void>;
+}
+
+export class FirebaseIdentityConflictError extends Error {
+  constructor(message = 'Firebase identity conflicts with an existing account') {
+    super(message);
+    this.name = 'FirebaseIdentityConflictError';
+  }
 }
 
 export class DatabaseStorage implements IStorage {
@@ -419,6 +427,72 @@ export class DatabaseStorage implements IStorage {
   
   async getUsersByFirebaseUid(firebaseUid: string): Promise<User[]> {
     return await db.select().from(users).where(eq(users.firebaseUid, firebaseUid));
+  }
+
+  async resolveUserForFirebaseIdentity(
+    firebaseUid: string,
+    email: string | null,
+    emailVerified: boolean,
+  ): Promise<User | undefined> {
+    return db.transaction(async (tx) => {
+      const identityPredicates = [eq(users.firebaseUid, firebaseUid)];
+      if (email) identityPredicates.push(eq(users.email, email));
+
+      const matches = await tx
+        .select()
+        .from(users)
+        .where(identityPredicates.length === 1 ? identityPredicates[0] : or(...identityPredicates))
+        .limit(2);
+
+      const byUid = matches.find((user) => user.firebaseUid === firebaseUid);
+      const byEmail = email ? matches.find((user) => user.email === email) : undefined;
+
+      if (byUid && byEmail && byUid.id !== byEmail.id) {
+        throw new FirebaseIdentityConflictError();
+      }
+
+      const existing = byUid ?? byEmail;
+      if (!existing) return undefined;
+
+      if (byUid) {
+        if (!emailVerified || existing.emailVerified) return existing;
+
+        const [verified] = await tx
+          .update(users)
+          .set({ emailVerified: true })
+          .where(eq(users.id, existing.id))
+          .returning();
+        return verified ?? existing;
+      }
+
+      if (existing.firebaseUid && existing.firebaseUid !== firebaseUid) {
+        throw new FirebaseIdentityConflictError();
+      }
+      if (!emailVerified) {
+        throw new FirebaseIdentityConflictError(
+          'Email verification is required before linking this existing account',
+        );
+      }
+
+      const [linked] = await tx
+        .update(users)
+        .set({
+          firebaseUid,
+          emailVerified: true,
+        })
+        .where(and(eq(users.id, existing.id), isNull(users.firebaseUid)))
+        .returning();
+
+      if (linked) return linked;
+
+      const [current] = await tx
+        .select()
+        .from(users)
+        .where(eq(users.id, existing.id))
+        .limit(1);
+      if (current?.firebaseUid === firebaseUid) return current;
+      throw new FirebaseIdentityConflictError();
+    });
   }
 
   async createUser(insertUser: UserWrite): Promise<User> {

@@ -92,6 +92,11 @@ function makeStorage(state: HarnessState) {
       return user ? [user] : [];
     },
     getUserByEmail: async (email: string) => state.usersByEmail.get(email) ?? null,
+    resolveUserForFirebaseIdentity: async (uid: string, email: string | null) => {
+      const byUid = state.usersByFirebaseUid.get(uid);
+      if (byUid) return byUid;
+      return email ? state.usersByEmail.get(email) : undefined;
+    },
     createUser: async (data: Partial<HarnessUser>) => {
       const user = makeUser({
         ...data,

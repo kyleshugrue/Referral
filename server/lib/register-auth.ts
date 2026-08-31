@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import { auth } from './firebase-admin';
+import { logger } from './logger';
 
 /**
  * Registration route authentication.
@@ -92,7 +93,7 @@ export async function requireVerifiedFirebaseUser(
   }
 
   if (!uidMatchesClaim(decoded.uid, req.body?.firebaseUid)) {
-    console.warn('[register-auth] Rejected registration with mismatched firebaseUid claim');
+    logger.warn('[register-auth] Rejected registration with mismatched firebaseUid claim');
     return res.status(403).json({ message: 'Firebase UID does not match authenticated user' });
   }
 
