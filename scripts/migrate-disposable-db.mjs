@@ -39,7 +39,7 @@ try {
     console.log(`Applied ${file}`);
   }
 
-  const required = ['callback_notification_queue', 'fcm_tokens', 'match_generation_jobs', 'rate_limit_windows', 'session', 'websocket_tickets'];
+  const required = ['callback_notification_queue', 'delivery_obligations', 'fcm_tokens', 'match_generation_jobs', 'rate_limit_windows', 'session', 'websocket_tickets'];
   const result = await client.query(
     `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ANY($1::text[])`,
     [required],

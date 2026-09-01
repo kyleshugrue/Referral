@@ -12,6 +12,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Capacitor } from '@capacitor/core';
 import { Keyboard } from '@capacitor/keyboard';
 import { IOSKeyboardAwareContainer } from '@/components/ios-keyboard-aware-container';
+import { logger } from '@/lib/logger';
 
 export default function LoginPage() {
   const { 
@@ -47,16 +48,16 @@ export default function LoginPage() {
         }
       }
       
-      console.log("Attempting to sign in with email/password");
+      logger.debug("Attempting to sign in with email/password");
       await loginMutation.mutateAsync(data);
       
-      console.log("Email/password sign in successful");
+      logger.info("Email/password sign in successful");
       toast({
         title: "Sign in successful",
         description: "Welcome back!",
       });
     } catch (error: unknown) {
-      console.error("Login error:", error);
+      logger.error("Login error:", error);
       setLoginError(error instanceof Error ? error.message : "Failed to sign in. Please try again.");
     }
   };

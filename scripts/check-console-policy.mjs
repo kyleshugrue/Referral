@@ -15,6 +15,8 @@ const protectedFiles = [
   'server/routes/hybrid-locations.ts',
   'server/routes/messages.ts',
   'server/routes/notifications.ts',
+  'server/routes/push-notifications.ts',
+  'server/services/push-notifications.ts',
   'server/routes/zip-analysis.ts',
 ];
 

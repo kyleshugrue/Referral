@@ -50,6 +50,13 @@
       "when": 1788215310007,
       "tag": "0006_rate_limit_windows",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788283912173,
+      "tag": "0007_delivery_obligations",
+      "breakpoints": true
     }
   ]
 }

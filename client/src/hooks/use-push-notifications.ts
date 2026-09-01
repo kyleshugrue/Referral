@@ -3,6 +3,7 @@ import { Capacitor } from '@capacitor/core';
 import { PushNotifications } from '@capacitor/push-notifications';
 import { FirebaseMessaging } from '@capacitor-firebase/messaging';
 import { Device } from '@capacitor/device';
+import { logger } from '@/lib/logger';
 
 declare global {
   interface Window {
@@ -27,7 +28,7 @@ function isCapacitorBridgePresent(): boolean {
     
     return hasCapacitor && hasPlugins && hasPlatformMethod;
   } catch (error) {
-    console.error('[Platform Detection] Error checking Capacitor bridge:', error);
+    logger.error('[Platform Detection] Error checking Capacitor bridge:', error);
     return false;
   }
 }
@@ -51,12 +52,13 @@ function isNativeIOS(): boolean {
     const hasBridge = isCapacitorBridgePresent();
     
     // Log detailed platform detection for debugging
-    console.log('[Platform Detection] === Native iOS Detection Results ===');
-    console.log('[Platform Detection] isNativePlatform:', isNative, isNative ? '✓ Standard detection works' : '✗ Standard detection failed');
-    console.log('[Platform Detection] getPlatform:', Capacitor.getPlatform(), isIOS ? '✓ iOS platform' : '✗ Not iOS');
-    console.log('[Platform Detection] FirebaseMessaging available:', isFirebaseAvailable, isFirebaseAvailable ? '✓ Plugin available' : '✗ Plugin unavailable');
-    console.log('[Platform Detection] PushNotifications available:', isPushAvailable, isPushAvailable ? '✓ Plugin available' : '✗ Plugin unavailable');
-    console.log('[Platform Detection] Capacitor bridge present:', hasBridge, hasBridge ? '✓ Native bridge detected' : '✗ No native bridge');
+    logger.debug('[Platform Detection] Native iOS detection results', {
+      isNative,
+      isIOS,
+      isFirebaseAvailable,
+      isPushAvailable,
+      hasBridge,
+    });
     
     // Enhanced detection logic with TestFlight fallback
     // Must be iOS platform AND have at least one indicator of native environment
@@ -75,14 +77,14 @@ function isNativeIOS(): boolean {
         isPushAvailable && 'Push plugin',
         hasBridge && 'Capacitor bridge'
       ].filter(Boolean);
-      console.log('[Platform Detection] ✓ isNativeIOS: true (detected via:', reasons.join(', ') + ')');
+      logger.debug('[Platform Detection] Native iOS detected', { reasons });
     } else {
-      console.log('[Platform Detection] ✗ isNativeIOS: false (not iOS or no native indicators)');
+      logger.debug('[Platform Detection] Native iOS not detected');
     }
     
     return result;
   } catch (error) {
-    console.error('[Platform Detection] Error in isNativeIOS:', error);
+    logger.error('[Platform Detection] Error in isNativeIOS:', error);
     return false;
   }
 }
@@ -132,26 +134,26 @@ export function usePushNotifications(): PushNotificationHookReturn {
   const initializePushNotifications = useCallback(async (): Promise<boolean> => {
     // Only run on iOS native platform (NOT iOS web browsers)
     if (!isNativeIOS()) {
-      console.log('[Push Notifications] Not iOS native platform, skipping initialization');
+      logger.debug('[Push Notifications] Not iOS native platform; skipping initialization');
       return false;
     }
 
     const retryHelpers = retryHelpersRef.current;
     if (!retryHelpers) {
-      console.error('[Push Notifications] Retry helpers are not ready');
+      logger.error('[Push Notifications] Retry helpers are not ready');
       return false;
     }
 
     // Don't initialize twice
     if (isInitialized) {
-      console.log('[Push Notifications] Already initialized, checking for token re-registration');
+      logger.debug('[Push Notifications] Already initialized; checking token registration');
       
       // Even if initialized, try to re-register token on app launch
       if (hasPermission) {
-        console.log('[Push Notifications] Permission already granted, attempting token re-registration');
+        logger.debug('[Push Notifications] Permission already granted; attempting token registration');
         const tokenResult = await retryHelpers.getTokenWithRetry();
         if (tokenResult.success && tokenResult.token) {
-          console.log('[Push Notifications] Re-registering FCM token on app launch');
+          logger.debug('[Push Notifications] Re-registering FCM token on app launch');
           await retryHelpers.registerTokenWithRetry(tokenResult.token);
         }
       }
@@ -160,47 +162,44 @@ export function usePushNotifications(): PushNotificationHookReturn {
     }
 
     try {
-      console.log('[Push Notifications] Starting FCM initialization for iOS native');
-      console.log('[Push Notifications] Environment details:', {
-        userAgent: navigator.userAgent,
+      logger.debug('[Push Notifications] Starting FCM initialization for iOS native', {
         isSecureContext: window.isSecureContext,
-        location: window.location.href
       });
 
       // Check existing permissions first
       const currentPermission = await FirebaseMessaging.checkPermissions();
-      console.log('[Push Notifications] Current permission status:', currentPermission);
+      logger.debug('[Push Notifications] Current permission status:', currentPermission.receive);
 
       let permissionResult;
       
       if (currentPermission.receive === 'granted') {
-        console.log('[Push Notifications] Permission already granted, skipping request');
+        logger.debug('[Push Notifications] Permission already granted; skipping request');
         permissionResult = { success: true, permission: 'granted' };
       } else {
-        console.log('[Push Notifications] Requesting permissions...');
+        logger.debug('[Push Notifications] Requesting permissions');
          permissionResult = await retryHelpers.requestPermissionWithRetry();
       }
       
       if (permissionResult.success && permissionResult.permission === 'granted') {
-        console.log('[Push Notifications] FCM permission granted');
+        logger.info('[Push Notifications] FCM permission granted');
         setHasPermission(true);
         
         // Enhanced token retrieval with retry logic
          const tokenResult = await retryHelpers.getTokenWithRetry();
         
         if (tokenResult.success && tokenResult.token) {
-          console.log('[Push Notifications] FCM token received successfully');
+          logger.debug('[Push Notifications] FCM token received successfully');
           
           // Register token with backend using retry logic
            const registrationResult = await retryHelpers.registerTokenWithRetry(tokenResult.token);
           
           if (registrationResult.success) {
-            console.log('[Push Notifications] FCM token registered with backend successfully');
+            logger.info('[Push Notifications] FCM token registered with backend successfully');
           } else {
-            console.error('[Push Notifications] Failed to register FCM token with backend after retries');
+            logger.error('[Push Notifications] Failed to register FCM token with backend after retries');
           }
         } else {
-          console.error('[Push Notifications] Failed to get FCM token after retries');
+          logger.error('[Push Notifications] Failed to get FCM token after retries');
           setHasPermission(false);
           setIsInitialized(true);
           return false;
@@ -208,7 +207,7 @@ export function usePushNotifications(): PushNotificationHookReturn {
         
         setIsInitialized(true);
       } else {
-        console.log('[Push Notifications] FCM permission denied or failed:', permissionResult);
+        logger.warn('[Push Notifications] FCM permission denied or failed:', permissionResult.permission);
         setHasPermission(false);
         setIsInitialized(true);
         return false;
@@ -217,7 +216,7 @@ export function usePushNotifications(): PushNotificationHookReturn {
       // Handle notifications received while app is open
       await FirebaseMessaging.addListener('notificationReceived', (notification) => {
         const notificationData = notification?.notification?.data as { type?: string } | undefined;
-        console.log('[Push Notifications] FCM notification received while app open, type:', notificationData?.type ?? 'unknown');
+        logger.debug('[Push Notifications] FCM notification received while app open', { type: notificationData?.type ?? 'unknown' });
         
         // You could show an in-app notification here
         // For now, we'll let iOS handle it with the system notification
@@ -245,23 +244,23 @@ export function usePushNotifications(): PushNotificationHookReturn {
               window.location.href = '/connections?tab=messages';
               break;
             default:
-              console.log('[Push Notifications] Unknown notification type:', data.type);
+              logger.warn('[Push Notifications] Unknown notification type:', data.type);
           }
         }
       });
 
       // Handle token refresh/rotation events
       await FirebaseMessaging.addListener('tokenReceived', async (event) => {
-        console.log('[Push Notifications] FCM token refresh received, has token:', !!event?.token);
+        logger.debug('[Push Notifications] FCM token refresh received', { hasToken: !!event?.token });
         
         if (event.token) {
-          console.log('[Push Notifications] Re-registering refreshed token with backend');
+          logger.debug('[Push Notifications] Re-registering refreshed token with backend');
            const registrationResult = await retryHelpers.registerTokenWithRetry(event.token);
           
           if (registrationResult.success) {
-            console.log('[Push Notifications] Refreshed token re-registered successfully');
+            logger.info('[Push Notifications] Refreshed token re-registered successfully');
           } else {
-            console.error('[Push Notifications] Failed to re-register refreshed token');
+            logger.error('[Push Notifications] Failed to re-register refreshed token');
           }
         }
       });
@@ -269,7 +268,7 @@ export function usePushNotifications(): PushNotificationHookReturn {
       return true;
 
     } catch (error) {
-      console.error('[Push Notifications] FCM initialization error:', error);
+      logger.error('[Push Notifications] FCM initialization error:', error);
       setHasPermission(false);
       setIsInitialized(true);
       return false;
@@ -280,10 +279,10 @@ export function usePushNotifications(): PushNotificationHookReturn {
   const requestPermissionWithRetry = useCallback(async (maxAttempts = 3): Promise<{success: boolean, permission?: string}> => {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        console.log(`[Push Notifications] Permission request attempt ${attempt}/${maxAttempts}`);
+        logger.debug(`[Push Notifications] Permission request attempt ${attempt}/${maxAttempts}`);
         const permissionStatus = await FirebaseMessaging.requestPermissions();
         
-        console.log('[Push Notifications] Permission status:', permissionStatus);
+        logger.debug('[Push Notifications] Permission status:', permissionStatus.receive);
         
         if (permissionStatus.receive === 'granted') {
           return { success: true, permission: 'granted' };
@@ -291,14 +290,14 @@ export function usePushNotifications(): PushNotificationHookReturn {
           return { success: false, permission: 'denied' };
         } else if (permissionStatus.receive === 'prompt' && attempt < maxAttempts) {
           // Wait before retry for 'prompt' status
-          console.log('[Push Notifications] Permission status is prompt, retrying...');
+          logger.debug('[Push Notifications] Permission status is prompt; retrying');
           await new Promise(resolve => setTimeout(resolve, 2000));
           continue;
         }
         
         return { success: false, permission: permissionStatus.receive };
       } catch (error) {
-        console.error(`[Push Notifications] Permission request attempt ${attempt} failed:`, error);
+        logger.error(`[Push Notifications] Permission request attempt ${attempt} failed:`, error);
         if (attempt === maxAttempts) {
           return { success: false };
         }
@@ -312,20 +311,20 @@ export function usePushNotifications(): PushNotificationHookReturn {
   const getTokenWithRetry = useCallback(async (maxAttempts = 3): Promise<{success: boolean, token?: string}> => {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        console.log(`[Push Notifications] Token retrieval attempt ${attempt}/${maxAttempts}`);
+        logger.debug(`[Push Notifications] Token retrieval attempt ${attempt}/${maxAttempts}`);
         const result = await FirebaseMessaging.getToken();
         
         if (result.token) {
-          console.log('[Push Notifications] Token retrieved successfully');
+          logger.debug('[Push Notifications] Token retrieved successfully');
           return { success: true, token: result.token };
         }
         
         if (attempt < maxAttempts) {
-          console.log('[Push Notifications] No token received, retrying...');
+          logger.debug('[Push Notifications] No token received; retrying');
           await new Promise(resolve => setTimeout(resolve, 2000));
         }
       } catch (error) {
-        console.error(`[Push Notifications] Token retrieval attempt ${attempt} failed:`, error);
+        logger.error(`[Push Notifications] Token retrieval attempt ${attempt} failed:`, error);
         if (attempt < maxAttempts) {
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
@@ -344,7 +343,7 @@ export function usePushNotifications(): PushNotificationHookReturn {
       const info = await Device.getInfo();
       const id = await Device.getId();
       
-      console.log('[Push Notifications] Device info retrieved:', {
+      logger.debug('[Push Notifications] Device info retrieved:', {
         deviceModel: info.model,
         osVersion: info.osVersion,
         platform: info.platform
@@ -356,7 +355,7 @@ export function usePushNotifications(): PushNotificationHookReturn {
         osVersion: info.osVersion
       };
     } catch (error) {
-      console.error('[Push Notifications] Error getting device info:', error);
+      logger.error('[Push Notifications] Error getting device info:', error);
       return {};
     }
   }, []);
@@ -368,15 +367,14 @@ export function usePushNotifications(): PushNotificationHookReturn {
     
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        const timestamp = new Date().toISOString();
-        console.log(`[${timestamp}] [Push Notifications] 📤 Token registration attempt ${attempt}/${maxAttempts}`);
-        console.log(`[${timestamp}] [Push Notifications] Token received, length: ${token.length}`);
-        console.log(`[${timestamp}] [Push Notifications] Device info:`, {
+        logger.debug(`[Push Notifications] Token registration attempt ${attempt}/${maxAttempts}`);
+        logger.debug('[Push Notifications] Token received', { tokenLength: token.length });
+        logger.debug('[Push Notifications] Device info:', {
           hasDeviceId: !!deviceInfo.deviceId,
           deviceModel: deviceInfo.deviceModel,
           osVersion: deviceInfo.osVersion,
         });
-        console.log(`[${timestamp}] [Push Notifications] POSTing to /api/push-notifications/register with platform: ios-native`);
+        logger.debug('[Push Notifications] Registering token with backend', { platform: 'ios-native' });
         
         const response = await fetch('/api/push-notifications/register', {
           method: 'POST',
@@ -392,15 +390,12 @@ export function usePushNotifications(): PushNotificationHookReturn {
         });
 
         if (response.ok) {
-          const data = await response.json();
-          const timestamp = new Date().toISOString();
-          console.log(`[${timestamp}] [Push Notifications] ✅ Token registration successful:`, data);
-          console.log(`[${timestamp}] [Push Notifications] 🎉 Complete flow: iOS → Capacitor → Backend → Database`);
+          await response.json();
+          logger.info('[Push Notifications] Token registration successful');
           return { success: true };
         } else {
           const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
-          const timestamp = new Date().toISOString();
-          console.error(`[${timestamp}] [Push Notifications] ❌ Token registration attempt ${attempt} failed:`, {
+          logger.error(`[Push Notifications] Token registration attempt ${attempt} failed:`, {
             status: response.status,
             error: errorData
           });
@@ -412,7 +407,7 @@ export function usePushNotifications(): PushNotificationHookReturn {
           }
         }
       } catch (error) {
-        console.error(`[Push Notifications] Token registration attempt ${attempt} network error:`, error);
+        logger.error(`[Push Notifications] Token registration attempt ${attempt} network error:`, error);
         if (attempt < maxAttempts) {
           const delay = Math.pow(2, attempt) * 1000;
           await new Promise(resolve => setTimeout(resolve, delay));
@@ -431,20 +426,20 @@ export function usePushNotifications(): PushNotificationHookReturn {
   const checkPermissionStatus = useCallback(async (): Promise<boolean | null> => {
     // Only run on iOS native platform (NOT iOS web browsers)
     if (!isNativeIOS()) {
-      console.log('[Push Notifications] Not iOS native platform, returning null permission status');
+      logger.debug('[Push Notifications] Not iOS native; returning null permission status');
       return null;
     }
 
     try {
       const permissionStatus = await FirebaseMessaging.checkPermissions();
-      console.log('[Push Notifications] Current FCM permission status:', permissionStatus);
+      logger.debug('[Push Notifications] Current FCM permission status:', permissionStatus.receive);
       
       const hasActivePermission = permissionStatus.receive === 'granted';
       setHasPermission(hasActivePermission);
       
       return hasActivePermission;
     } catch (error) {
-      console.error('[Push Notifications] Error checking FCM permission status:', error);
+      logger.error('[Push Notifications] Error checking FCM permission status:', error);
       return null;
     }
   }, []);
@@ -459,12 +454,12 @@ export function usePushNotifications(): PushNotificationHookReturn {
   const updateBadgeCount = useCallback(async (): Promise<void> => {
     // Only run on iOS native platform
     if (!isNativeIOS()) {
-      console.log('[Push Notifications] Not iOS native, skipping badge update');
+      logger.debug('[Push Notifications] Not iOS native; skipping badge update');
       return;
     }
 
     try {
-      console.log('[Push Notifications] Fetching current notification counts to update badge');
+      logger.debug('[Push Notifications] Fetching notification counts to update badge');
       
       // Fetch current unread notification counts from backend
       const response = await fetch('/api/notifications/counts', {
@@ -472,14 +467,14 @@ export function usePushNotifications(): PushNotificationHookReturn {
       });
 
       if (!response.ok) {
-        console.error('[Push Notifications] Failed to fetch notification counts:', response.status);
+        logger.error('[Push Notifications] Failed to fetch notification counts:', response.status);
         return;
       }
 
       const counts = await response.json();
       const totalUnread = (counts.messages || 0) + (counts.connectionRequests || 0) + (counts.newConnections || 0);
 
-      console.log('[Push Notifications] Updating badge count:', {
+      logger.debug('[Push Notifications] Updating badge count:', {
         messages: counts.messages,
         connectionRequests: counts.connectionRequests,
         newConnections: counts.newConnections,
@@ -488,7 +483,7 @@ export function usePushNotifications(): PushNotificationHookReturn {
 
       // Clear all delivered notifications from notification center
       await PushNotifications.removeAllDeliveredNotifications();
-      console.log('[Push Notifications] Cleared delivered notifications from notification center');
+      logger.debug('[Push Notifications] Cleared delivered notifications from notification center');
       
       // Try to update the app icon badge count
       try {
@@ -497,18 +492,18 @@ export function usePushNotifications(): PushNotificationHookReturn {
         if (typeof PushNotifications.setBadgeCount === 'function') {
           // @ts-expect-error Capacitor's TypeScript definitions omit the native badge API.
           await PushNotifications.setBadgeCount({ count: totalUnread });
-          console.log(`[Push Notifications] Set badge count to ${totalUnread}`);
+          logger.debug(`[Push Notifications] Set badge count to ${totalUnread}`);
         } else {
-          console.log('[Push Notifications] setBadgeCount not available, badge will update on next push notification');
+          logger.debug('[Push Notifications] setBadgeCount not available; badge will update on next push notification');
         }
       } catch (badgeError) {
-        console.warn('[Push Notifications] Could not set badge count directly:', badgeError);
-        console.log('[Push Notifications] Badge will be updated by next push notification');
+        logger.warn('[Push Notifications] Could not set badge count directly:', badgeError);
+        logger.debug('[Push Notifications] Badge will be updated by next push notification');
       }
       
-      console.log('[Push Notifications] Badge update complete');
+      logger.debug('[Push Notifications] Badge update complete');
     } catch (error) {
-      console.error('[Push Notifications] Error updating badge count:', error);
+      logger.error('[Push Notifications] Error updating badge count:', error);
     }
   }, []);
 

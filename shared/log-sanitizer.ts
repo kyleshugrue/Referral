@@ -88,6 +88,7 @@ const JWT_PATTERN = /\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,
 const AUTHORIZATION_PATTERN = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi;
 const DATABASE_URL_PATTERN = /\bpostgres(?:ql)?:\/\/[^\s"']+/gi;
 const COOKIE_PATTERN = /\b(?:set-cookie|cookie)\s*:\s*[^\r\n]+/gi;
+const DATABASE_ERROR_PATTERN = /\b(?:failed query|query failed|database query failed|error executing query)\b/i;
 
 /**
  * Scrub a plain string for embedded sensitive patterns. Used for bare string
@@ -119,6 +120,17 @@ export function scrubSensitiveText(text: string): string {
   return result;
 }
 
+function scrubErrorMessage(text: string): string {
+  const scrubbed = scrubSensitiveText(text);
+  // ORM/database errors can include the full SQL statement and bound
+  // parameters. Those details are useful to a local debugger but are not safe
+  // for production logs; retain only the stable error class.
+  if (DATABASE_ERROR_PATTERN.test(scrubbed)) {
+    return 'Database operation failed';
+  }
+  return scrubbed;
+}
+
 /**
  * Recursively sanitize a value for logging: redact object properties with a
  * sensitive key name, scrub sensitive patterns out of every string, and
@@ -130,7 +142,7 @@ export function sanitizeLogValue(value: unknown, seen: WeakSet<object> = new Wea
   }
 
   if (value instanceof Error) {
-    return { name: value.name, message: scrubSensitiveText(value.message) };
+    return { name: value.name, message: scrubErrorMessage(value.message) };
   }
 
   if (Array.isArray(value)) {

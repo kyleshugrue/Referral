@@ -18,6 +18,7 @@ import { Capacitor } from '@capacitor/core';
 import { config } from './config';
 import { getCurrentAccessToken, refreshAccessToken, waitForTokensReady } from './token-manager';
 import { queryClient } from './queryClient';
+import { logger } from './logger';
 import type { User } from '@shared/schema';
 
 const MAX_RETRIES = 3;
@@ -47,7 +48,7 @@ class IOSProfileSaveManager {
   private lastSavedData: User | null = null;
   
   private constructor() {
-    console.log('[IOSProfileSaveManager] Singleton instance created');
+    logger.debug('[IOSProfileSaveManager] Singleton instance created');
   }
   
   static getInstance(): IOSProfileSaveManager {
@@ -76,7 +77,7 @@ class IOSProfileSaveManager {
       try {
         listener(status, operation);
       } catch (error) {
-        console.error('[IOSProfileSaveManager] Error in status listener:', error);
+        logger.error('[IOSProfileSaveManager] Error in status listener:', error);
       }
     });
   }
@@ -113,9 +114,9 @@ class IOSProfileSaveManager {
     const accessToken = getCurrentAccessToken();
     if (accessToken && accessToken !== 'PENDING_REFRESH') {
       headers['Authorization'] = `Bearer ${accessToken}`;
-      console.log('[IOSProfileSaveManager] Using JWT token for authentication');
+      logger.debug('[IOSProfileSaveManager] JWT token available for authentication');
     } else {
-      console.warn('[IOSProfileSaveManager] No JWT token available');
+      logger.warn('[IOSProfileSaveManager] No JWT token available');
     }
     
     return headers;
@@ -135,14 +136,14 @@ class IOSProfileSaveManager {
   
   async saveProfile(data: Partial<Omit<User, 'id' | 'password'>>): Promise<{ success: boolean; savedData: User | null }> {
     if (!IOSProfileSaveManager.isIOSNative()) {
-      console.log('[IOSProfileSaveManager] Not iOS native, skipping singleton manager');
+      logger.debug('[IOSProfileSaveManager] Not iOS native; skipping singleton manager');
       return { success: false, savedData: null };
     }
     
     const cleanedData = this.cleanData(data);
     
     if (Object.keys(cleanedData).length === 0) {
-      console.log('[IOSProfileSaveManager] No data to save after cleaning');
+      logger.debug('[IOSProfileSaveManager] No data to save after cleaning');
       return { success: true, savedData: this.lastSavedData };
     }
     
@@ -154,10 +155,10 @@ class IOSProfileSaveManager {
       startTime: Date.now(),
     };
     
-    console.log(`[IOSProfileSaveManager][${operation.id}] New save operation queued`);
+    logger.debug(`[IOSProfileSaveManager][${operation.id}] New save operation queued`);
     
     if (this.isProcessing) {
-      console.log(`[IOSProfileSaveManager][${operation.id}] Another save in progress, adding to queue`);
+      logger.debug(`[IOSProfileSaveManager][${operation.id}] Another save in progress, adding to queue`);
       this.pendingOperations.push(operation);
       return this.waitForOperation(operation);
     }
@@ -184,13 +185,13 @@ class IOSProfileSaveManager {
     this.isProcessing = true;
     this.currentOperation = operation;
     
-    console.log(`[IOSProfileSaveManager][${operation.id}] Starting save operation, attempt ${operation.attempt + 1}`);
+    logger.debug(`[IOSProfileSaveManager][${operation.id}] Starting save operation, attempt ${operation.attempt + 1}`);
     
     this.notifyListeners(operation.status, operation);
     
     const currentCache = queryClient.getQueryData<User>(["/api/user"]);
     if (currentCache) {
-      console.log(`[IOSProfileSaveManager][${operation.id}] Applying optimistic update to cache`);
+      logger.debug(`[IOSProfileSaveManager][${operation.id}] Applying optimistic update to cache`);
       queryClient.setQueryData(["/api/user"], {
         ...currentCache,
         ...operation.data
@@ -204,7 +205,7 @@ class IOSProfileSaveManager {
     
     if (this.pendingOperations.length > 0) {
       const nextOp = this.pendingOperations.shift()!;
-      console.log(`[IOSProfileSaveManager][${nextOp.id}] Processing next queued operation`);
+      logger.debug(`[IOSProfileSaveManager][${nextOp.id}] Processing next queued operation`);
       this.executeOperation(nextOp);
     }
     
@@ -216,7 +217,7 @@ class IOSProfileSaveManager {
     
     while (operation.attempt <= MAX_RETRIES) {
       try {
-        console.log(`[IOSProfileSaveManager][${operation.id}] PATCH request attempt ${operation.attempt + 1} to ${requestUrl}`);
+        logger.debug(`[IOSProfileSaveManager][${operation.id}] PATCH request attempt ${operation.attempt + 1}`);
         
         let headers = await this.buildHeaders();
         
@@ -229,10 +230,10 @@ class IOSProfileSaveManager {
           credentials: 'include',
         });
         
-        console.log(`[IOSProfileSaveManager][${operation.id}] Response status: ${response.status}`);
+        logger.debug(`[IOSProfileSaveManager][${operation.id}] Response status: ${response.status}`);
         
         if (response.status === 401) {
-          console.log(`[IOSProfileSaveManager][${operation.id}] Got 401, attempting token refresh`);
+          logger.debug(`[IOSProfileSaveManager][${operation.id}] Got 401, attempting token refresh`);
           const newToken = await refreshAccessToken();
           
           if (newToken) {
@@ -246,14 +247,14 @@ class IOSProfileSaveManager {
               credentials: 'include',
             });
             
-            console.log(`[IOSProfileSaveManager][${operation.id}] Retry after token refresh status: ${response.status}`);
+            logger.debug(`[IOSProfileSaveManager][${operation.id}] Retry after token refresh status: ${response.status}`);
           }
         }
         
         if (response.ok) {
           const savedUser = await response.json() as User;
           
-          console.log(`[IOSProfileSaveManager][${operation.id}] Save successful!`);
+          logger.info(`[IOSProfileSaveManager][${operation.id}] Save successful`);
           
           this.lastSaveTimestamp = Date.now();
           this.lastSavedData = savedUser;
@@ -281,7 +282,7 @@ class IOSProfileSaveManager {
              // The response may not contain JSON; retain the generic save-error fallback.
            }
           
-          console.error(`[IOSProfileSaveManager][${operation.id}] Client error ${response.status}: ${errorMessage}`);
+          logger.error(`[IOSProfileSaveManager][${operation.id}] Client error ${response.status}: ${errorMessage}`);
           
           operation.status = 'error';
           operation.error = errorMessage;
@@ -293,12 +294,12 @@ class IOSProfileSaveManager {
         throw new Error(`Server error: ${response.status}`);
         
       } catch (error) {
-        console.error(`[IOSProfileSaveManager][${operation.id}] Network/fetch error:`, error);
+        logger.error(`[IOSProfileSaveManager][${operation.id}] Network/fetch error:`, error);
         
         operation.attempt++;
         
         if (operation.attempt > MAX_RETRIES) {
-          console.error(`[IOSProfileSaveManager][${operation.id}] Max retries exceeded`);
+          logger.error(`[IOSProfileSaveManager][${operation.id}] Max retries exceeded`);
           
           operation.status = 'error';
           operation.error = 'Network error after retries';
@@ -311,7 +312,7 @@ class IOSProfileSaveManager {
         this.notifyListeners('retrying', operation);
         
         const delay = RETRY_DELAYS[Math.min(operation.attempt - 1, RETRY_DELAYS.length - 1)];
-        console.log(`[IOSProfileSaveManager][${operation.id}] Retrying in ${delay}ms...`);
+        logger.debug(`[IOSProfileSaveManager][${operation.id}] Retrying in ${delay}ms...`);
         
         await new Promise(resolve => setTimeout(resolve, delay));
       }
@@ -324,7 +325,7 @@ class IOSProfileSaveManager {
   }
   
   cancelPendingOperations(): void {
-    console.log('[IOSProfileSaveManager] Cancelling pending operations');
+    logger.debug('[IOSProfileSaveManager] Cancelling pending operations');
     this.pendingOperations = [];
   }
 }

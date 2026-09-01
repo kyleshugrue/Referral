@@ -28,6 +28,10 @@
     {
       "file": "0006_rate_limit_windows.sql",
       "sha256": "6b65edc53d0434c693d9914d1fac49700f2f0df03781a81a20cd91b68a4dd5bf"
+    },
+    {
+      "file": "0007_delivery_obligations.sql",
+      "sha256": "a9bdb9e1658572094d95a7ce0e797c981847c87dc931d7b5325262e7567a90a4"
     }
   ]
 }

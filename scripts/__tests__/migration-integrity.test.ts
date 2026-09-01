@@ -13,6 +13,7 @@ describe('migration integrity evidence', () => {
       '0004_match_generation_idempotency.sql',
       '0005_relational_consistency.sql',
       '0006_rate_limit_windows.sql',
+      '0007_delivery_obligations.sql',
     ]);
     expect(result.manifestSha256).toMatch(/^[a-f0-9]{64}$/);
   });

@@ -1,6 +1,7 @@
 import type { Express } from "express";
 import express from "express";
 import { storage } from "./storage";
+import { pool } from "./db";
 import { User } from "@shared/schema";
 import { editableProfileSchema } from "@shared/schema";
 import { uploadResume, uploadPhoto, processResumeUpload, verifyUploadedFile } from "./upload";
@@ -39,6 +40,7 @@ import {
 } from "./lib/rate-limits";
 import { requireCompleteRegistration } from "./middleware/require-complete-registration";
 import { requireAuthJWT } from "./auth";
+import { authenticateUploadPrincipal } from "./middleware/auth-jwt";
 import { requireTrustedOriginForSessionMutation } from "./lib/http-security";
 import { requireVerifiedFirebaseUser, getRegistrant } from "./lib/register-auth";
 import { notifyConnectionRequestRejected } from "./websocket-utils";
@@ -52,9 +54,20 @@ import {
 import guidesRouter from "./seo/guides-router";
 import { parseBoundedIntegerQuery, parseStrictPositiveInteger, boundedString } from "./lib/request-validation";
 import { parseServerEnvironment } from "./lib/env";
+import { queryDatabase } from "./lib/database-client";
 
-const PRIVACY_LAST_MODIFIED = "2025-01-01";
-const PRIVACY_LAST_MODIFIED_DISPLAY = new Date(PRIVACY_LAST_MODIFIED + "T00:00:00Z").toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
+const PRIVACY_LAST_MODIFIED = process.env.PRIVACY_LAST_MODIFIED?.trim() || null;
+const PRIVACY_LAST_MODIFIED_DISPLAY = PRIVACY_LAST_MODIFIED
+  ? new Date(`${PRIVACY_LAST_MODIFIED}T00:00:00Z`).toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      timeZone: "UTC",
+    })
+  : "not currently published";
+const PRIVACY_DATE_METADATA = PRIVACY_LAST_MODIFIED
+  ? `"dateModified": "${PRIVACY_LAST_MODIFIED}",`
+  : "";
 
 export async function registerRoutes(app: Express): Promise<void> {
   const serverEnv = parseServerEnvironment();
@@ -94,7 +107,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       "name": "Privacy Policy | Referral",
       "url": "https://referralprofessional.net/privacy",
       "description": "Read Referral's privacy policy, including how we collect, use, store, and protect professional networking data.",
-      "dateModified": "${PRIVACY_LAST_MODIFIED}",
+      ${PRIVACY_DATE_METADATA}
       "inLanguage": "en-US",
       "isPartOf": {
         "@type": "WebSite",
@@ -112,36 +125,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       }
     }
     </script>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-            line-height: 1.6;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            color: #333;
-        }
-        h1 {
-            color: #2563eb;
-            border-bottom: 2px solid #e5e7eb;
-            padding-bottom: 10px;
-        }
-        h2 {
-            color: #374151;
-            margin-top: 30px;
-        }
-        .last-updated {
-            color: #6b7280;
-            font-style: italic;
-            margin-bottom: 30px;
-        }
-        .contact-info {
-            background-color: #f9fafb;
-            padding: 15px;
-            border-radius: 5px;
-            margin-top: 20px;
-        }
-    </style>
+    <link rel="stylesheet" href="/privacy.css" />
 </head>
 <body>
     <h1>Privacy Policy for Referral</h1>
@@ -230,12 +214,12 @@ export async function registerRoutes(app: Express): Promise<void> {
     <h2>12. Contact Us</h2>
     <div class="contact-info">
         <p>If you have any questions about this privacy policy or our privacy practices, please contact us:</p>
-        <p><strong>Email:</strong> kylejshugrue@gmail.com</p>
-        <p><strong>Subject Line:</strong> Privacy Policy Inquiry</p>
+        <p>Please use the support or contact channel available in the Referral app.</p>
+        <p>A dedicated privacy contact address has not been published.</p>
     </div>
 
-    <p style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 14px;">
-        This privacy policy is effective as of the date listed above and applies to all users of the Referral application.
+    <p class="policy-effective-date">
+        This privacy policy applies to all users of the Referral application. The review date is ${PRIVACY_LAST_MODIFIED_DISPLAY}.
     </p>
 </body>
 </html>
@@ -657,55 +641,52 @@ export async function registerRoutes(app: Express): Promise<void> {
         // Continue with the request creation as normal
       }
 
-      logger.debug(`[ConnectionRequest] Creating new connection request from ${senderId} to ${receiverId}`);
+      logger.debug('[ConnectionRequest] Creating new connection request', { requestId: req.requestId });
       const request = await storage.createConnectionRequest(senderId, receiverId);
-      logger.debug(`[ConnectionRequest] Connection request created successfully: ${JSON.stringify(request)}`);
+      logger.info('[ConnectionRequest] Connection request created', { requestId: req.requestId });
       
       // Send real-time WebSocket notification to the receiver
+      let websocketDelivered = false;
       try {
         const { notifyConnectionRequest } = await import('./websocket-utils');
-        await notifyConnectionRequest(receiverId, senderId, request.id);
-        logger.debug(`[ConnectionRequest] Sent WebSocket notification to user ${receiverId}`);
+        websocketDelivered = await notifyConnectionRequest(receiverId, senderId, request.id);
+        logger.debug('[ConnectionRequest] WebSocket notification delivered', { requestId: req.requestId });
       } catch (wsError) {
         logger.error('[ConnectionRequest] Failed to send WebSocket notification:', wsError);
-        // Don't fail the request if WebSocket notification fails
       }
 
-      // Send push notification to iOS native users only
-      const pushTimestamp = new Date().toISOString();
-      logger.debug(`[${pushTimestamp}] [ConnectionRequest-PUSH] 🚀 ENTERING push notification section for user ${receiverId}`);
-      
+      // Push is the durable fallback for offline native clients. The callback
+      // queue is only needed when both transports are unavailable.
+      let pushDelivered = false;
       try {
-        logger.debug(`[${pushTimestamp}] [ConnectionRequest-PUSH] 📦 Importing push notification service...`);
         const { sendConnectionRequestNotification } = await import('./services/push-notifications');
-        logger.debug(`[${pushTimestamp}] [ConnectionRequest-PUSH] ✅ Push notification service imported successfully`);
-        
-        logger.debug(`[${pushTimestamp}] [ConnectionRequest-PUSH] 👤 Fetching sender user ${senderId}...`);
-        const senderUser = await storage.getUserById(senderId);
-        
+        const senderUser = await storage.getUser(senderId);
         if (senderUser) {
-          logger.debug(`[${pushTimestamp}] [ConnectionRequest-PUSH] ✅ Sender found: ${senderUser.fullName} (ID: ${senderId})`);
-          logger.debug(`[${pushTimestamp}] [ConnectionRequest-PUSH] 📤 Calling sendConnectionRequestNotification(${receiverId}, "${senderUser.fullName}")...`);
-          
-          const pushResult = await sendConnectionRequestNotification(receiverId, senderUser.fullName);
-          
-          logger.debug(`[${pushTimestamp}] [ConnectionRequest-PUSH] 📊 Push notification result:`, pushResult);
-          if (pushResult) {
-            logger.debug(`[${pushTimestamp}] [ConnectionRequest-PUSH] ✅ Push notification sent successfully to user ${receiverId}`);
-          } else {
-            logger.warn(`[${pushTimestamp}] [ConnectionRequest-PUSH] ⚠️ Push notification returned false (no tokens or failed) for user ${receiverId}`);
-          }
-        } else {
-          logger.error(`[${pushTimestamp}] [ConnectionRequest-PUSH] ❌ Sender user ${senderId} not found, cannot send push`);
+          pushDelivered = await sendConnectionRequestNotification(receiverId, senderUser.fullName, req.requestId);
         }
       } catch (pushError) {
-        logger.error(`[${pushTimestamp}] [ConnectionRequest-PUSH] ❌ EXCEPTION in push notification:`, pushError);
-        logger.error(`[${pushTimestamp}] [ConnectionRequest-PUSH] ❌ Error stack:`, pushError instanceof Error ? pushError.stack : 'No stack trace');
-        // Don't fail the request if push notification fails
+        logger.error('[ConnectionRequest] Failed to send push notification:', pushError);
       }
-      
-      logger.debug(`[${pushTimestamp}] [ConnectionRequest-PUSH] 🏁 EXITING push notification section for user ${receiverId}`);
-      
+
+      if (!websocketDelivered && !pushDelivered) {
+        try {
+          const dedupeKey = `connection-request:${request.id}`;
+          await storage.enqueueCallbackNotification(
+            receiverId,
+            'connectionRequest',
+            JSON.stringify({ senderId, requestId: request.id }),
+            2,
+            new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+            dedupeKey,
+          );
+          await storage.completeDeliveryObligation(dedupeKey);
+        } catch (queueError) {
+          logger.error('[ConnectionRequest] Failed to enqueue callback fallback:', queueError);
+        }
+      } else {
+        await storage.completeDeliveryObligation(`connection-request:${request.id}`);
+      }
+
       res.status(201).json(request);
     } catch (error) {
       logger.error('[ConnectionRequest] Creation error:', error);
@@ -853,51 +834,63 @@ export async function registerRoutes(app: Express): Promise<void> {
         }
 
         // Send real-time WebSocket notification to the original sender
+        let websocketDelivered = false;
         try {
           const { notifyConnectionAccepted } = await import('./websocket-utils');
-          await notifyConnectionAccepted(requestDetails.senderId, requestId, currentUserId);
+          websocketDelivered = await notifyConnectionAccepted(requestDetails.senderId, requestId, currentUserId);
           logger.debug(`[Routes] Sent WebSocket notification to user ${requestDetails.senderId} about accepted request ${requestId}`);
         } catch (wsError) {
           logger.error('[Routes] Failed to send WebSocket notification about accepted request:', wsError);
-          // Don't fail the request if WebSocket notification fails
         }
 
         // Send push notification to iOS native users only (to the original requester)
-        const pushTimestamp = new Date().toISOString();
-        logger.debug(`[${pushTimestamp}] [ConnectionAccepted-PUSH] 🚀 ENTERING push notification section for user ${requestDetails.senderId}`);
+        logger.debug('[ConnectionAccepted-PUSH] Entering push notification section', { requestId: req.requestId });
         
+        let pushDelivered = false;
         try {
-          logger.debug(`[${pushTimestamp}] [ConnectionAccepted-PUSH] 📦 Importing push notification service...`);
           const { sendConnectionAcceptedNotification } = await import('./services/push-notifications');
-          logger.debug(`[${pushTimestamp}] [ConnectionAccepted-PUSH] ✅ Push notification service imported successfully`);
-          
-          logger.debug(`[${pushTimestamp}] [ConnectionAccepted-PUSH] 👤 Fetching accepter user ${currentUserId}...`);
           const accepterUser = await storage.getUserById(currentUserId);
           
           if (accepterUser) {
-            logger.debug(`[${pushTimestamp}] [ConnectionAccepted-PUSH] ✅ Accepter found: ${accepterUser.fullName} (ID: ${currentUserId})`);
-            logger.debug(`[${pushTimestamp}] [ConnectionAccepted-PUSH] 📤 Calling sendConnectionAcceptedNotification(${requestDetails.senderId}, "${accepterUser.fullName}")...`);
+            const pushResult = await sendConnectionAcceptedNotification(requestDetails.senderId, accepterUser.fullName, req.requestId);
+            pushDelivered = pushResult;
             
-            const pushResult = await sendConnectionAcceptedNotification(requestDetails.senderId, accepterUser.fullName);
-            
-            logger.debug(`[${pushTimestamp}] [ConnectionAccepted-PUSH] 📊 Push notification result:`, pushResult);
+            logger.debug('[ConnectionAccepted-PUSH] Push notification result', { delivered: pushResult, requestId: req.requestId });
             if (pushResult) {
-              logger.debug(`[${pushTimestamp}] [ConnectionAccepted-PUSH] ✅ Push notification sent successfully to user ${requestDetails.senderId}`);
+              logger.info('[ConnectionAccepted-PUSH] Push notification delivered', { requestId: req.requestId });
             } else {
-              logger.warn(`[${pushTimestamp}] [ConnectionAccepted-PUSH] ⚠️ Push notification returned false (no tokens or failed) for user ${requestDetails.senderId}`);
+              logger.warn('[ConnectionAccepted-PUSH] Push notification was not delivered', { requestId: req.requestId });
             }
           } else {
-            logger.error(`[${pushTimestamp}] [ConnectionAccepted-PUSH] ❌ Accepter user ${currentUserId} not found, cannot send push`);
+            logger.error('[ConnectionAccepted-PUSH] Accepter user not found; cannot send push', undefined, { requestId: req.requestId });
           }
         } catch (pushError) {
-          logger.error(`[${pushTimestamp}] [ConnectionAccepted-PUSH] ❌ EXCEPTION in push notification:`, pushError);
-          logger.error(`[${pushTimestamp}] [ConnectionAccepted-PUSH] ❌ Error stack:`, pushError instanceof Error ? pushError.stack : 'No stack trace');
+          logger.error('[ConnectionAccepted-PUSH] Exception in push notification', pushError, { requestId: req.requestId });
           // Don't fail the request if push notification fails
         }
-        
-        logger.debug(`[${pushTimestamp}] [ConnectionAccepted-PUSH] 🏁 EXITING push notification section for user ${requestDetails.senderId}`);
 
-        logger.debug(`Connection accepted successfully between users ${connection.user1Id} and ${connection.user2Id}`);
+        if (!websocketDelivered && !pushDelivered) {
+          try {
+            const dedupeKey = `connection-accepted:${requestId}`;
+            await storage.enqueueCallbackNotification(
+              requestDetails.senderId,
+              'connectionAccepted',
+              JSON.stringify({ acceptedById: currentUserId, requestId }),
+              2,
+              new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+              dedupeKey,
+            );
+            await storage.completeDeliveryObligation(dedupeKey);
+          } catch (queueError) {
+            logger.error('[Routes] Failed to enqueue accepted-connection callback fallback:', queueError);
+          }
+        } else {
+          await storage.completeDeliveryObligation(`connection-accepted:${requestId}`);
+        }
+        
+        logger.debug('[ConnectionAccepted-PUSH] Exiting push notification section', { requestId: req.requestId });
+
+        logger.info('Connection accepted successfully', { requestId: req.requestId });
         res.json(connection);
       } else {
         // Reject the connection request
@@ -1449,17 +1442,20 @@ export async function registerRoutes(app: Express): Promise<void> {
 
   // Resume upload endpoint (for both authenticated and unauthenticated users during registration)
   const requireUploadPrincipal = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    if (req.isAuthenticated() && req.user) return next();
+    const authMethod = (req as express.Request & { authMethod?: 'jwt' | 'session' }).authMethod;
+    if ((authMethod === 'jwt' || authMethod === 'session') && req.user) return next();
     return requireVerifiedFirebaseUser(req, res, next);
   };
 
-  app.post('/api/upload/resume', uploadLimiter, requireTrustedOriginForSessionMutation, requireUploadPrincipal, uploadResume.single('resume'), async (req, res) => {
+  app.post('/api/upload/resume', uploadLimiter, authenticateUploadPrincipal, requireTrustedOriginForSessionMutation, requireUploadPrincipal, uploadResume.single('resume'), async (req, res) => {
     try {
       if (!req.file) {
         return res.status(400).json({ message: 'No file uploaded' });
       }
 
-       const userId = req.isAuthenticated() ? req.user.id : undefined;
+       const userId = (req as express.Request & { authMethod?: string }).authMethod
+         ? req.user?.id
+         : undefined;
        const firebaseUid = !userId ? getRegistrant(req).uid : undefined;
       
        logger.debug('[Resume Upload] Processing upload', {
@@ -1527,18 +1523,18 @@ export async function registerRoutes(app: Express): Promise<void> {
       }
       
       // If the user is authenticated, update their profile with the resume info
-      if (req.isAuthenticated() && req.user && req.user.id) {
+       if (userId) {
         try {
            logger.debug('[Resume Upload] Updating resume for existing user');
           
           // Get the existing user first to preserve current values
-          const currentUser = await storage.getUser(req.user.id);
+          const currentUser = await storage.getUser(userId);
           if (!currentUser) {
-            throw new Error(`User ${req.user.id} not found`);
+            throw new Error(`User ${userId} not found`);
           }
           
           // Only update the resume fields, preserving all other fields
-          await storage.updateUser(req.user.id, {
+          await storage.updateUser(userId, {
             resumeUrl: result.url,
             resumePreviewUrls: result.previewUrls
           });
@@ -1566,10 +1562,12 @@ export async function registerRoutes(app: Express): Promise<void> {
   });
 
   // Profile photo upload endpoint (two routes for backward compatibility)
-  app.post(['/api/upload/photo', '/api/upload/profile-photo'], uploadLimiter, requireTrustedOriginForSessionMutation, requireUploadPrincipal, uploadPhoto.single('photo'), async (req, res) => {
+  app.post(['/api/upload/photo', '/api/upload/profile-photo'], uploadLimiter, authenticateUploadPrincipal, requireTrustedOriginForSessionMutation, requireUploadPrincipal, uploadPhoto.single('photo'), async (req, res) => {
     // Accept photos even if not authenticated (for registration process)
      // Keep only bounded authentication metadata in logs.
-    const userId = req.isAuthenticated() ? req.user.id : undefined;
+     const userId = (req as express.Request & { authMethod?: string }).authMethod
+       ? req.user?.id
+       : undefined;
     const firebaseUid = !userId ? getRegistrant(req).uid : undefined;
      logger.debug('[Photo Upload] Processing upload', {
        authenticated: Boolean(userId),
@@ -1639,18 +1637,18 @@ export async function registerRoutes(app: Express): Promise<void> {
       }
       
       // If the user is authenticated, update their profile with the photo URL
-      if (req.isAuthenticated() && req.user && req.user.id) {
+       if (userId) {
         try {
            logger.debug('[Photo Upload] Updating photo for authenticated user');
           
           // Get the existing user first to preserve current values
-          const currentUser = await storage.getUser(req.user.id);
+          const currentUser = await storage.getUser(userId);
           if (!currentUser) {
-            throw new Error(`User ${req.user.id} not found`);
+            throw new Error(`User ${userId} not found`);
           }
           
           // Only update the photo field, preserving all other fields
-          await storage.updateUser(req.user.id, {
+          await storage.updateUser(userId, {
             photo: fileUrl
           });
           
@@ -1695,8 +1693,9 @@ export async function registerRoutes(app: Express): Promise<void> {
       // Import WebSocket utility to check connectivity
       const { getConnectedClientCount } = await import('./websocket-utils');
       const connectedClients = getConnectedClientCount();
+      await queryDatabase(pool, 'SELECT 1');
       
-      res.json({ 
+      res.status(200).json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
         websocket: {
@@ -1708,10 +1707,12 @@ export async function registerRoutes(app: Express): Promise<void> {
         }
       });
     } catch (error) {
-      logger.error('[Internal API] Health check error:', error);
-      res.status(500).json({ 
+      logger.error('[Internal API] Health check error', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+      res.status(503).json({
         status: 'unhealthy',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        database: { available: false },
       });
     }
   });

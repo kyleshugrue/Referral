@@ -14,8 +14,7 @@ import { createServer } from 'http';
 import compression from 'compression';
 import cors from 'cors';
 import { storage } from './storage';
-import { db, pool } from './db';
-import { sql } from 'drizzle-orm';
+import { pool } from './db';
 import { registerRoutes } from './routes';
 import { setupAuth } from './auth';
 import { ensurePortIsFree } from './port-checker';
@@ -32,7 +31,10 @@ declare module 'express-serve-static-core' {
 import { isSpaRoute, isNoIndexRoute } from './lib/spa-routes';
 import { isOriginAllowed, securityHeaders } from './lib/http-security';
 import { assertRequiredEnv } from './lib/startup-checks';
-import { checkDatabaseReadiness } from './lib/database-readiness';
+import {
+  checkDatabaseReadiness,
+  requiredSchemaTablesForMode,
+} from './lib/database-readiness';
 import { beginHttpRequest, recordHttpResponse } from './lib/operational-metrics';
 import { queryDatabase } from './lib/database-client';
 import { createServerLifecycle } from './lib/server-lifecycle';
@@ -172,7 +174,46 @@ async function main() {
     logger.info('[%s] Initializing callback queue processor...', new Date().toISOString());
     const { callbackQueueProcessor } = await import('./services/callback-queue-processor');
     callbackQueueProcessor.start();
-    logger.info('[%s] Callback queue processor started (polling every 30s)', new Date().toISOString());
+    logger.info('[%s] Callback queue processor started (polling every 5s)', new Date().toISOString());
+
+    // Push fallback delivery is durable work and must have an owner in the
+    // main app as well as the optional Worker VM. Atomic claims make this
+    // safe when both runtimes are enabled.
+    const { processQueuedPushNotifications } = await import('./services/push-notifications');
+    const runPushQueue = async (): Promise<void> => {
+      try {
+        await processQueuedPushNotifications();
+      } catch (error) {
+        logger.error('[Push Queue] Scheduled processing failed', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
+        });
+      }
+    };
+    void runPushQueue();
+    const pushQueueInterval = setInterval(runPushQueue, 30_000);
+    pushQueueInterval.unref?.();
+    logger.info('[%s] Push queue processor started (polling every 30s)', new Date().toISOString());
+
+    // Lease recovery is periodic, not startup-only. A process can die after
+    // claiming work and before writing its terminal state.
+    const runQueueRecovery = async (): Promise<void> => {
+      try {
+        const dispatched = await storage.dispatchPendingDeliveryObligations(100);
+        const recovered = await storage.recoverStaleQueueWork(
+          new Date(Date.now() - 5 * 60_000).toISOString(),
+        );
+        if (dispatched > 0 || recovered.jobs + recovered.callbacks + recovered.pushes > 0) {
+          logger.info('[Queue Recovery] Reconciled delivery work', { dispatched, ...recovered });
+        }
+      } catch (error) {
+        logger.error('[Queue Recovery] Scheduled recovery failed', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
+        });
+      }
+    };
+    const queueRecoveryInterval = setInterval(runQueueRecovery, 60_000);
+    queueRecoveryInterval.unref?.();
+    void runQueueRecovery();
 
     // Start stale token cleanup job (runs every 24 hours, deletes tokens older than 90 days)
     const STALE_TOKEN_DAYS = 90;
@@ -199,14 +240,9 @@ async function main() {
     // Terminal statuses (COMPLETED/FAILED/CANCELLED) are never touched.
     try {
       const staleThreshold = new Date(Date.now() - 60000).toISOString(); // 1 minute ago
-      const jobResetCount = await db.execute(sql`
-        UPDATE match_generation_jobs
-        SET status = 'PENDING', error_message = 'Reset from stale active state after server restart'
-        WHERE status IN ('PROCESSING', 'IN_PROGRESS') AND started_at < ${staleThreshold}
-      `);
-      const jobCount = (jobResetCount as { rowCount?: number }).rowCount || 0;
-      if (jobCount > 0) {
-        logger.info(`[Job Recovery] Reset ${jobCount} stale active job(s) to 'PENDING' on startup`);
+      const recovered = await storage.recoverStaleQueueWork(staleThreshold);
+      if (recovered.jobs + recovered.callbacks + recovered.pushes > 0) {
+        logger.info(`[Job Recovery] Reset ${recovered.jobs} job(s), ${recovered.callbacks} callback(s), and ${recovered.pushes} push notification(s)`);
       }
     } catch (error) {
       logger.error('[Job Recovery] Error resetting stale processing records:', error);
@@ -349,7 +385,7 @@ async function main() {
 
       const readiness = await checkDatabaseReadiness({
         query: (text, values) => queryDatabase(pool, text, values),
-      });
+      }, requiredSchemaTablesForMode());
       if (!readiness.ready) {
         return res.status(503).json({
           status: 'not_ready',
@@ -357,7 +393,24 @@ async function main() {
           missingTables: readiness.reason === 'schema-incomplete' ? readiness.missingTables : undefined,
         });
       }
-      return res.status(200).json({ status: 'ready' });
+      try {
+        const [push, callbacks] = await Promise.all([
+          storage.getQueuedNotificationStats(),
+          storage.getCallbackNotificationStats(),
+        ]);
+        return res.status(200).json({
+          status: 'ready',
+          queues: {
+            push: { pending: push.pending, processing: push.processing, failed: push.failed },
+            callbacks: { pending: callbacks.pending, processing: callbacks.processing, failed: callbacks.failed },
+          },
+        });
+      } catch (error) {
+        logger.error('[Readiness] Queue health check failed', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
+        });
+        return res.status(503).json({ status: 'not_ready', reason: 'queue-unavailable' });
+      }
     });
 
     const closeHttpServer = (): Promise<void> => new Promise((resolve, reject) => {
@@ -392,6 +445,8 @@ async function main() {
         awaitHttpDrain,
         () => backgroundJobQueue.stop(),
         () => callbackQueueProcessor.stop(),
+         () => clearInterval(pushQueueInterval),
+         () => clearInterval(queueRecoveryInterval),
         () => clearInterval(staleTokenCleanupInterval),
         () => pool.end(),
       ]).then(() => {

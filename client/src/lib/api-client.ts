@@ -7,6 +7,7 @@
  */
 
 import config from './config.js';
+import { logger } from './logger';
 
 interface GeocodingResponse {
   success: boolean;
@@ -47,7 +48,7 @@ class APIClient {
       const data = await response.json();
       
       if (!response.ok) {
-        console.warn('[API Client] Geocoding failed:', data.error);
+        logger.warn('[API Client] Geocoding failed:', data.error);
         return {
           success: false,
           address,
@@ -58,7 +59,7 @@ class APIClient {
       
       return data;
     } catch (error) {
-      console.error('[API Client] Geocoding request failed:', error);
+      logger.error('[API Client] Geocoding request failed:', error);
       return {
         success: false,
         address,
@@ -81,7 +82,7 @@ class APIClient {
       
       return await response.json();
     } catch (error) {
-      console.error('[API Client] Status check failed:', error);
+      logger.error('[API Client] Status check failed:', error);
       return null;
     }
   }

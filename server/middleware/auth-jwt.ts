@@ -34,6 +34,49 @@ type AuthRequest = Request & {
 };
 
 /**
+ * Populate the request for upload routes when an application JWT (or a
+ * Passport session) is present, without rejecting requests that may be using
+ * a Firebase registration token instead. Registration uploads call the
+ * Firebase middleware after this best-effort authentication step.
+ */
+export async function authenticateUploadPrincipal(
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+): Promise<void> {
+  const authRequest = req as AuthRequest;
+  const authHeader = req.headers.authorization;
+  const hasBearerHeader = typeof authHeader === 'string' && /^Bearer\s+/i.test(authHeader);
+
+  if (hasBearerHeader) {
+    try {
+      const payload = verifyAccessToken(authHeader!.substring(7));
+      if (payload?.userId) {
+        const user = await storage.getUser(payload.userId);
+        if (user) {
+          req.user = user;
+          authRequest.authMethod = 'jwt';
+          next();
+          return;
+        }
+      }
+    } catch (error) {
+      logger.debug('[Upload Auth] Bearer token was not an application JWT', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+    }
+    // Let requireVerifiedFirebaseUser produce the registration-token error.
+    next();
+    return;
+  }
+
+  if (req.isAuthenticated?.() && req.user) {
+    authRequest.authMethod = 'session';
+  }
+  next();
+}
+
+/**
  * Dual-mode authentication middleware
  * Supports both JWT (Authorization Bearer header) and session-based authentication
  * 

@@ -103,3 +103,30 @@ export const expensiveRequestLimiter = rateLimit({
   ...sharedStore('expensive'),
   message: jsonMessage('Too many requests.'),
 });
+
+/** Device registration is authenticated, but still bounded to prevent token churn. */
+export const pushRegistrationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 30,
+  ...standardLimiterOptions,
+  ...sharedStore('push-registration'),
+  message: jsonMessage('Too many device registration attempts.'),
+});
+
+/** Test sends can trigger paid/provider work and must not be used as a probe loop. */
+export const pushTestLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  ...standardLimiterOptions,
+  ...sharedStore('push-test'),
+  message: jsonMessage('Too many push test attempts.'),
+});
+
+/** Diagnostics may optionally send a notification, so keep the budget small. */
+export const pushDiagnosticsLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 3,
+  ...standardLimiterOptions,
+  ...sharedStore('push-diagnostics'),
+  message: jsonMessage('Too many push diagnostic attempts.'),
+});

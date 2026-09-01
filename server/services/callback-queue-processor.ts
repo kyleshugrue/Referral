@@ -1,7 +1,9 @@
 import type { IStorage } from '../storage';
 import type { CallbackNotification } from '../../shared/schema';
-import { broadcastMatchRefresh } from '../websocket-utils';
+import { broadcastMatchRefresh, notifyConnectionAccepted, notifyConnectionRequest } from '../websocket-utils';
 import { logger } from '../lib/logger';
+import { recordQueueEvent, setQueueDepth } from '../lib/operational-metrics';
+import { decideQueueDelivery } from './queue-delivery-policy';
 
 type CallbackPayload = Record<string, unknown>;
 
@@ -9,7 +11,8 @@ export class CallbackQueueProcessor {
   private storage: IStorage;
   private isProcessing = false;
   private processingInterval: NodeJS.Timeout | null = null;
-  private readonly POLL_INTERVAL_MS = 30000; // 30 seconds
+  private queueRunActive = false;
+  private readonly POLL_INTERVAL_MS = 5000;
   private readonly MAX_ATTEMPTS = 3; // Maximum retry attempts per notification
 
   constructor(storage: IStorage) {
@@ -18,7 +21,7 @@ export class CallbackQueueProcessor {
 
   /**
    * Start the callback queue processor
-   * Polls the queue every 30 seconds and processes pending notifications
+   * Polls the queue every five seconds and processes pending notifications
    */
   start(): void {
     if (this.isProcessing) {
@@ -34,14 +37,14 @@ export class CallbackQueueProcessor {
       logger.error('[CallbackQueueProcessor] Error in initial queue processing:', error);
     });
 
-    // Then process every 30 seconds
+    // Then process every five seconds
     this.processingInterval = setInterval(() => {
       this.processQueue().catch(error => {
         logger.error('[CallbackQueueProcessor] Error in periodic queue processing:', error);
       });
     }, this.POLL_INTERVAL_MS);
 
-    logger.info('[CallbackQueueProcessor] ✅ Callback queue processor started (polling every 30s)');
+    logger.info('[CallbackQueueProcessor] Callback queue processor started', { pollIntervalMs: this.POLL_INTERVAL_MS });
   }
 
   /**
@@ -60,16 +63,28 @@ export class CallbackQueueProcessor {
    * Process all pending notifications in the queue
    */
   private async processQueue(): Promise<void> {
+    if (this.queueRunActive) {
+      logger.debug('[CallbackQueueProcessor] Previous queue run is still active');
+      return;
+    }
+    this.queueRunActive = true;
     try {
-      // Get pending notifications sorted by priority and age
-      const pendingNotifications = await this.storage.getPendingCallbackNotifications(100);
-      
+      const initialStats = await this.storage.getCallbackNotificationStats();
+      setQueueDepth('callbacks', initialStats.pending + initialStats.processing);
+      // Claim each item atomically so multiple app instances cannot deliver it twice.
+      const pendingNotifications: CallbackNotification[] = [];
+      for (let i = 0; i < 100; i++) {
+        const notification = await this.storage.claimPendingCallbackNotification();
+        if (!notification) break;
+        pendingNotifications.push(notification);
+        recordQueueEvent('callbacks', 'claimed');
+      }
       if (pendingNotifications.length === 0) {
         logger.debug('[CallbackQueueProcessor] No pending notifications to process');
         return;
       }
 
-      logger.info(`[CallbackQueueProcessor] 📬 Processing ${pendingNotifications.length} pending notification(s)`);
+       logger.info('[CallbackQueueProcessor] Processing pending notifications', { count: pendingNotifications.length });
 
       // Process each notification
       const results = await Promise.allSettled(
@@ -87,9 +102,13 @@ export class CallbackQueueProcessor {
         }
       }
 
-      logger.info(`[CallbackQueueProcessor] ✅ Processed ${successCount} notification(s), ${failureCount} failed`);
+       logger.info('[CallbackQueueProcessor] Processed notifications', { successCount, failureCount });
+      const finalStats = await this.storage.getCallbackNotificationStats();
+      setQueueDepth('callbacks', finalStats.pending + finalStats.processing);
     } catch (error) {
       logger.error('[CallbackQueueProcessor] Error processing queue:', error);
+    } finally {
+      this.queueRunActive = false;
     }
   }
 
@@ -106,12 +125,13 @@ export class CallbackQueueProcessor {
       const now = new Date();
       const expiresAt = new Date(notification.expiresAt);
       if (now > expiresAt) {
-        logger.debug(`[CallbackQueueProcessor] Notification ${notificationId} expired, marking as failed`);
+         logger.debug('[CallbackQueueProcessor] Notification expired; marking as failed', { notificationId });
         await this.storage.updateCallbackNotification(notificationId, {
           status: 'failed',
           errorMessage: 'Notification expired',
           lastAttemptAt: now.toISOString()
         });
+        recordQueueEvent('callbacks', 'failed');
         return false;
       }
 
@@ -124,23 +144,17 @@ export class CallbackQueueProcessor {
         }
         payload = parsedPayload as CallbackPayload;
       } catch (error) {
-        logger.error(`[CallbackQueueProcessor] Invalid JSON payload for notification ${notificationId}:`, error);
+         logger.error('[CallbackQueueProcessor] Invalid JSON payload', error, { notificationId });
         await this.storage.updateCallbackNotification(notificationId, {
           status: 'failed',
           errorMessage: 'Invalid JSON payload',
           lastAttemptAt: now.toISOString()
         });
+        recordQueueEvent('callbacks', 'failed');
         return false;
       }
 
-      logger.debug(`[CallbackQueueProcessor] Processing notification ${notificationId} (type: ${notificationType}, user: ${userId})`);
-
-      // Mark as processing
-      await this.storage.updateCallbackNotification(notificationId, {
-        status: 'processing',
-        attemptCount: notification.attemptCount + 1,
-        lastAttemptAt: now.toISOString()
-      });
+       logger.debug('[CallbackQueueProcessor] Processing notification', { notificationId, notificationType, userId });
 
       // Handle different notification types
       let success = false;
@@ -158,7 +172,7 @@ export class CallbackQueueProcessor {
           break;
         
         default:
-          logger.warn(`[CallbackQueueProcessor] Unknown notification type: ${notificationType}`);
+           logger.warn('[CallbackQueueProcessor] Unknown notification type', { notificationType });
           success = false;
       }
 
@@ -167,36 +181,46 @@ export class CallbackQueueProcessor {
         await this.storage.updateCallbackNotification(notificationId, {
           status: 'completed'
         });
-        logger.debug(`[CallbackQueueProcessor] ✅ Successfully processed notification ${notificationId}`);
+        recordQueueEvent('callbacks', 'completed');
+         logger.debug('[CallbackQueueProcessor] Successfully processed notification', { notificationId });
         return true;
       } else {
         // Check if we should retry
-        const attemptCount = notification.attemptCount + 1;
-        if (attemptCount >= this.MAX_ATTEMPTS) {
+        const decision = decideQueueDelivery('retryable-failure', notification.attemptCount, this.MAX_ATTEMPTS);
+        if (decision.status === 'failed') {
           await this.storage.updateCallbackNotification(notificationId, {
-            status: 'failed',
-            errorMessage: `Failed after ${attemptCount} attempts`
+            status: decision.status,
+            errorMessage: decision.errorMessage,
           });
-          logger.warn(`[CallbackQueueProcessor] ❌ Notification ${notificationId} failed after ${attemptCount} attempts`);
+          recordQueueEvent('callbacks', 'failed');
+          logger.warn('[CallbackQueueProcessor] Notification permanently failed', {
+            notificationId,
+            attemptCount: notification.attemptCount,
+          });
         } else {
           // Reset to pending for retry
           await this.storage.updateCallbackNotification(notificationId, {
             status: 'pending'
           });
-          logger.debug(`[CallbackQueueProcessor] Notification ${notificationId} will be retried (attempt ${attemptCount}/${this.MAX_ATTEMPTS})`);
+          logger.debug('[CallbackQueueProcessor] Notification will be retried', {
+            notificationId,
+            attemptCount: notification.attemptCount,
+            maxAttempts: this.MAX_ATTEMPTS,
+          });
         }
         return false;
       }
     } catch (error) {
-      logger.error(`[CallbackQueueProcessor] Error processing notification ${notificationId}:`, error);
+       logger.error('[CallbackQueueProcessor] Error processing notification', error, { notificationId });
       
       // Check if we should retry
-      const attemptCount = notification.attemptCount + 1;
-      if (attemptCount >= this.MAX_ATTEMPTS) {
+      const decision = decideQueueDelivery('retryable-failure', notification.attemptCount, this.MAX_ATTEMPTS);
+      if (decision.status === 'failed') {
         await this.storage.updateCallbackNotification(notificationId, {
-          status: 'failed',
-          errorMessage: error instanceof Error ? error.message : 'Unknown error'
+          status: decision.status,
+          errorMessage: decision.errorMessage,
         });
+        recordQueueEvent('callbacks', 'failed');
       } else {
         // Reset to pending for retry
         await this.storage.updateCallbackNotification(notificationId, {
@@ -215,19 +239,19 @@ export class CallbackQueueProcessor {
   private async handleMatchRefresh(userId: number, payload: CallbackPayload): Promise<boolean> {
     void payload;
     try {
-      logger.debug(`[CallbackQueueProcessor] Sending match refresh to user ${userId}`);
+       logger.debug('[CallbackQueueProcessor] Sending match refresh', { userId });
       const success = await broadcastMatchRefresh(userId);
       if (success) {
-        logger.debug(`[CallbackQueueProcessor] ✅ Match refresh broadcast sent to user ${userId}`);
+         logger.debug('[CallbackQueueProcessor] Match refresh broadcast sent', { userId });
         return true;
       } else {
         // CRITICAL FIX: Return false when user is offline so notification stays pending
         // This ensures retry on next poll cycle when user might be connected
-        logger.debug(`[CallbackQueueProcessor] User ${userId} not connected, will retry on next poll`);
+         logger.debug('[CallbackQueueProcessor] User not connected; will retry on next poll', { userId });
         return false;
       }
     } catch (error) {
-      logger.error(`[CallbackQueueProcessor] Error broadcasting match refresh to user ${userId}:`, error);
+       logger.error('[CallbackQueueProcessor] Error broadcasting match refresh', error, { userId });
       return false;
     }
   }
@@ -237,18 +261,30 @@ export class CallbackQueueProcessor {
    */
   private async handleConnectionRequest(userId: number, payload: CallbackPayload): Promise<boolean> {
     try {
-      const { senderId, requestId } = payload;
-      if (!senderId || !requestId) {
+       const senderId = Number(payload.senderId);
+       const requestId = Number(payload.requestId);
+       if (!Number.isInteger(senderId) || senderId <= 0 || !Number.isInteger(requestId) || requestId <= 0) {
         throw new Error('Invalid connection request payload');
       }
       
-      logger.debug(`[CallbackQueueProcessor] Sending connection request notification to user ${userId}`);
-      // We could implement this using websocket-utils if needed
-      // For now, just log success
-      logger.debug(`[CallbackQueueProcessor] ✅ Connection request notification processed for user ${userId}`);
-      return true;
+       const deliveredByWebSocket = await notifyConnectionRequest(userId, senderId, requestId);
+       if (deliveredByWebSocket) return true;
+
+       const sender = await this.storage.getUser(senderId);
+       if (!sender) return false;
+       const { sendPushNotification } = await import('./push-notifications');
+       return sendPushNotification({
+         userId,
+         title: 'New Connection Request',
+         body: `${sender.fullName} wants to connect with you`,
+         data: {
+           type: 'connection_request',
+           sender_id: String(senderId),
+           request_id: String(requestId),
+         },
+       }, { queueOnFailure: false });
     } catch (error) {
-      logger.error(`[CallbackQueueProcessor] Error handling connection request for user ${userId}:`, error);
+       logger.error('[CallbackQueueProcessor] Error handling connection request', error, { userId });
       return false;
     }
   }
@@ -258,18 +294,30 @@ export class CallbackQueueProcessor {
    */
   private async handleConnectionAccepted(userId: number, payload: CallbackPayload): Promise<boolean> {
     try {
-      const { acceptedById, requestId } = payload;
-      if (!acceptedById || !requestId) {
+       const acceptedById = Number(payload.acceptedById);
+       const requestId = Number(payload.requestId);
+       if (!Number.isInteger(acceptedById) || acceptedById <= 0 || !Number.isInteger(requestId) || requestId <= 0) {
         throw new Error('Invalid connection accepted payload');
       }
       
-      logger.debug(`[CallbackQueueProcessor] Sending connection accepted notification to user ${userId}`);
-      // We could implement this using websocket-utils if needed
-      // For now, just log success
-      logger.debug(`[CallbackQueueProcessor] ✅ Connection accepted notification processed for user ${userId}`);
-      return true;
+       const deliveredByWebSocket = await notifyConnectionAccepted(userId, requestId, acceptedById);
+       if (deliveredByWebSocket) return true;
+
+       const accepter = await this.storage.getUser(acceptedById);
+       if (!accepter) return false;
+       const { sendPushNotification } = await import('./push-notifications');
+       return sendPushNotification({
+         userId,
+         title: 'Connection Accepted',
+         body: `${accepter.fullName} accepted your connection request`,
+         data: {
+           type: 'connection_accepted',
+           accepter_id: String(acceptedById),
+           request_id: String(requestId),
+         },
+       }, { queueOnFailure: false });
     } catch (error) {
-      logger.error(`[CallbackQueueProcessor] Error handling connection accepted for user ${userId}:`, error);
+       logger.error('[CallbackQueueProcessor] Error handling connection accepted', error, { userId });
       return false;
     }
   }

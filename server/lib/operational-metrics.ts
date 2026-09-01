@@ -11,6 +11,22 @@ const responsesByStatus: Record<StatusClass, number> = {
   '5xx': 0,
   other: 0,
 };
+const queueEvents: Record<string, number> = {};
+const queueDepths: Record<string, number> = {};
+
+/** Low-cardinality queue counters (queue name and event are bounded labels). */
+export function recordQueueEvent(
+  queue: 'jobs' | 'callbacks' | 'push',
+  event: 'enqueued' | 'claimed' | 'recovered' | 'completed' | 'failed',
+  count = 1,
+): void {
+  const key = `${queue}.${event}`;
+  queueEvents[key] = (queueEvents[key] || 0) + Math.max(0, Math.floor(count));
+}
+
+export function setQueueDepth(queue: 'jobs' | 'callbacks' | 'push', depth: number): void {
+  queueDepths[queue] = Math.max(0, Math.floor(depth));
+}
 
 function statusClass(statusCode: number): StatusClass {
   if (statusCode >= 200 && statusCode < 300) return '2xx';
@@ -53,6 +69,10 @@ export function operationalMetricsSnapshot() {
         ? Number((requestDurationMsTotal / requestsTotal).toFixed(2))
         : 0,
       responsesByStatus: { ...responsesByStatus },
+    },
+    queues: {
+      events: { ...queueEvents },
+      depths: { ...queueDepths },
     },
   };
 }

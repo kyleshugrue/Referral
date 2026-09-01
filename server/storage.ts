@@ -1,7 +1,7 @@
-import { users, connections, connectionRequests, messages, conversations, synergyMatches, notifications, userBlocks, matchGenerationJobs, matchGenerationDeadLetters, fcmTokens, callbackNotificationQueue, refreshTokens, refreshTokenReuseEvents, type User, type Connection, type ConnectionRequest, type Message, type Conversation, type SynergyMatch, type InsertSynergyMatch, type Notification, type InsertNotification, type UserBlock, type MatchGenerationJob, type InsertMatchGenerationJob, type MatchGenerationDeadLetter, type InsertMatchGenerationDeadLetter, type CallbackNotification, type RefreshToken, type InsertRefreshToken, type InsertRefreshTokenReuseEvent, type InsertUser } from "@shared/schema";
+import { users, connections, connectionRequests, messages, conversations, synergyMatches, notifications, userBlocks, matchGenerationJobs, matchGenerationDeadLetters, fcmTokens, callbackNotificationQueue, queuedPushNotifications, deliveryObligations, refreshTokens, refreshTokenReuseEvents, type User, type Connection, type ConnectionRequest, type Message, type Conversation, type SynergyMatch, type InsertSynergyMatch, type Notification, type InsertNotification, type UserBlock, type MatchGenerationJob, type InsertMatchGenerationJob, type MatchGenerationDeadLetter, type InsertMatchGenerationDeadLetter, type CallbackNotification, type RefreshToken, type InsertRefreshToken, type InsertRefreshTokenReuseEvent, type InsertUser } from "@shared/schema";
 import { buildMatchGenerationIdempotencyKey, getMatchGenerationScope } from "@shared/match-generation-contract";
 import { db } from "./db";
-import { eq, or, and, not, inArray, desc, sql, asc, ilike, lte, isNull } from "drizzle-orm";
+import { eq, or, and, not, inArray, desc, sql, asc, ilike, lte, lt, isNull } from "drizzle-orm";
 import session from "express-session";
 import connectPg from "connect-pg-simple";
 import { pool } from "./db";
@@ -17,6 +17,7 @@ import { locationCacheService } from './services/location-cache';
 import { broadcastMatchRefresh, broadcastMatchRefreshToUsers } from './websocket-utils';
 import { logger } from './lib/logger';
 import { parseServerEnvironment } from './lib/env';
+import { recordQueueEvent } from './lib/operational-metrics';
 
 const PostgresSessionStore = connectPg(session);
 type UserWrite = Partial<InsertUser> & Record<string, unknown>;
@@ -88,6 +89,7 @@ export interface IStorage {
   getPendingMatchGenerationJobs(limit: number): Promise<MatchGenerationJob[]>;
   getPendingMatchGenerationJobsByPriority(limit: number, maxPriority: number): Promise<MatchGenerationJob[]>;
   claimPendingJob(maxPriority?: number): Promise<MatchGenerationJob | null>;
+  recoverStaleQueueWork(staleBefore: string): Promise<{ jobs: number; callbacks: number; pushes: number }>;
   updateMatchGenerationJob(jobId: number, updates: Partial<MatchGenerationJob>, expectedStatus?: MatchGenerationJob['status']): Promise<boolean>;
   getMatchGenerationJobStats(): Promise<{ pending: number; processing: number; completed: number; failed: number; }>;
   deleteOldMatchGenerationJobs(cutoffDate: string): Promise<number>;
@@ -106,6 +108,7 @@ export interface IStorage {
   // Queued push notification methods for APNs fallback
   enqueuePushNotification(userId: number, payload: string, priority: 'critical' | 'standard', expiresAt: string): Promise<void>;
   getPendingQueuedNotifications(limit: number): Promise<Array<{id: number, userId: number, payload: string, priority: string, attemptCount: number}>>;
+  claimPendingQueuedNotification(): Promise<{id: number, userId: number, payload: string, priority: string, attemptCount: number} | null>;
   updateQueuedNotificationStatus(id: number, status: string, errorMessage?: string): Promise<void>;
   incrementQueuedNotificationAttempts(id: number): Promise<void>;
   deleteExpiredQueuedNotifications(): Promise<number>;
@@ -116,7 +119,19 @@ export interface IStorage {
   retryDeadLetterJob(deadLetterId: number): Promise<void>;
   // Callback notification queue methods
   getPendingCallbackNotifications(limit: number): Promise<CallbackNotification[]>;
+  enqueueCallbackNotification(
+    userId: number,
+    notificationType: string,
+    payload: string,
+    priority: number,
+    expiresAt: string,
+    dedupeKey?: string,
+  ): Promise<CallbackNotification>;
+  claimPendingCallbackNotification(): Promise<CallbackNotification | null>;
   updateCallbackNotification(id: number, updates: Partial<CallbackNotification>): Promise<void>;
+  getCallbackNotificationStats(): Promise<{ pending: number; processing: number; failed: number }>;
+  dispatchPendingDeliveryObligations(limit: number): Promise<number>;
+  completeDeliveryObligation(dedupeKey: string): Promise<void>;
   // Refresh token management methods for JWT authentication
   // IMPORTANT: All tokenHash fields must be pre-hashed using hashRefreshToken() from jwt-service before calling these methods
   // Device-bound refresh tokens with rotation support for secure mobile authentication
@@ -1032,6 +1047,15 @@ export class DatabaseStorage implements IStorage {
         createdAt: new Date().toISOString(),
       }).onConflictDoNothing();
 
+      await tx.insert(deliveryObligations).values({
+        userId: receiverId,
+        eventType: 'connectionRequest',
+        payload: JSON.stringify({ senderId, requestId: request.id }),
+        dedupeKey: `connection-request:${request.id}`,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        status: 'pending',
+      });
+
       return request;
     });
 
@@ -1203,6 +1227,15 @@ export class DatabaseStorage implements IStorage {
           createdAt: new Date().toISOString(),
         },
       ]).onConflictDoNothing();
+
+      await tx.insert(deliveryObligations).values({
+        userId: request.senderId,
+        eventType: 'connectionAccepted',
+        payload: JSON.stringify({ acceptedById: request.receiverId, requestId }),
+        dedupeKey: `connection-accepted:${requestId}`,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        status: 'pending',
+      }).onConflictDoNothing();
 
       return { connection, request };
     });
@@ -3509,6 +3542,68 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
+  async recoverStaleQueueWork(staleBefore: string): Promise<{ jobs: number; callbacks: number; pushes: number }> {
+    try {
+      const staleJobCondition = and(
+        or(
+          eq(matchGenerationJobs.status, 'PROCESSING'),
+          eq(matchGenerationJobs.status, 'IN_PROGRESS'),
+        ),
+        or(
+          isNull(matchGenerationJobs.startedAt),
+          lt(matchGenerationJobs.startedAt, staleBefore),
+        ),
+      );
+      const jobs = await db
+        .update(matchGenerationJobs)
+        .set({
+          status: 'PENDING',
+          startedAt: null,
+          errorMessage: 'Recovered stale processing work',
+        })
+        .where(staleJobCondition);
+      const callbacks = await db
+        .update(callbackNotificationQueue)
+        .set({
+          status: 'pending',
+          errorMessage: 'Recovered stale processing work',
+        })
+        .where(and(
+          eq(callbackNotificationQueue.status, 'processing'),
+          or(
+            isNull(callbackNotificationQueue.lastAttemptAt),
+            lt(callbackNotificationQueue.lastAttemptAt, staleBefore),
+          ),
+        ));
+      const pushes = await db
+        .update(queuedPushNotifications)
+        .set({
+          status: 'pending',
+          errorMessage: 'Recovered stale processing work',
+        })
+        .where(and(
+          eq(queuedPushNotifications.status, 'processing'),
+          or(
+            isNull(queuedPushNotifications.lastAttemptAt),
+            lt(queuedPushNotifications.lastAttemptAt, staleBefore),
+          ),
+        ));
+
+      const recovered = {
+        jobs: jobs.rowCount || 0,
+        callbacks: callbacks.rowCount || 0,
+        pushes: pushes.rowCount || 0,
+      };
+      recordQueueEvent('jobs', 'recovered', recovered.jobs);
+      recordQueueEvent('callbacks', 'recovered', recovered.callbacks);
+      recordQueueEvent('push', 'recovered', recovered.pushes);
+      return recovered;
+    } catch (error) {
+      logger.error('[Queue Recovery] Error recovering stale work:', error);
+      throw error;
+    }
+  }
+
   async updateMatchGenerationJob(
     jobId: number,
     updates: Partial<MatchGenerationJob>,
@@ -3912,6 +4007,29 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
+  async claimPendingQueuedNotification(): Promise<{id: number, userId: number, payload: string, priority: string, attemptCount: number} | null> {
+    const result = await db.execute(sql`
+      UPDATE queued_push_notifications SET status = 'processing',
+        attempt_count = attempt_count + 1, last_attempt_at = NOW()
+      WHERE id = (
+        SELECT id FROM queued_push_notifications
+        WHERE (
+            status = 'pending'
+            AND (
+              last_attempt_at IS NULL
+              OR last_attempt_at < NOW() - (LEAST(POWER(2, attempt_count), 300) * INTERVAL '1 second')
+            )
+          OR status = 'processing'
+            AND last_attempt_at < NOW() - INTERVAL '10 minutes'
+        )
+          AND expires_at > NOW()
+        ORDER BY CASE WHEN priority = 'critical' THEN 0 ELSE 1 END, enqueued_at
+        LIMIT 1 FOR UPDATE SKIP LOCKED
+      ) RETURNING id, user_id as "userId", payload, priority, attempt_count as "attemptCount"
+    `);
+    return (result.rows[0] as {id: number, userId: number, payload: string, priority: string, attemptCount: number}) || null;
+  }
+
   async updateQueuedNotificationStatus(id: number, status: string, errorMessage?: string): Promise<void> {
     try {
       if (errorMessage) {
@@ -3923,7 +4041,8 @@ export class DatabaseStorage implements IStorage {
       } else {
         await db.execute(sql`
           UPDATE queued_push_notifications
-          SET status = ${status}, last_attempt_at = NOW()::TEXT
+          SET status = ${status}, last_attempt_at = NOW()::TEXT,
+              error_message = CASE WHEN ${status} = 'pending' THEN error_message ELSE NULL END
           WHERE id = ${id}
         `);
       }
@@ -4097,9 +4216,13 @@ export class DatabaseStorage implements IStorage {
         maxRetries: 3
       };
 
-      const newJob = await this.createMatchGenerationJob(newJobData);
-      
-      await db.delete(matchGenerationDeadLetters).where(eq(matchGenerationDeadLetters.id, deadLetterId));
+      // Keep requeue and removal atomic: a crash cannot duplicate or lose a retry.
+      const newJob = await db.transaction(async (tx) => {
+        const [created] = await tx.insert(matchGenerationJobs).values(newJobData).returning();
+        if (!created) throw new Error(`Unable to requeue dead letter job ${deadLetterId}`);
+        await tx.delete(matchGenerationDeadLetters).where(eq(matchGenerationDeadLetters.id, deadLetterId));
+        return created;
+      });
       
       logger.debug(`[DeadLetterQueue] Dead letter job ${deadLetterId} re-queued as job ${newJob.id}`);
     } catch (error) {
@@ -4136,21 +4259,179 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
+  async enqueueCallbackNotification(
+    userId: number,
+    notificationType: string,
+    payload: string,
+    priority: number,
+    expiresAt: string,
+    dedupeKey?: string,
+  ): Promise<CallbackNotification> {
+    if (!Number.isInteger(userId) || userId <= 0) {
+      throw new Error('Invalid callback notification user');
+    }
+    if (!notificationType || notificationType.length > 64) {
+      throw new Error('Invalid callback notification type');
+    }
+    if (payload.length > 32_768) {
+      throw new Error('Callback notification payload is too large');
+    }
+    const values = {
+      userId,
+      notificationType,
+      payload,
+      priority: Math.max(1, Math.min(10, Math.floor(priority))),
+      expiresAt,
+      status: 'pending' as const,
+      ...(dedupeKey ? { dedupeKey } : {}),
+    };
+    const [notification] = await db
+      .insert(callbackNotificationQueue)
+      .values(values)
+      .onConflictDoNothing()
+      .returning();
+    if (!notification && dedupeKey) {
+      const [existing] = await db
+        .select()
+        .from(callbackNotificationQueue)
+        .where(eq(callbackNotificationQueue.dedupeKey, dedupeKey))
+        .limit(1);
+      if (existing) return existing;
+    }
+    if (!notification) {
+      throw new Error('Unable to enqueue callback notification');
+    }
+    recordQueueEvent('callbacks', 'enqueued');
+    return notification;
+  }
+
+  async dispatchPendingDeliveryObligations(limit: number): Promise<number> {
+    const pending = await db
+      .select()
+      .from(deliveryObligations)
+      .where(and(
+        eq(deliveryObligations.status, 'pending'),
+        sql`${deliveryObligations.expiresAt} > NOW()`,
+      ))
+      .orderBy(asc(deliveryObligations.createdAt))
+      .limit(Math.max(1, Math.min(100, Math.floor(limit))));
+
+    let dispatched = 0;
+    for (const obligation of pending) {
+      await db.transaction(async (tx) => {
+        const [claimed] = await tx
+          .update(deliveryObligations)
+          .set({ status: 'completed', completedAt: new Date().toISOString() })
+          .where(and(
+            eq(deliveryObligations.id, obligation.id),
+            eq(deliveryObligations.status, 'pending'),
+          ))
+          .returning({ id: deliveryObligations.id });
+        if (!claimed) return;
+
+        await tx.insert(callbackNotificationQueue).values({
+          userId: obligation.userId,
+          notificationType: obligation.eventType,
+          payload: obligation.payload,
+          priority: 2,
+          expiresAt: obligation.expiresAt,
+          status: 'pending',
+          dedupeKey: obligation.dedupeKey,
+        }).onConflictDoNothing();
+        dispatched += 1;
+      });
+    }
+
+    const expired = await db
+      .update(deliveryObligations)
+      .set({ status: 'expired', completedAt: new Date().toISOString() })
+      .where(and(
+        eq(deliveryObligations.status, 'pending'),
+        lte(deliveryObligations.expiresAt, new Date().toISOString()),
+      ));
+    if ((expired.rowCount || 0) > 0) {
+      logger.warn('[Delivery Obligations] Expired undelivered obligations', {
+        count: expired.rowCount || 0,
+      });
+    }
+    return dispatched;
+  }
+
+  async completeDeliveryObligation(dedupeKey: string): Promise<void> {
+    await db
+      .update(deliveryObligations)
+      .set({ status: 'completed', completedAt: new Date().toISOString() })
+      .where(and(
+        eq(deliveryObligations.dedupeKey, dedupeKey),
+        eq(deliveryObligations.status, 'pending'),
+      ));
+  }
+
+  async claimPendingCallbackNotification(): Promise<CallbackNotification | null> {
+    const result = await db.execute(sql`
+      UPDATE callback_notification_queue SET status = 'processing',
+        attempt_count = attempt_count + 1, last_attempt_at = NOW()
+      WHERE id = (
+        SELECT id FROM callback_notification_queue
+        WHERE (
+            status = 'pending'
+            AND (
+              last_attempt_at IS NULL
+              OR last_attempt_at < NOW() - (LEAST(POWER(2, attempt_count), 30) * INTERVAL '1 second')
+            )
+          OR status = 'processing'
+            AND last_attempt_at < NOW() - INTERVAL '10 minutes'
+        )
+          AND expires_at > NOW()
+        ORDER BY priority ASC, enqueued_at ASC
+        LIMIT 1 FOR UPDATE SKIP LOCKED
+      ) RETURNING id, user_id as "userId", notification_type as "notificationType",
+        payload, priority, enqueued_at as "enqueuedAt", expires_at as "expiresAt",
+        attempt_count as "attemptCount", status, last_attempt_at as "lastAttemptAt",
+        error_message as "errorMessage"
+    `);
+    return (result.rows[0] as CallbackNotification) || null;
+  }
+
   /**
    * Update callback notification status and metadata
    */
   async updateCallbackNotification(id: number, updates: Partial<CallbackNotification>): Promise<void> {
     try {
+      const safeUpdates = { ...updates };
+      if (safeUpdates.status === 'pending' || safeUpdates.status === 'failed' || safeUpdates.status === 'completed') {
+        safeUpdates.lastAttemptAt = new Date().toISOString();
+      }
       await db
         .update(callbackNotificationQueue)
-        .set(updates)
+        .set(safeUpdates)
         .where(eq(callbackNotificationQueue.id, id));
       
-      logger.debug(`[CallbackQueue] Updated notification ${id} with status: ${updates.status}`);
+      logger.debug(`[CallbackQueue] Updated notification ${id} with status: ${safeUpdates.status}`);
     } catch (error) {
       logger.error(`[CallbackQueue] Error updating notification ${id}:`, error);
       throw error;
     }
+  }
+
+  async getCallbackNotificationStats(): Promise<{ pending: number; processing: number; failed: number }> {
+    const result = await db.execute(sql`
+      SELECT
+        COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+        COUNT(*) FILTER (WHERE status = 'processing') AS processing,
+        COUNT(*) FILTER (WHERE status = 'failed') AS failed
+      FROM callback_notification_queue
+    `);
+    const row = result.rows[0] as {
+      pending?: string | number;
+      processing?: string | number;
+      failed?: string | number;
+    } | undefined;
+    return {
+      pending: Number(row?.pending || 0),
+      processing: Number(row?.processing || 0),
+      failed: Number(row?.failed || 0),
+    };
   }
 
   // Refresh token management methods for JWT authentication

@@ -641,11 +641,36 @@ export const callbackNotificationQueue = pgTable("callback_notification_queue", 
   status: text("status").notNull().default("pending"), // 'pending', 'processing', 'completed', 'failed'
   lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true, mode: "string" }),
   errorMessage: text("error_message"),
+  dedupeKey: text("dedupe_key").unique(),
 });
 
 export const callbackNotificationQueueRelations = relations(callbackNotificationQueue, ({ one }) => ({
   user: one(users, {
     fields: [callbackNotificationQueue.userId],
+    references: [users.id],
+  }),
+}));
+
+// Transactional delivery obligations bridge committed business mutations to
+// asynchronous WebSocket/push/callback delivery. A unique dedupe key makes
+// crash recovery idempotent when dispatch and acknowledgement are separated.
+export const deliveryObligations = pgTable("delivery_obligations", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  eventType: text("event_type").notNull(),
+  payload: text("payload").notNull(),
+  dedupeKey: text("dedupe_key").notNull().unique(),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+  status: text("status").notNull().default("pending"), // 'pending', 'completed', 'expired'
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
+  completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+});
+
+export const deliveryObligationsRelations = relations(deliveryObligations, ({ one }) => ({
+  user: one(users, {
+    fields: [deliveryObligations.userId],
     references: [users.id],
   }),
 }));

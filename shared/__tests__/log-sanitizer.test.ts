@@ -130,6 +130,14 @@ describe('log-sanitizer', () => {
       expect(result.message).not.toContain('user@example.com');
       expect(result.message).toContain('[REDACTED_EMAIL]');
     });
+
+    it('does not expose ORM SQL or bound parameters in database errors', () => {
+      const error = new Error('Failed query: select * from users where email = $1\nparams: user@example.com');
+      const result = sanitizeLogValue(error) as { message: string };
+      expect(result.message).toBe('Database operation failed');
+      expect(result.message).not.toContain('select');
+      expect(result.message).not.toContain('user@example.com');
+    });
   });
 
   describe('sanitizeLogArgs', () => {

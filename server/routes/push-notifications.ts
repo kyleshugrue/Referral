@@ -6,6 +6,11 @@ import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration';
 import { logger } from '../lib/logger';
 import { parseStrictPositiveInteger } from '../lib/request-validation';
+import {
+  pushDiagnosticsLimiter,
+  pushRegistrationLimiter,
+  pushTestLimiter,
+} from '../lib/rate-limits';
 
 const router = express.Router();
 
@@ -15,11 +20,11 @@ router.use(requireCompleteRegistration);
 
 // Schema for device token registration with optional device metadata
 const registerTokenSchema = z.object({
-  deviceToken: z.string().min(1, "Device token is required"),
-  platform: z.string().min(1, "Platform is required"),
-  deviceId: z.string().optional(),
-  deviceModel: z.string().optional(),
-  osVersion: z.string().optional()
+  deviceToken: z.string().trim().min(20, "Device token is required").max(4096),
+  platform: z.literal("ios-native"),
+  deviceId: z.string().trim().min(1).max(128).optional(),
+  deviceModel: z.string().trim().min(1).max(128).optional(),
+  osVersion: z.string().trim().min(1).max(64).optional()
 });
 
 // Schema for device token removal
@@ -46,7 +51,11 @@ router.get("/health", async (req, res) => {
     }
   };
 
-  console.log('[Push Notifications Health] System health check:', health);
+  logger.debug('[Push Notifications Health] System health check', {
+    firebaseInitialized: health.firebase.initialized,
+    hasSession: health.authentication.hasSession,
+    isAuthenticated: health.authentication.isAuthenticated,
+  });
   
   res.json(health);
 });
@@ -55,7 +64,7 @@ router.get("/health", async (req, res) => {
  * Register device token for push notifications (iOS native only)
  * POST /api/push-notifications/register
  */
-router.post("/register", async (req, res) => {
+router.post("/register", pushRegistrationLimiter, async (req, res) => {
   logger.debug('[Push Notifications Register] Registration attempt:', {
     hasSession: !!req.session,
     isAuthenticated: req.isAuthenticated(),
@@ -102,7 +111,7 @@ router.post("/register", async (req, res) => {
     logger.error("Error registering device token:", error);
     res.status(500).json({ 
       message: "Failed to register device token",
-      error: error instanceof Error ? error.message : 'Unknown error'
+       error: 'Unable to register device token'
     });
   }
 });
@@ -140,7 +149,7 @@ router.post("/unregister", async (req, res) => {
     logger.error("Error removing device token:", error);
     res.status(500).json({ 
       message: "Failed to remove device token",
-      error: error instanceof Error ? error.message : 'Unknown error'
+       error: 'Unable to remove device token'
     });
   }
 });
@@ -158,7 +167,7 @@ router.get("/status", async (req, res) => {
     const userId = req.user.id;
     const { storage } = await import('../storage');
     
-    console.log(`[Push Notifications Status] Checking status for user ${userId}`);
+    logger.debug('[Push Notifications Status] Checking status');
     
     // Get all tokens for this user (iOS native only)
     const tokens = await storage.getFcmTokensByUserId(userId, 'ios-native');
@@ -170,14 +179,19 @@ router.get("/status", async (req, res) => {
       userId
     };
     
-    console.log(`[Push Notifications Status] Status for user ${userId}:`, status);
+    logger.debug('[Push Notifications Status] Status resolved', {
+      hasRegisteredToken: status.hasRegisteredToken,
+      tokenCount: status.tokenCount,
+    });
     
     res.json(status);
   } catch (error) {
-    console.error("Error getting push notification status:", error);
+    logger.error("Error getting push notification status", {
+      errorClass: error instanceof Error ? error.name : 'UnknownError',
+    });
     res.status(500).json({ 
       message: "Failed to get push notification status",
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: 'Unable to get push notification status'
     });
   }
 });
@@ -186,7 +200,7 @@ router.get("/status", async (req, res) => {
  * Send test push notification to authenticated user (iOS native only)
  * POST /api/push-notifications/test
  */
-router.post("/test", async (req, res) => {
+router.post("/test", pushTestLimiter, async (req, res) => {
   try {
     if (!req.user) {
       return res.status(401).json({ message: 'User not found' });
@@ -194,7 +208,7 @@ router.post("/test", async (req, res) => {
     
     const userId = req.user.id;
     
-    console.log(`[Push Notifications API] Sending test notification to user ${userId}`);
+    logger.debug('[Push Notifications API] Sending test notification');
     
     const success = await sendPushNotification({
       userId,
@@ -207,14 +221,14 @@ router.post("/test", async (req, res) => {
     });
     
     if (success) {
-      console.log(`[Push Notifications API] Test notification sent successfully to user ${userId}`);
+      logger.debug('[Push Notifications API] Test notification sent successfully');
       res.json({ 
         success: true, 
         message: "Test push notification sent successfully",
         timestamp: new Date().toISOString()
       });
     } else {
-      console.log(`[Push Notifications API] Failed to send test notification to user ${userId}`);
+      logger.warn('[Push Notifications API] Test notification was not sent');
       res.status(400).json({ 
         success: false, 
         message: "Failed to send test notification. Make sure you have registered a device token.",
@@ -222,10 +236,12 @@ router.post("/test", async (req, res) => {
       });
     }
   } catch (error) {
-    console.error("Error sending test push notification:", error);
+    logger.error("Error sending test push notification", {
+      errorClass: error instanceof Error ? error.name : 'UnknownError',
+    });
     res.status(500).json({ 
       message: "Failed to send test push notification",
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: 'Unable to send test push notification',
       timestamp: new Date().toISOString()
     });
   }
@@ -233,11 +249,11 @@ router.post("/test", async (req, res) => {
 
 /**
  * Comprehensive diagnostic endpoint for push notifications (self-access only)
- * GET /api/push-notifications/diagnostics/:userId
+ * POST /api/push-notifications/diagnostics/:userId
  * Provides detailed information about Firebase, tokens, and notification status
  * SECURITY: Users can only run diagnostics for their own account
  */
-router.get("/diagnostics/:userId", async (req, res) => {
+router.post("/diagnostics/:userId", pushDiagnosticsLimiter, async (req, res) => {
   try {
     if (!req.user) {
       return res.status(401).json({ message: 'User not found' });
@@ -257,14 +273,14 @@ router.get("/diagnostics/:userId", async (req, res) => {
     
     // SECURITY: Only allow users to run diagnostics on themselves
     if (targetUserId !== currentUserId) {
-      console.warn(`[${timestamp}] [Push-Diagnostics] ⚠️ Authorization failed: User ${currentUserId} attempted to access diagnostics for user ${targetUserId}`);
+      logger.warn(`[${timestamp}] [Push-Diagnostics] Authorization failed for self-service diagnostics`);
       return res.status(403).json({ 
         message: "Forbidden: You can only run diagnostics for your own account",
         timestamp
       });
     }
     
-    console.log(`[${timestamp}] [Push-Diagnostics] 🔍 Starting diagnostics for user ${targetUserId}`);
+    logger.debug(`[${timestamp}] [Push-Diagnostics] Starting self-service diagnostics`);
     
     const { storage } = await import('../storage');
     
@@ -285,25 +301,29 @@ router.get("/diagnostics/:userId", async (req, res) => {
       }
     }
     
-    console.log(`[${timestamp}] [Push-Diagnostics] Firebase status:`, firebaseStatus);
+    logger.debug(`[${timestamp}] [Push-Diagnostics] Firebase status`, {
+      initialized: firebaseStatus.initialized,
+      hasMessaging: firebaseStatus.hasMessaging,
+    });
     
     // 2. FCM Tokens for User (count only, no token data exposed)
     const tokens = await storage.getFcmTokensByUserId(targetUserId, 'ios-native');
-    console.log(`[${timestamp}] [Push-Diagnostics] Found ${tokens.length} token(s) for user ${targetUserId}`);
+    logger.debug(`[${timestamp}] [Push-Diagnostics] Token count resolved`, {
+      count: tokens.length,
+    });
     
     // 3. Badge Count
     const badgeCounts = await storage.getUnreadNotificationCounts(targetUserId);
     const totalBadge = badgeCounts.messages + badgeCounts.connectionRequests + badgeCounts.newConnections;
     
-    console.log(`[${timestamp}] [Push-Diagnostics] Badge count for user ${targetUserId}:`, {
-      ...badgeCounts,
-      total: totalBadge
+    logger.debug(`[${timestamp}] [Push-Diagnostics] Badge count resolved`, {
+      total: totalBadge,
     });
     
     // 4. Test Send Attempt
     let testSendResult: boolean | { success?: boolean; error?: string } | null = null;
     if (tokens.length > 0) {
-      console.log(`[${timestamp}] [Push-Diagnostics] Attempting test send to user ${targetUserId}...`);
+      logger.debug(`[${timestamp}] [Push-Diagnostics] Attempting test send`);
       try {
         testSendResult = await sendPushNotification({
           userId: targetUserId,
@@ -320,11 +340,13 @@ router.get("/diagnostics/:userId", async (req, res) => {
             : false,
         });
       } catch (sendError) {
-        console.error(`[${timestamp}] [Push-Diagnostics] Test send failed:`, sendError);
-        testSendResult = { error: sendError instanceof Error ? sendError.message : 'Unknown error' };
+        logger.error(`[${timestamp}] [Push-Diagnostics] Test send failed`, {
+          errorClass: sendError instanceof Error ? sendError.name : 'UnknownError',
+        });
+        testSendResult = { error: 'Diagnostic test send failed' };
       }
     } else {
-      console.log(`[${timestamp}] [Push-Diagnostics] Skipping test send - no tokens found`);
+      logger.debug(`[${timestamp}] [Push-Diagnostics] Skipping test send - no tokens found`);
     }
     
     // Compile diagnostics (NO sensitive token data exposed)
@@ -362,14 +384,16 @@ router.get("/diagnostics/:userId", async (req, res) => {
       diagnostics.summary.issues.push('Badge count is 0 (notification may not have been created yet)');
     }
     
-    console.log(`[${timestamp}] [Push-Diagnostics] 🏁 Diagnostics complete:`, diagnostics.summary);
+    logger.debug(`[${timestamp}] [Push-Diagnostics] Diagnostics complete`, diagnostics.summary);
     
     res.json(diagnostics);
   } catch (error) {
-    console.error('[Push-Diagnostics] Error running diagnostics:', error);
+    logger.error('[Push-Diagnostics] Error running diagnostics', {
+      errorClass: error instanceof Error ? error.name : 'UnknownError',
+    });
     res.status(500).json({ 
       message: "Failed to run push notification diagnostics",
-      error: error instanceof Error ? error.message : 'Unknown error',
+      error: 'Unable to run push notification diagnostics',
       timestamp: new Date().toISOString()
     });
   }

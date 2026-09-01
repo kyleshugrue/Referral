@@ -8,7 +8,7 @@ export async function handleRedirect() {
     // Use the imported auth instance
     const auth = firebaseAuth;
     if (!auth) {
-      console.error("Firebase auth not initialized");
+      logger.error("Firebase auth not initialized");
       return null;
     }
     

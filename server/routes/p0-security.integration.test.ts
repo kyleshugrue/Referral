@@ -148,7 +148,7 @@ describe("P0 HTTP security regressions", () => {
       });
 
       expect(response.status).toBe(200);
-      expect(response.body.id).toBe(owner.id);
+      expect((response.body as { id: number }).id).toBe(owner.id);
     });
   });
 

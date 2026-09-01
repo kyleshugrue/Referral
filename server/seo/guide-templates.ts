@@ -62,80 +62,6 @@ function faqJsonLd(faq: FaqItem[]): Record<string, unknown> {
   };
 }
 
-// Shared theme matching the main auth page and app theme.
-const PAGE_STYLE = `
-  :root {
-    --primary: hsl(215, 25%, 27%);
-    --secondary: hsl(215, 20%, 65%);
-    --muted: hsl(215, 20%, 95%);
-    --border: hsl(215, 20%, 65%);
-  }
-  * { box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    -webkit-font-smoothing: antialiased;
-    margin: 0;
-    color: var(--primary);
-    line-height: 1.65;
-    min-height: 100vh;
-    background: linear-gradient(to top,
-      hsla(215,25%,27%,1) 0%,
-      hsla(215,20%,65%,0.8) 50%,
-      hsla(0,0%,100%,1) 100%);
-    background-attachment: fixed;
-  }
-  .wrap { max-width: 820px; margin: 0 auto; padding: 32px 20px 80px; }
-  header.site { text-align: center; padding: 24px 0 8px; }
-  header.site a.brand {
-    font-size: 2.25rem; font-weight: 800; color: var(--primary);
-    text-decoration: none; letter-spacing: -0.5px;
-  }
-  header.site p.tag { color: var(--primary); opacity: 0.85; margin: 4px 0 0; font-size: 1.05rem; }
-  nav.crumbs { font-size: 0.9rem; margin: 16px 0; }
-  nav.crumbs a { color: var(--primary); text-decoration: none; opacity: 0.85; }
-  nav.crumbs a:hover { text-decoration: underline; }
-  .card {
-    background: #fff; border-radius: 16px; padding: 28px 28px;
-    box-shadow: 0 10px 30px rgba(33,46,66,0.12); margin: 18px 0;
-  }
-  h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 12px; color: var(--primary); }
-  h2 { font-size: 1.35rem; margin: 28px 0 10px; color: var(--primary); }
-  h3 { font-size: 1.1rem; margin: 20px 0 6px; color: var(--primary); }
-  p, li { color: #2b3648; }
-  ul, ol { padding-left: 22px; }
-  li { margin: 6px 0; }
-  .lead { font-size: 1.08rem; }
-  .cta {
-    display: inline-block; background: var(--primary); color: #fff;
-    padding: 14px 26px; border-radius: 14px; text-decoration: none;
-    font-weight: 600; margin-top: 8px;
-  }
-  .cta:hover { opacity: 0.92; }
-  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-  .chips span {
-    display: inline-block; background: var(--muted); color: var(--primary);
-    padding: 7px 12px; border-radius: 999px; font-size: 0.9rem; font-weight: 500;
-    border: 1px solid rgba(33,46,66,0.06);
-  }
-  .toc { margin: 8px 0 0; }
-  .toc a { color: var(--primary); text-decoration: none; opacity: 0.9; }
-  .toc a:hover { text-decoration: underline; }
-  .dateline { font-size: 0.85rem; color: #5a6a82; margin: -4px 0 4px; }
-  .byline { font-size: 0.9rem; color: #5a6a82; margin: 0 0 16px; }
-  .byline a { color: #5a6a82; text-decoration: underline; text-underline-offset: 2px; }
-  .byline a:hover { color: var(--primary); }
-  .editorial-note { background: var(--muted); border-radius: 10px; padding: 14px 18px; font-size: 0.88rem; color: #4a5a70; margin-top: 16px; }
-  .editorial-note strong { color: var(--primary); }
-  .faq h3 { margin-top: 18px; }
-  a[target="_blank"] { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
-  a[target="_blank"]:hover { opacity: 0.75; }
-  footer.site {
-    text-align: center; color: #fff; opacity: 0.92; font-size: 0.9rem;
-    padding: 24px 16px 8px;
-  }
-  footer.site a { color: #fff; text-decoration: underline; }
-`;
-
 export function renderPage(opts: PageOptions): string {
   const jsonLdBlocks: Record<string, unknown>[] = [organizationJsonLd(opts.baseUrl)];
   if (opts.faq && opts.faq.length) jsonLdBlocks.push(faqJsonLd(opts.faq));
@@ -171,7 +97,7 @@ export function renderPage(opts: PageOptions): string {
   <meta name="twitter:image" content="${escapeHtml(opts.image)}" />
   <meta name="twitter:image:alt" content="${escapeHtml(opts.imageAlt ?? opts.title)}" />` : ""}
   <link rel="icon" type="image/png" href="/app-icon-192.png?v=3" />
-  <style>${PAGE_STYLE}</style>
+  <link rel="stylesheet" href="/guides.css" />
   ${jsonLdHtml}
 </head>
 <body>
@@ -334,7 +260,7 @@ export function renderGuide(baseUrl: string): string {
       ${chips(techCompanies)}
       <h3>Top finance companies</h3>
       ${chips(financeCompanies)}
-      <p style="margin-top:16px">${ctaBlock("Find a referral at your target company")}</p>
+      <p class="company-cta">${ctaBlock("Find a referral at your target company")}</p>
     </article>
 
     <article class="card" id="cities">

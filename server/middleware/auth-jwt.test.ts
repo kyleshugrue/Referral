@@ -23,7 +23,7 @@ vi.mock("../lib/http-security", () => ({
   requireTrustedOriginForSessionMutation: (_req: unknown, _res: unknown, next: () => void) => next(),
 }));
 
-const { requireAuthJWT } = await import("./auth-jwt");
+const { authenticateUploadPrincipal, requireAuthJWT } = await import("./auth-jwt");
 
 const makeRequest = (authorization?: string) => ({
   headers: authorization ? { authorization } : {},
@@ -59,6 +59,44 @@ describe("requireAuthJWT authentication precedence", () => {
 
     await requireAuthJWT(request as never, response as never, mocks.next);
 
+    expect(mocks.next).toHaveBeenCalledOnce();
+    expect(response.status).not.toHaveBeenCalled();
+  });
+});
+
+describe("upload authentication compatibility", () => {
+  test("attaches an application JWT user for upload routes", async () => {
+    mocks.next.mockReset();
+    mocks.verifyAccessToken.mockReturnValue({ userId: 7 });
+    mocks.getUser.mockResolvedValue({ id: 7 });
+    const request = makeRequest("Bearer app-token") as unknown as {
+      user?: { id: number };
+      authMethod?: string;
+    };
+    request.user = undefined;
+    const response = makeResponse();
+
+    await authenticateUploadPrincipal(request as never, response as never, mocks.next);
+
+    expect(request.user).toEqual({ id: 7 });
+    expect(request.authMethod).toBe("jwt");
+    expect(mocks.next).toHaveBeenCalledOnce();
+  });
+
+  test("passes Firebase registration tokens through for Firebase verification", async () => {
+    mocks.next.mockReset();
+    mocks.verifyAccessToken.mockReturnValue(null);
+    const request = makeRequest("Bearer firebase-token") as unknown as {
+      user?: { id: number };
+      authMethod?: string;
+    };
+    request.user = undefined;
+    const response = makeResponse();
+
+    await authenticateUploadPrincipal(request as never, response as never, mocks.next);
+
+    expect(request.user).toBeUndefined();
+    expect(request.authMethod).toBeUndefined();
     expect(mocks.next).toHaveBeenCalledOnce();
     expect(response.status).not.toHaveBeenCalled();
   });

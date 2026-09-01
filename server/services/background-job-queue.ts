@@ -11,6 +11,7 @@ import { db } from '../db';
 import { sql, eq, or, and, lte } from 'drizzle-orm';
 import { snapshotService, type ProfileData } from './profile-snapshot-service';
 import { logger } from '../lib/logger';
+import { recordQueueEvent } from '../lib/operational-metrics';
 
 import type { JobStatus } from '../../shared/schema';
 import {
@@ -63,6 +64,7 @@ export class BackgroundJobQueue {
   private jobAvailableResolvers: Array<() => void> = [];
   private reconnectAttempts = 0;
   private isReconnecting = false;
+  private isStopping = false;
   private lastNotifyTime = 0;
   
   private readonly HIGH_PRIORITY_THRESHOLD = 5; // Jobs with priority <= 5 are high-priority
@@ -78,6 +80,7 @@ export class BackgroundJobQueue {
    * Setup PostgreSQL LISTEN connection for event-driven job processing
    */
   private async setupListenConnection(): Promise<void> {
+    if (this.isStopping) return;
     try {
       console.log('[EventDriven] Setting up LISTEN connection to PostgreSQL...');
       
@@ -210,7 +213,7 @@ export class BackgroundJobQueue {
    * Reconnect LISTEN connection with exponential backoff
    */
   private async reconnectListener(): Promise<void> {
-    if (this.isReconnecting) {
+    if (this.isReconnecting || this.isStopping || !this.isProcessing) {
       return; // Already reconnecting
     }
     
@@ -241,7 +244,7 @@ export class BackgroundJobQueue {
       await this.sleep(backoffDelay);
       
       // Attempt reconnection
-      await this.setupListenConnection();
+      if (!this.isStopping && this.isProcessing) await this.setupListenConnection();
       
       this.isReconnecting = false;
       
@@ -609,7 +612,7 @@ export class BackgroundJobQueue {
    * Only starts if RUN_CMDCC_WORKER=true (worker VM mode)
    */
   private startProcessing(): void {
-    if (this.isProcessing) return;
+    if (this.isProcessing && this.processingPromise) return;
     
     // Only process jobs if this is a worker VM
     if (!this.shouldProcessJobs()) {
@@ -635,7 +638,7 @@ export class BackgroundJobQueue {
         // No high-priority jobs, try to claim low-priority jobs atomically
         job = await this.storage.claimPendingJob();
       }
-      
+      if (job) recordQueueEvent('jobs', 'claimed');
       return job;
     } catch (error) {
       console.error('[BackgroundJobQueue] Error claiming job:', error);
@@ -841,10 +844,13 @@ export class BackgroundJobQueue {
    * Only starts if RUN_CMDCC_WORKER=true (worker VM mode)
    */
   async start(): Promise<void> {
+    this.isStopping = false;
     if (this.shouldProcessJobs()) {
       console.log(`[EventDriven] Starting event-driven background processing (Worker VM mode)`);
       
       // Set up LISTEN connection for event-driven processing
+      this.isProcessing = true;
+      await this.storage.recoverStaleQueueWork(new Date(Date.now() - 5 * 60_000).toISOString());
       await this.setupListenConnection();
       
       // Start worker pool
@@ -859,6 +865,7 @@ export class BackgroundJobQueue {
    */
   async stop(): Promise<void> {
     console.log(`[EventDriven] Stopping job processing`);
+    this.isStopping = true;
     this.isProcessing = false;
     
     // Wake all workers so they can exit cleanly
@@ -969,7 +976,11 @@ export class BackgroundJobQueue {
    * Utility sleep function
    */
   private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise(resolve => {
+      const timer = setTimeout(resolve, ms);
+      // Backoff timers must not keep a draining worker process alive.
+      timer.unref?.();
+    });
   }
 }
 

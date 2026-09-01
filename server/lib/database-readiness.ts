@@ -2,12 +2,20 @@ import { URL } from 'node:url';
 
 export const REQUIRED_SCHEMA_TABLES = [
   'callback_notification_queue',
+  'delivery_obligations',
   'fcm_tokens',
   'match_generation_jobs',
-  'rate_limit_windows',
   'session',
   'websocket_tickets',
 ] as const;
+
+export const RATE_LIMIT_SCHEMA_TABLE = 'rate_limit_windows' as const;
+
+export function requiredSchemaTablesForMode(rateLimitMode = process.env.RATE_LIMIT_MODE): readonly string[] {
+  return rateLimitMode === 'postgres'
+    ? [...REQUIRED_SCHEMA_TABLES, RATE_LIMIT_SCHEMA_TABLE]
+    : REQUIRED_SCHEMA_TABLES;
+}
 
 export interface ReadinessQuery {
   query<T extends Record<string, unknown> = Record<string, unknown>>(
