@@ -7,7 +7,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 import { type Server } from "http";
 import viteConfig from "../vite.config";
-import { nanoid } from "nanoid";
 import { isSpaRoute, isNoIndexRoute } from "./lib/spa-routes";
 
 const viteLogger = createLogger();
@@ -32,6 +31,10 @@ export async function setupVite(app: Express, server: Server) {
     (process.env.NODE_ENV === "development" && process.env.PORT === "3001"),
   );
   const isCi = process.env.CI === "true";
+  const resolvedViteConfig =
+    typeof viteConfig === "function"
+      ? await viteConfig({ command: "serve", mode: "development" })
+      : viteConfig;
   const serverOptions = {
     middlewareMode: true,
     // Replit's preview proxy does not accept this server's HMR upgrade. Keep
@@ -42,7 +45,7 @@ export async function setupVite(app: Express, server: Server) {
   };
 
   const vite = await createViteServer({
-    ...viteConfig,
+    ...resolvedViteConfig,
     configFile: false,
     customLogger: {
       ...viteLogger,
@@ -76,12 +79,8 @@ export async function setupVite(app: Express, server: Server) {
         "index.html",
       );
 
-      // always reload the index.html file from disk incase it changes
-      let template = await fs.promises.readFile(clientTemplate, "utf-8");
-      template = template.replace(
-        `src="/src/main.tsx"`,
-        `src="/src/main.tsx?v=${nanoid()}"`,
-      );
+      // Always reload index.html from disk in case it changes.
+      const template = await fs.promises.readFile(clientTemplate, "utf-8");
       let page = await vite.transformIndexHtml(url, template);
       if (isReplitPreview || isCi) {
         page = page.replace(
