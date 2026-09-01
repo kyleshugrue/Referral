@@ -43,6 +43,13 @@
       "when": 1788048001000,
       "tag": "0005_relational_consistency",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788215310007,
+      "tag": "0006_rate_limit_windows",
+      "breakpoints": true
     }
   ]
 }

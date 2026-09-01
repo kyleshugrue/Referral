@@ -8,6 +8,7 @@ import {
   ALLOWED_RESUME_EXTENSIONS,
   ALLOWED_IMAGE_MIME_TYPES,
   ALLOWED_RESUME_MIME_TYPES,
+  UPLOAD_LIMITS,
 } from '../upload-validation';
 
 describe('getSafeExtension', () => {
@@ -99,5 +100,18 @@ describe('matchesMagicBytes', () => {
   it('rejects truncated files', () => {
     expect(matchesMagicBytes(Buffer.from([0xff]), '.jpg')).toBe(false);
     expect(matchesMagicBytes(Buffer.alloc(0), '.png')).toBe(false);
+  });
+});
+
+describe('UPLOAD_LIMITS', () => {
+  it('keeps multipart and media processing bounded', () => {
+    expect(UPLOAD_LIMITS).toMatchObject({
+      resumeBytes: 10 * 1024 * 1024,
+      photoBytes: 25 * 1024 * 1024,
+      maxFields: 20,
+      maxParts: 25,
+      maxImagePixels: 20_000_000,
+      maxPreviewPages: 5,
+    });
   });
 });

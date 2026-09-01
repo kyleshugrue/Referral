@@ -37,6 +37,7 @@ describe('database readiness safeguards', () => {
           { table_name: 'callback_notification_queue' },
           { table_name: 'fcm_tokens' },
           { table_name: 'match_generation_jobs' },
+          { table_name: 'rate_limit_windows' },
           { table_name: 'session' },
           { table_name: 'websocket_tickets' },
         ],
@@ -53,7 +54,7 @@ describe('database readiness safeguards', () => {
     await expect(checkDatabaseReadiness({ query })).resolves.toMatchObject({
       ready: false,
       reason: 'schema-incomplete',
-      missingTables: ['callback_notification_queue', 'fcm_tokens', 'match_generation_jobs', 'websocket_tickets'],
+       missingTables: ['callback_notification_queue', 'fcm_tokens', 'match_generation_jobs', 'rate_limit_windows', 'websocket_tickets'],
     });
   });
 });

@@ -8,6 +8,7 @@ import { hybridGeocodingService, type ClientLocationData } from "../services/hyb
 import { requireAuthJWT } from "../auth";
 import { requireCompleteRegistration } from "../middleware/require-complete-registration";
 import { logger } from "../lib/logger";
+import { boundedString } from "../lib/request-validation";
 
 const router = express.Router();
 router.use(requireAuthJWT);
@@ -21,7 +22,7 @@ router.post("/process", async (req, res) => {
   try {
     const locationData: ClientLocationData = req.body;
     
-    if (!locationData || typeof locationData.location !== "string" || locationData.location.length > 200) {
+    if (!locationData || !boundedString(locationData.location, 200)) {
       return res.status(400).json({ error: "Location is required" });
     }
 
@@ -59,7 +60,8 @@ router.post("/batch-process", async (req, res) => {
   try {
     const { locations }: { locations: ClientLocationData[] } = req.body;
     
-    if (!Array.isArray(locations) || locations.length === 0 || locations.length > 50) {
+    if (!Array.isArray(locations) || locations.length === 0 || locations.length > 50 ||
+      locations.some((location) => !location || !boundedString(location.location, 200))) {
       return res.status(400).json({ error: "Locations array is required" });
     }
 

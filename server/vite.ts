@@ -27,14 +27,17 @@ export async function setupVite(app: Express, server: Server) {
   const isReplitPreview = Boolean(
     process.env.REPLIT_DEV_DOMAIN ||
     process.env.REPLIT_CLUSTER ||
-    process.env.REPL_ID,
+    process.env.REPL_ID ||
+    process.env.REPLIT_PREVIEW === "true" ||
+    (process.env.NODE_ENV === "development" && process.env.PORT === "3001"),
   );
+  const isCi = process.env.CI === "true";
   const serverOptions = {
     middlewareMode: true,
     // Replit's preview proxy does not accept this server's HMR upgrade. Keep
     // local development hot reload, but avoid a persistent browser console
     // error in the proxied preview. Production never uses Vite.
-    hmr: isReplitPreview ? false : { server, path: "/vite-hmr" },
+    hmr: isReplitPreview || isCi ? false : { server, path: "/vite-hmr" },
     allowedHosts: true as const,
   };
 
@@ -51,7 +54,6 @@ export async function setupVite(app: Express, server: Server) {
     server: serverOptions,
     appType: "custom",
   });
-
   app.use(vite.middlewares);
   app.use("*", async (req, res, next) => {
     const url = req.originalUrl;
@@ -80,7 +82,13 @@ export async function setupVite(app: Express, server: Server) {
         `src="/src/main.tsx"`,
         `src="/src/main.tsx?v=${nanoid()}"`,
       );
-      const page = await vite.transformIndexHtml(url, template);
+      let page = await vite.transformIndexHtml(url, template);
+      if (isReplitPreview || isCi) {
+        page = page.replace(
+          /<script type="module" src="\/@vite\/client"><\/script>\s*/g,
+          "",
+        );
+      }
 
       // Return 404 for unrecognised paths so crawlers classify them correctly.
       // Known SPA routes still receive 200.
@@ -89,7 +97,10 @@ export async function setupVite(app: Express, server: Server) {
       // Inject noindex directives for auth/utility routes so search engines
       // never index thin utility pages (login, register, password-reset, etc.).
       let finalPage = page;
-      const headers: Record<string, string> = { "Content-Type": "text/html" };
+      const headers: Record<string, string> = {
+        "Content-Type": "text/html",
+        "Cache-Control": "no-store",
+      };
       if (isNoIndexRoute(urlPath)) {
         headers["X-Robots-Tag"] = "noindex, nofollow";
         finalPage = finalPage.replace(

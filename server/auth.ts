@@ -18,9 +18,11 @@ import { legacyFirebaseTokenAuthorization, requireVerifiedFirebaseUser } from '.
 import { registerFirebaseUser } from './routes/register';
 import { toSelfUserDto } from './lib/privacy-dto';
 import { requireTrustedOriginForSessionMutation } from './lib/http-security';
+import { parseServerEnvironment } from './lib/env';
 
 // Export session middleware for WebSocket authentication
 export let sessionMiddleware: ReturnType<typeof session>;
+export let sessionCookieName = 'referral.sid';
 const configuredApps = new WeakSet<Express>();
 
 // Session-only authentication middleware (legacy)
@@ -48,8 +50,9 @@ export function setupAuth(app: Express) {
     logger.warn('[Auth] setupAuth called more than once; ignoring duplicate setup');
     return;
   }
+  const serverEnv = parseServerEnvironment(process.env);
   // Generate a secure session secret if not provided
-  const sessionSecret = process.env.SESSION_SECRET || randomBytes(32).toString('hex');
+  const sessionSecret = serverEnv.sessionSecret || randomBytes(32).toString('hex');
   if (!process.env.SESSION_SECRET) {
     if (process.env.NODE_ENV === 'production') {
       throw new Error('SESSION_SECRET environment variable must be set in production');
@@ -60,17 +63,22 @@ export function setupAuth(app: Express) {
   // Session cookie configuration optimized for both web and Capacitor native apps
   // Production (HTTPS): secure=true, sameSite=none (required for Capacitor iOS cross-origin)
   // Local dev (HTTP): secure=false, sameSite=lax (browsers reject secure cookies over HTTP)
-  const isProduction = process.env.NODE_ENV === "production";
+  const isProduction = serverEnv.nodeEnv === "production";
+  sessionCookieName = isProduction ? '__Host-referral.sid' : 'referral.sid';
   
   const sessionSettings: session.SessionOptions = {
     secret: sessionSecret,
+    name: sessionCookieName,
     resave: false,
     saveUninitialized: false,
+    rolling: false,
     store: storage.sessionStore,
     cookie: {
-      secure: isProduction, // true in production (HTTPS), false in local dev (HTTP)
-      sameSite: isProduction ? "none" : "lax", // 'none' for Capacitor in production, 'lax' for local web dev
-      maxAge: 365 * 24 * 60 * 60 * 1000, // 1 year (effectively disabling automatic logout)
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: serverEnv.sessionSameSite,
+      path: '/',
+      maxAge: serverEnv.sessionMaxAgeMs,
     },
   };
 
@@ -108,14 +116,31 @@ export function setupAuth(app: Express) {
       if (trustProxySamples < 5) {
         trustProxySamples++;
         logger.info(
-          `[TrustProxy] sample ${trustProxySamples}/5: xff="${req.headers["x-forwarded-for"] ?? ""}" socket=${req.socket.remoteAddress} resolved req.ip=${req.ip}`
+          `[TrustProxy] sample ${trustProxySamples}/5`,
+          {
+            hasForwardedFor: Boolean(req.headers["x-forwarded-for"]),
+            resolvedClientIp: req.ip || 'unknown',
+          },
         );
       }
       next();
     });
   }
-  app.use(json({ limit: '10mb' }));
-  app.use(urlencoded({ extended: true, limit: '10mb' }));
+  app.use((req, res, next) => {
+    if (!req.path.startsWith('/internal/')) {
+      next();
+      return;
+    }
+    const rawLength = req.headers['content-length'];
+    const contentLength = typeof rawLength === 'string' ? Number(rawLength) : NaN;
+    if (Number.isFinite(contentLength) && contentLength > serverEnv.internalBodyLimitBytes) {
+      res.status(413).json({ error: 'Request body too large' });
+      return;
+    }
+    next();
+  });
+  app.use(json({ limit: serverEnv.jsonBodyLimitBytes }));
+  app.use(urlencoded({ extended: true, limit: serverEnv.urlencodedBodyLimitBytes }));
   app.use(sessionMiddleware);
   app.use(passport.initialize());
   app.use(passport.session());
@@ -156,12 +181,17 @@ export function setupAuth(app: Express) {
       // SECURITY: Fully destroy the session to clear all session data
       req.session.destroy((destroyErr) => {
         if (destroyErr) {
-          console.error("[Logout] Session destroy error:", destroyErr);
+          logger.error("[Logout] Session destroy error:", destroyErr);
           return next(destroyErr);
         }
         
         // SECURITY: Clear the session cookie from the client
-        res.clearCookie('connect.sid', { path: '/' });
+        res.clearCookie(sessionCookieName, {
+          httpOnly: true,
+          secure: isProduction,
+          sameSite: serverEnv.sessionSameSite,
+          path: '/',
+        });
         res.sendStatus(200);
       });
     });

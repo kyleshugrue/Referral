@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Command, CommandGroup, CommandItem } from "@/components/ui/command";
 import { X, Check, ChevronsUpDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Capacitor } from "@capacitor/core";
 
 export type Option = {
   label: string;
@@ -35,13 +36,8 @@ export function MultiSelect({
   React.useEffect(() => {
     const checkIOSNative = () => {
       try {
-        // Import dynamically to avoid issues if Capacitor is not available
-        import('@capacitor/core').then(({ Capacitor }) => {
-          const isNative = Capacitor.getPlatform() === 'ios' && Capacitor.isNativePlatform();
-          setIsIOSNative(isNative);
-        }).catch(() => {
-          setIsIOSNative(false);
-        });
+        const isNative = Capacitor.getPlatform() === 'ios' && Capacitor.isNativePlatform();
+        setIsIOSNative(isNative);
         return false; // Default until async check completes
       } catch {
         return false;

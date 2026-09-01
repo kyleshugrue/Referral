@@ -3,6 +3,18 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import { relations, sql } from "drizzle-orm";
 
+// Shared, atomic abuse-control windows. The application writes this table
+// through server/lib/postgres-rate-limit-store so request limits work across
+// more than one application process.
+export const rateLimitWindows = pgTable("rate_limit_windows", {
+  key: text("key").primaryKey(),
+  windowStartedAt: timestamp("window_started_at", { withTimezone: true, mode: "string" }).notNull(),
+  hits: integer("hits").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull(),
+}, (table) => ({
+  updatedAtIdx: index("rate_limit_windows_updated_at_idx").on(table.updatedAt),
+}));
+
 export const educationLevels = [
   "High School",
   "Associate's Degree",

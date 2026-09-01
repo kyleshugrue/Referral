@@ -47,7 +47,8 @@ PostgreSQL (Neon) accessed via Drizzle ORM. Schema is defined in `shared/schema.
 2. Rate limiter caps uploads per IP
 3. `server/lib/upload-validation.ts` validates size, extension, MIME type, and **magic bytes** (content sniffing)
 4. Server generates a safe random filename (never derived from user input)
-5. Resumes go to S3; photos go to local `uploads/`
+5. Managed resumes and photos go to private Firebase Storage; legacy local
+   `uploads/` references remain authenticated during migration
 6. PDF preview generation uses `execFile` with argument arrays (no shell interpolation)
 
 ## Matching Flow

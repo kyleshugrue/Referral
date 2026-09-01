@@ -21,7 +21,9 @@ if (parsed.protocol !== 'postgres:' || !localHost || !disposableName) {
 // This runs before creating a Pool so integrity failures can never contact a database.
 const integrity = await verifyMigrationIntegrity();
 const pool = new Pool({ connectionString });
+const client = await pool.connect();
 try {
+  await client.query('BEGIN');
   const migrationDirectory = path.resolve('migrations');
   const migrationFiles = integrity.migrations.map(({ file }) => file);
 
@@ -32,20 +34,25 @@ try {
       .map((statement) => statement.trim())
       .filter(Boolean);
     for (const statement of statements) {
-      await pool.query(statement);
+      await client.query(statement);
     }
     console.log(`Applied ${file}`);
   }
 
-  const required = ['callback_notification_queue', 'fcm_tokens', 'match_generation_jobs', 'session', 'websocket_tickets'];
-  const result = await pool.query(
+  const required = ['callback_notification_queue', 'fcm_tokens', 'match_generation_jobs', 'rate_limit_windows', 'session', 'websocket_tickets'];
+  const result = await client.query(
     `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ANY($1::text[])`,
     [required],
   );
   const present = new Set(result.rows.map((row) => row.table_name));
   const missing = required.filter((table) => !present.has(table));
   if (missing.length) throw new Error(`Migration completed with missing required tables: ${missing.join(', ')}`);
+  await client.query('COMMIT');
   console.log(`Disposable database ready (${required.length} required tables verified).`);
+} catch (error) {
+  await client.query('ROLLBACK').catch(() => {});
+  throw error;
 } finally {
+  client.release();
   await pool.end();
 }

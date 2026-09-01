@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   createWebSocketMessageGuard,
+  createWebSocketAdmissionGuard,
+  MAX_WEBSOCKET_ADMISSIONS_PER_WINDOW,
   decideWebSocketVerification,
   MAX_WEBSOCKET_MESSAGES_PER_WINDOW,
   MAX_WEBSOCKET_PAYLOAD_BYTES,
@@ -45,11 +47,35 @@ describe('createWebSocketMessageGuard', () => {
   });
 });
 
+describe('createWebSocketAdmissionGuard', () => {
+  it('limits repeated connection attempts by source address', () => {
+    let time = 1_000;
+    const guard = createWebSocketAdmissionGuard(() => time);
+    for (let index = 0; index < MAX_WEBSOCKET_ADMISSIONS_PER_WINDOW; index++) {
+      expect(guard.allow('127.0.0.1')).toBe(true);
+    }
+    expect(guard.allow('127.0.0.1')).toBe(false);
+    expect(guard.allow('127.0.0.2')).toBe(true);
+    time += 60_001;
+    expect(guard.allow('127.0.0.1')).toBe(true);
+  });
+});
+
 describe('WebSocket chat schema', () => {
   it('bounds chat content while leaving normal messages valid', () => {
     expect(messageSchema.safeParse({ type: 'chat', receiverId: 2, content: 'hello' }).success).toBe(true);
     expect(messageSchema.safeParse({
       type: 'chat', receiverId: 2, content: 'x'.repeat(4_001),
     }).success).toBe(false);
+  });
+
+  it('rejects server-only event types and unknown fields from clients', () => {
+    expect(messageSchema.safeParse({ type: 'matchesUpdated' }).success).toBe(false);
+    expect(messageSchema.safeParse({ type: 'test', unexpected: true }).success).toBe(false);
+  });
+
+  it('requires bounded ISO timestamps when supplied', () => {
+    expect(messageSchema.safeParse({ type: 'test', timestamp: 'not-a-date' }).success).toBe(false);
+    expect(messageSchema.safeParse({ type: 'test', timestamp: new Date().toISOString() }).success).toBe(true);
   });
 });

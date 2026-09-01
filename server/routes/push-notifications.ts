@@ -5,6 +5,7 @@ import * as admin from 'firebase-admin';
 import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration';
 import { logger } from '../lib/logger';
+import { parseStrictPositiveInteger } from '../lib/request-validation';
 
 const router = express.Router();
 
@@ -242,12 +243,12 @@ router.get("/diagnostics/:userId", async (req, res) => {
       return res.status(401).json({ message: 'User not found' });
     }
     
-    const targetUserId = parseInt(req.params.userId);
+    const targetUserId = parseStrictPositiveInteger(req.params.userId);
     const currentUserId = req.user.id;
     const timestamp = new Date().toISOString();
     
     // Validate userId parameter
-    if (isNaN(targetUserId) || targetUserId <= 0) {
+    if (!targetUserId) {
       return res.status(400).json({ 
         message: "Invalid user ID",
         timestamp

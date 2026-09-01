@@ -12,9 +12,11 @@ import { messageSchema } from './lib/websocket-message-schema';
 export { messageSchema } from './lib/websocket-message-schema';
 import {
   createWebSocketMessageGuard,
+  createWebSocketAdmissionGuard,
   decideWebSocketVerification,
   MAX_WEBSOCKET_PAYLOAD_BYTES,
 } from './lib/websocket-security';
+import { isOriginAllowed } from './lib/http-security';
 
 interface SessionRequest extends IncomingMessage {
   session?: Session & { userId?: number };
@@ -32,6 +34,7 @@ interface ConnectedClient {
 
 // Track connected users with additional metadata
 const connectedClients = new Map<number, ConnectedClient>();
+const websocketAdmissionGuard = createWebSocketAdmissionGuard();
 
 // Export the utility function to get access to connected clients in other files
 import { setConnectedClientsRef } from './websocket-utils';
@@ -65,6 +68,17 @@ export function setupWebSocketServer(server: HTTPServer) {
     maxPayload: MAX_WEBSOCKET_PAYLOAD_BYTES,
     verifyClient: async (info, callback) => {
       try {
+        const sourceAddress = info.req.socket.remoteAddress || 'unknown';
+        if (!websocketAdmissionGuard.allow(sourceAddress)) {
+          callback(false, 429, 'Too many WebSocket connection attempts');
+          return;
+        }
+        const isProduction = process.env.NODE_ENV === 'production';
+        const origin = typeof info.origin === 'string' && info.origin.length > 0 ? info.origin : undefined;
+        if (origin && !isOriginAllowed(origin, isProduction)) {
+          callback(false, 403, 'Origin not allowed');
+          return;
+        }
         let authenticatedUserId: number | undefined;
         let authMethod: 'ticket' | 'session' | 'none' = 'none';
         const protocols = String(info.req.headers['sec-websocket-protocol'] ?? '')
@@ -86,6 +100,10 @@ export function setupWebSocketServer(server: HTTPServer) {
         
         // AUTHENTICATION METHOD 2: Session-based authentication (fallback)
         if (authMethod === 'none') {
+          if (isProduction && !origin) {
+            callback(false, 403, 'Origin required for session authentication');
+            return;
+          }
           logger.debug('[WebSocket] No valid ticket, attempting session authentication');
           
           // Create a mock Response object for session middleware
@@ -186,6 +204,12 @@ export function setupWebSocketServer(server: HTTPServer) {
 
   wss.on('connection', async (ws: WebSocket, request: IncomingMessage) => {
     logger.debug('[WebSocket] New connection attempt');
+    ws.on('error', (error) => {
+      // A frame that exceeds ws's maxPayload is reported on the individual
+      // socket. Always consume it so malformed clients cannot create an
+      // unhandled process-level error.
+      logger.warn('[WebSocket] Client socket error:', error);
+    });
     let userId: number | null = null;
     let pingInterval: NodeJS.Timeout;
 

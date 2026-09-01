@@ -17,6 +17,15 @@ import { hasRequiredFieldsForMatching, shouldQueueInitialMatchJobs } from '../li
 import { toSelfUserDto } from '../lib/privacy-dto';
 
 const router = Router();
+// Keep legacy diagnostics on the bounded logger boundary. These call sites
+// historically passed profile fields and Error objects to console directly;
+// the route now emits only fixed operational markers from those calls.
+const console = {
+  log: (...args: unknown[]) => { void args; logger.debug('[UserRoute] operation'); },
+  info: (...args: unknown[]) => { void args; logger.debug('[UserRoute] operation'); },
+  warn: (...args: unknown[]) => { void args; logger.debug('[UserRoute] warning'); },
+  error: (...args: unknown[]) => { void args; logger.error('[UserRoute] operation failed'); },
+};
 
 // `hasRequiredFieldsForMatching` and `shouldQueueInitialMatchJobs` live in
 // ../lib/profile-matching so they can be unit tested without importing this
@@ -24,30 +33,18 @@ const router = Router();
 
 // Get current user
 router.get('/', requireAuthJWT, async (req, res) => {
-  logger.debug("👤 [USER-ROUTE DEBUG] Handling /api/user GET request...", {
-    timestamp: new Date().toISOString(),
+  logger.debug("👤 [USER-ROUTE DEBUG] Handling /api/user GET request", {
     hasSession: !!req.session,
     isAuthenticated: req.isAuthenticated(),
-    userAgent: req.get('User-Agent'),
-    ip: req.ip
+    hasUser: Boolean(req.user),
   });
 
-  // SESSION PERSISTENCE VERIFICATION: Log detailed session information
-  logger.debug("🔐 [SESSION-PERSISTENCE] Session details:", {
+  // SESSION PERSISTENCE VERIFICATION: Keep only bounded state metadata.
+  logger.debug("🔐 [SESSION-PERSISTENCE] Session state", {
     hasCookieHeader: !!req.headers.cookie,
-    cookieHeaderPresent: req.headers.cookie ? 'present (session cookie sent by browser)' : 'missing',
     isAuthenticated: req.isAuthenticated(),
     hasUser: !!req.user,
-    userId: req.user?.id,
-    cookieConfig: {
-      secure: req.session?.cookie?.secure,
-      sameSite: req.session?.cookie?.sameSite,
-      maxAge: req.session?.cookie?.maxAge,
-      maxAgeDays: req.session?.cookie?.maxAge ? Math.round(req.session.cookie.maxAge / (1000 * 60 * 60 * 24)) : 0,
-      httpOnly: req.session?.cookie?.httpOnly,
-      expires: req.session?.cookie?.expires
-    },
-    sessionResumed: req.session?.id && req.isAuthenticated() ? '✅ YES - Session restored from PostgreSQL database' : '❌ NO - New session or unauthenticated'
+    hasSessionCookie: Boolean(req.session?.cookie),
   });
 
   try {
@@ -57,39 +54,29 @@ router.get('/', requireAuthJWT, async (req, res) => {
     
     // Fetch fresh user data from database to ensure we have the latest
     const userId = req.user.id;
-    logger.debug(`✅ [USER-ROUTE DEBUG] Authentication successful! Fetching user data for ID: ${userId}`, {
-      requestTime: new Date().toISOString()
-    });
+    logger.debug('✅ [USER-ROUTE DEBUG] Authentication successful; fetching user data');
     
     const user = await storage.getUser(userId);
     
     if (!user) {
-      logger.error(`❌ [USER-ROUTE DEBUG] User ${userId} not found in database - this should not happen!`);
+      logger.error('❌ [USER-ROUTE DEBUG] Authenticated user not found in database');
       return res.status(404).json({ message: "User not found" });
     }
     
-    // Log important fields for debugging
-    logger.debug(`[UserRoute] Retrieved user ${userId} data:`, {
-      id: user.id,
-      emailVerified: user.emailVerified,
-      registrationCompleted: user.registrationCompleted,
-      desiredLocations: Array.isArray(user.desiredLocations) ? user.desiredLocations : [],
-      desiredCompanies: Array.isArray(user.desiredCompanies) ? user.desiredCompanies : [],
-      interests: Array.isArray(user.interests) ? user.interests : [],
-      professionalInterests: Array.isArray(user.professionalInterests) ? user.professionalInterests : []
+    logger.debug('[UserRoute] Retrieved authenticated user', {
+      hasRegistrationCompleted: Boolean(user.registrationCompleted),
+      hasEmailVerified: Boolean(user.emailVerified),
     });
     
     // Return the fresh user data
-    console.log(`✅ [USER-ROUTE DEBUG] Successfully returning user data for ID: ${userId}`, {
+    console.log('✅ [USER-ROUTE DEBUG] Successfully returning user data', {
       hasRegistrationCompleted: user.registrationCompleted,
       hasEmailVerified: user.emailVerified,
-      responseTime: new Date().toISOString()
     });
     return res.json(toSelfUserDto(user));
   } catch (error) {
     logger.error('💥 [USER-ROUTE DEBUG] Critical error fetching user data:', {
-      error: error instanceof Error ? error.message : error,
-      stack: error instanceof Error ? error.stack : undefined,
+      errorClass: error instanceof Error ? error.name : 'UnknownError',
       userId: req.user?.id
     });
     return res.status(500).json({ message: "Failed to fetch user data" });

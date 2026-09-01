@@ -18,6 +18,16 @@ export const ALLOWED_RESUME_MIME_TYPES = [
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 ] as const;
 
+export const UPLOAD_LIMITS = Object.freeze({
+  resumeBytes: 10 * 1024 * 1024,
+  photoBytes: 25 * 1024 * 1024,
+  maxFields: 20,
+  maxFieldBytes: 256 * 1024,
+  maxParts: 25,
+  maxImagePixels: 20_000_000,
+  maxPreviewPages: 5,
+});
+
 /**
  * Extract the lower-cased extension of a filename if (and only if) it is in
  * the allowed list. Returns null for anything else, including missing

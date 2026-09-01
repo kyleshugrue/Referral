@@ -3,6 +3,8 @@
  */
 
 import { logger } from './logger';
+import { auth } from './firebase';
+import { toast } from '@/hooks/use-toast';
 import type { User } from '@shared/schema';
 
 const REGISTRATION_STORAGE_VERSION = 2;
@@ -168,9 +170,6 @@ export function updatePendingRegistrationData(updates: RegistrationData): void {
  */
 export async function savePartialRegistrationToServer(data: RegistrationData, showToast = true): Promise<RegistrationResponse | null> {
   try {
-    // Import toast for showing visual feedback
-    const { toast } = await import('@/hooks/use-toast');
-    
     // Only proceed if there's a Firebase UID
     if (!data.firebaseUid) {
       logger.debug("Registration helper: No Firebase UID available, skipping server save");
@@ -179,7 +178,6 @@ export async function savePartialRegistrationToServer(data: RegistrationData, sh
     
     // The server verifies identity from a Firebase ID token, so a signed-in
     // Firebase user is required to save registration data
-    const { auth } = await import('./firebase');
     const firebaseUser = auth?.currentUser;
     if (!firebaseUser) {
       logger.debug("Registration helper: No signed-in Firebase user, skipping server save");
@@ -340,7 +338,6 @@ export async function savePartialRegistrationToServer(data: RegistrationData, sh
     // Show error toast if requested and not already shown
     try {
       if (showToast) {
-        const { toast } = await import('@/hooks/use-toast');
         toast({
           variant: "destructive",
           title: "Save failed",

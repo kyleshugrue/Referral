@@ -3,8 +3,15 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isDisposableDatabaseUrl } from "../lib/database-readiness";
 
-const databaseUrl = process.env.RELATIONAL_TEST_DATABASE_URL;
+const databaseUrl = process.env.RELATIONAL_TEST_DATABASE_URL
+  ?? process.env.MATCH_GENERATION_TEST_DATABASE_URL
+  ?? process.env.DATABASE_URL;
 const canRun = Boolean(databaseUrl && isDisposableDatabaseUrl(databaseUrl));
+if (process.env.CI === 'true' && !canRun) {
+  throw new Error(
+    'PostgreSQL relational integration tests cannot be skipped in CI. Set RELATIONAL_TEST_DATABASE_URL to the disposable CI database.',
+  );
+}
 const describeIfDatabase = canRun ? describe : describe.skip;
 const { Pool } = pg;
 

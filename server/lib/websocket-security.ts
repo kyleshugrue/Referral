@@ -6,6 +6,8 @@ export const MAX_WEBSOCKET_PAYLOAD_BYTES = 64 * 1024;
 export const MAX_WEBSOCKET_CHAT_CONTENT_LENGTH = 4_000;
 export const MAX_WEBSOCKET_MESSAGES_PER_WINDOW = 60;
 export const WEBSOCKET_RATE_WINDOW_MS = 10_000;
+export const MAX_WEBSOCKET_ADMISSIONS_PER_WINDOW = 30;
+export const WEBSOCKET_ADMISSION_WINDOW_MS = 60_000;
 
 export type WebSocketVerificationDecision =
   | { allowed: true }
@@ -47,6 +49,31 @@ export function createWebSocketMessageGuard(
       }
       messages.push(now());
       return { allowed: true };
+    },
+  };
+}
+
+/**
+ * Process-local admission guard for the documented single-instance topology.
+ * It runs before database-backed authentication so reconnect storms cannot
+ * consume the authentication/query budget.
+ */
+export function createWebSocketAdmissionGuard(now: () => number = Date.now) {
+  const attempts = new Map<string, number[]>();
+
+  return {
+    allow(address: string): boolean {
+      const current = now();
+      const recent = (attempts.get(address) || []).filter(
+        (timestamp) => current - timestamp < WEBSOCKET_ADMISSION_WINDOW_MS,
+      );
+      if (recent.length >= MAX_WEBSOCKET_ADMISSIONS_PER_WINDOW) {
+        attempts.set(address, recent);
+        return false;
+      }
+      recent.push(current);
+      attempts.set(address, recent);
+      return true;
     },
   };
 }

@@ -37,12 +37,9 @@ const BlockedAccountsPage = lazy(() => import("@/pages/blocked-accounts-page"));
 const MatchesSuggestionsPage = lazy(() => import("@/pages/matches-suggestions-page"));
 const ChatPage = lazy(() => import("@/pages/chat-page"));
 const ResumeViewPage = lazy(() => import("@/pages/resume-view-page"));
-const KeyboardTestPage = lazy(() => import("@/pages/keyboard-test"));
-const DeviceTestPage = lazy(() => import("@/pages/device-test"));
 const EmailVerifiedPage = lazy(() => import("@/pages/email-verified-page"));
 const ForgotPasswordPage = lazy(() => import("@/pages/forgot-password-page"));
 const VerifyEmailPage = lazy(() => import("@/pages/verify-email-page"));
-const SynergyButtonDemoPage = lazy(() => import("@/pages/synergy-button-demo"));
 
 // Global window properties for navigation handling
 declare global {
@@ -137,18 +134,6 @@ function Router() {
           path="/chat/:id" 
           component={() => <ChatPage />} 
         />
-        {import.meta.env.DEV && (
-          <ProtectedRoute 
-            path="/keyboard-test" 
-            component={() => <KeyboardTestPage />} 
-          />
-        )}
-        {import.meta.env.DEV && (
-          <ProtectedRoute 
-            path="/device-test" 
-            component={() => <DeviceTestPage />} 
-          />
-        )}
         <ProtectedRoute 
           path="/requests" 
           component={() => (
@@ -178,14 +163,6 @@ function Router() {
           path="/resume/:userId/:returnPath?" 
           component={() => <ResumeViewPage />}
         />
-        {/* Synergy Button Demo Route (dev only) */}
-        {import.meta.env.DEV && (
-          <Route 
-            path="/synergy-button-demo" 
-            component={SynergyButtonDemoPage} 
-          />
-        )}
-
         <Route component={NotFound} />
       </Switch>
       </Suspense>
@@ -202,7 +179,7 @@ function App() {
   useEffect(() => {
     // Initialize Google Analytics when app loads
     if (!import.meta.env.VITE_GA_MEASUREMENT_ID) {
-      console.warn('Missing required Google Analytics key: VITE_GA_MEASUREMENT_ID');
+      // Analytics is optional for local and privacy-focused deployments.
     } else {
       initGA();
     }
@@ -210,7 +187,6 @@ function App() {
     // DISABLED: Force navigate logic removed to prevent automatic redirects
     const forceNavigate = localStorage.getItem('forceNavigateToNetwork') === 'true';
     if (forceNavigate) {
-      console.log("App: Force navigate flag detected - but automatic navigation is disabled");
       // Clear the flag to prevent any future attempts
       localStorage.removeItem('forceNavigateToNetwork');
     }
@@ -236,9 +212,8 @@ function App() {
     // Update the badge when an already-authorized iOS app becomes ready.
     if (isNative && platform === 'ios' && hasPermission && isInitialized) {
       updateBadgeCount().then(() => {
-        console.log('[App] Badge count updated on launch');
-      }).catch((error) => {
-        console.error('[App] Error updating badge count on launch:', error);
+      }).catch(() => {
+        // Badge synchronization is best effort and must not disrupt startup.
       });
     }
   }, [hasPermission, isInitialized, isNative, platform, updateBadgeCount]);

@@ -1,4 +1,5 @@
 import { logger } from './logger';
+import { parseServerEnvironment } from './env';
 
 /**
  * Validate required environment variables at startup.
@@ -36,6 +37,13 @@ export function assertRequiredEnv(isProduction: boolean, env: NodeJS.ProcessEnv 
     if (!hasBeginMarker || !hasEndMarker) {
       throw new Error('FIREBASE_PRIVATE_KEY has an invalid format. Refusing to start in production.');
     }
+  }
+
+  // Validate types, bounds, URL/origin syntax, secret strength, and CI-only
+  // modes in one place. Keep the legacy presence checks above so callers that
+  // intentionally run in development retain their warning behavior.
+  if (isProduction) {
+    parseServerEnvironment(env, { isProduction: true });
   }
 
   if (!env.INTERNAL_API_SECRET) {

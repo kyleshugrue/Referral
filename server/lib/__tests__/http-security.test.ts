@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isOriginAllowed, getAllowedOrigins } from '../http-security';
+import { isOriginAllowed, getAllowedOrigins, securityHeaders } from '../http-security';
 
 const PROD = true;
 const DEV = false;
@@ -50,5 +50,40 @@ describe('isOriginAllowed (development)', () => {
     expect(isOriginAllowed('https://evil.example.com', DEV)).toBe(false);
     expect(isOriginAllowed('https://replit.dev.evil.com', DEV)).toBe(false);
     expect(isOriginAllowed('not-a-url', DEV)).toBe(false);
+  });
+});
+
+describe('securityHeaders', () => {
+  function responseHeaders() {
+    const headers = new Map<string, string>();
+    const response = {
+      setHeader: (name: string, value: string) => headers.set(name, value),
+    };
+    return { headers, response };
+  }
+
+  it('sets baseline headers in development without breaking preview framing', () => {
+    const { headers, response } = responseHeaders();
+    securityHeaders(false)({} as never, response as never, (() => {}) as never);
+    expect(headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(headers.get('Referrer-Policy')).toBe('strict-origin-when-cross-origin');
+    expect(headers.has('Content-Security-Policy')).toBe(false);
+  });
+
+  it('sets a restrictive production policy without unsafe-eval', () => {
+    const { headers, response } = responseHeaders();
+    securityHeaders(true)({} as never, response as never, (() => {}) as never);
+    const csp = headers.get('Content-Security-Policy');
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("object-src 'none'");
+    expect(csp).toContain("frame-ancestors 'self'");
+    expect(csp).toContain('https://www.googletagmanager.com');
+    expect(csp).toContain('https://maps.googleapis.com');
+    expect(csp).toContain('https://www.google-analytics.com');
+    expect(csp).not.toContain('unsafe-eval');
+    expect(csp).not.toContain("script-src 'self' 'unsafe-inline'");
+    expect(csp).not.toContain("style-src 'self' 'unsafe-inline'");
+    expect(headers.get('Permissions-Policy')).toContain('camera=()');
+    expect(headers.get('Strict-Transport-Security')).toContain('max-age=');
   });
 });

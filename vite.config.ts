@@ -7,29 +7,38 @@ import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-export default defineConfig({
-  plugins: [
-    react(),
-    runtimeErrorOverlay(),
-    themePlugin(),
-    ...(process.env.NODE_ENV !== "production" &&
-    process.env.REPL_ID !== undefined
-      ? [
-          await import("@replit/vite-plugin-cartographer").then((m) =>
-            m.cartographer(),
-          ),
-        ]
-      : []),
-  ],
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "client", "src"),
-      "@shared": path.resolve(__dirname, "shared"),
+export default defineConfig(async ({ command }) => {
+  const isProductionBuild = command === "build";
+  const enableRuntimeErrorOverlay =
+    !isProductionBuild && process.env.RUNTIME_ERROR_OVERLAY === "true";
+
+  return {
+    plugins: [
+      react(),
+      ...(enableRuntimeErrorOverlay ? [runtimeErrorOverlay()] : []),
+      // This plugin injects an inline <style> tag into index.html. Keep it in
+      // the development preview, but production HTML must satisfy the strict
+      // style-src 'self' CSP.
+      ...(!isProductionBuild ? [themePlugin()] : []),
+      ...(!isProductionBuild &&
+      process.env.REPL_ID !== undefined
+        ? [
+            await import("@replit/vite-plugin-cartographer").then((m) =>
+              m.cartographer(),
+            ),
+          ]
+        : []),
+    ],
+    resolve: {
+      alias: {
+        "@": path.resolve(__dirname, "client", "src"),
+        "@shared": path.resolve(__dirname, "shared"),
+      },
     },
-  },
-  root: path.resolve(__dirname, "client"),
-  build: {
-    outDir: path.resolve(__dirname, "dist/public"),
-    emptyOutDir: true,
-  },
+    root: path.resolve(__dirname, "client"),
+    build: {
+      outDir: path.resolve(__dirname, "dist/public"),
+      emptyOutDir: true,
+    },
+  };
 });

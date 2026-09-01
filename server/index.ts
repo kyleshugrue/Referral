@@ -1,35 +1,13 @@
-import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { logger } from './lib/logger';
+import { loadProjectEnvironment, parseServerEnvironment } from './lib/env';
 
 // Get the current file's directory path first
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load environment variables from the project root (keys.env file)
-const envPath = path.resolve(__dirname, '..', 'keys.env');
-dotenv.config({ path: envPath });
-
-// Smart port configuration: Use explicit PORT if set, otherwise detect environment
-if (!process.env.PORT) {
-  const isReplit = process.env.REPLIT_CLUSTER || process.env.REPL_ID || process.env.REPL_SLUG;
-  if (isReplit) {
-    process.env.PORT = '5000'; // Replit expects port 5000
-  } else {
-    process.env.PORT = '3001'; // Local Mac development uses 3001 to avoid macOS conflicts
-  }
-} else {
-  logger.info(`[${new Date().toISOString()}] Using explicit PORT from environment: ${process.env.PORT}`);
-}
-
-// Check for required environment variables (without exposing sensitive data)
-if (!process.env.DATABASE_URL) {
-  logger.error('❌ DATABASE_URL not found in environment variables');
-  logger.error('💡 Please ensure your environment variables are configured properly');
-  logger.error('   For local development: Create a keys.env file');
-  logger.error('   For production: Set environment variables in your hosting platform');
-}
+loadProjectEnvironment();
 
 import express from 'express';
 import { createServer } from 'http';
@@ -40,7 +18,6 @@ import { db, pool } from './db';
 import { sql } from 'drizzle-orm';
 import { registerRoutes } from './routes';
 import { setupAuth } from './auth';
-import { setupVite } from './vite';
 import { ensurePortIsFree } from './port-checker';
 import { setupWebSocketServer } from './websocket-handlers';
 import fs from 'fs';
@@ -59,6 +36,7 @@ import { checkDatabaseReadiness } from './lib/database-readiness';
 import { beginHttpRequest, recordHttpResponse } from './lib/operational-metrics';
 import { queryDatabase } from './lib/database-client';
 import { createServerLifecycle } from './lib/server-lifecycle';
+import { copyProxyResponseHeaders } from './lib/proxy-headers';
 
 // Function to serve static files in production
 function serveStaticFiles(app: ReturnType<typeof express>) {
@@ -104,8 +82,9 @@ async function main() {
   logger.info('[%s] Starting server initialization...', new Date().toISOString());
 
   try {
-    // Use the port that was already set above
-    const PORT_NUMBER = parseInt(process.env.PORT || '3001', 10);
+    const isProduction = process.env.NODE_ENV === 'production';
+    const serverEnv = parseServerEnvironment(process.env, { isProduction });
+    const PORT_NUMBER = serverEnv.port;
     const isReplitEnv = process.env.REPLIT_CLUSTER || process.env.REPL_ID || process.env.REPL_SLUG;
     
     logger.info('[%s] Environment: %s, Using port: %d', 
@@ -117,8 +96,6 @@ async function main() {
     if (!portAvailable) {
       throw new Error(`Failed to free up port ${PORT_NUMBER} after multiple attempts`);
     }
-
-    const isProduction = process.env.NODE_ENV === 'production';
 
     // Fail fast in production when core secrets are missing.
     assertRequiredEnv(isProduction);
@@ -242,7 +219,8 @@ async function main() {
     // synthetic smoke build and is deliberately registered before production
     // API routes. No real Firebase, database user, email, upload, or message
     // service is touched by this path.
-    if (process.env.SMOKE_TEST === 'true') {
+    if (serverEnv.smokeTestEnabled) {
+      const smokeCookieName = isProduction ? '__Host-smoke-auth' : 'smoke-auth';
       const smokeUser = {
         id: 900001,
         email: 'ci-smoke-user@example.invalid',
@@ -284,16 +262,18 @@ async function main() {
         // This is deliberately a separate fixture cookie rather than a
         // production session. It makes the smoke test independent of the
         // external PostgreSQL session store and is enabled only in CI.
-        res.cookie('smoke-auth', '1', {
+        res.cookie(smokeCookieName, '1', {
           httpOnly: true,
           sameSite: 'lax',
-          secure: false,
+          secure: isProduction,
           path: '/',
+          maxAge: 5 * 60 * 1000,
         });
+        res.setHeader('Cache-Control', 'no-store');
         res.status(200).type('text/plain').send('Synthetic smoke session ready');
       });
       app.get('/api/user', (req, res) => {
-        if (!req.headers.cookie?.split(';').some((cookie) => cookie.trim() === 'smoke-auth=1')) {
+        if (!req.headers.cookie?.split(';').some((cookie) => cookie.trim() === `${smokeCookieName}=1`)) {
           return res.sendStatus(401);
         }
         res.json(smokeUser);
@@ -326,8 +306,23 @@ async function main() {
       serveStaticFiles(app);
     } else {
       // Use Vite dev server in development
+      const { setupVite } = await import('./vite');
       await setupVite(app, httpServer);
     }
+
+    // Keep parser failures bounded and free of stack/details at the HTTP
+    // boundary. Route handlers may still provide their own validation errors.
+    app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (error && typeof error === 'object' && 'type' in error && error.type === 'entity.too.large') {
+        res.status(413).json({ error: 'Request body too large' });
+        return;
+      }
+      if (error instanceof SyntaxError && 'body' in error) {
+        res.status(400).json({ error: 'Malformed request body' });
+        return;
+      }
+      next(error);
+    });
 
     // Add error handler for the HTTP server
     httpServer.on('error', (error: NodeJS.ErrnoException) => {
@@ -448,12 +443,13 @@ async function main() {
             
             // Copy status and headers
             res.status(response.status);
-            response.headers.forEach((value, key) => {
-              res.set(key, value);
-            });
+            copyProxyResponseHeaders(response.headers, res);
             
-            // Stream the response body
-            const body = await response.text();
+            // Fetch transparently decodes compressed upstream responses. Buffer
+            // the decoded bytes and let Express calculate fresh framing headers;
+            // forwarding upstream Content-Length/Content-Encoding after this
+            // conversion creates invalid preview responses.
+            const body = Buffer.from(await response.arrayBuffer());
             res.send(body);
             
           } catch (err) {

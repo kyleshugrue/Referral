@@ -5,6 +5,7 @@ import { simpleMatchJobHelper } from "../services/simple-match-job-helper";
 import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration';
 import { toMatchDto } from '../lib/privacy-dto';
+import { parseStrictPositiveInteger } from '../lib/request-validation';
 
 const router = Router();
 
@@ -251,9 +252,12 @@ router.get("/job-status/:userId", async (req, res) => {
     return res.status(401).json({ message: 'User not found' });
   }
   
-  const userId = parseInt(req.params.userId);
+  const userId = parseStrictPositiveInteger(req.params.userId);
   
   // Ensure user can only check their own job status (or allow admins in the future)
+  if (!userId) {
+    return res.status(400).json({ message: 'Invalid user ID' });
+  }
   if (req.user.id !== userId) {
     return res.status(403).json({ message: "Forbidden - can only check your own job status" });
   }

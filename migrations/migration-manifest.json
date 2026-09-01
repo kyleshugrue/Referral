@@ -24,6 +24,10 @@
     {
       "file": "0005_relational_consistency.sql",
       "sha256": "f7638e4307c7ed987a12d748e3a57037ed65337613dc3e8951c3d0d462977584"
+    },
+    {
+      "file": "0006_rate_limit_windows.sql",
+      "sha256": "6b65edc53d0434c693d9914d1fac49700f2f0df03781a81a20cd91b68a4dd5bf"
     }
   ]
 }

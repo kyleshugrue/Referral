@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateDirectMessageInput, groupMessageSchema } from '../message-validation';
+import { validateDirectMessageInput } from '../message-validation';
 
 describe('validateDirectMessageInput (messaging operation)', () => {
   it('accepts a valid receiver id and trims content', () => {
@@ -34,26 +34,11 @@ describe('validateDirectMessageInput (messaging operation)', () => {
       message: 'Message content is required',
     });
   });
-});
 
-describe('groupMessageSchema', () => {
-  it('accepts valid group message input', () => {
-    const result = groupMessageSchema.safeParse({ content: 'hi all', memberIds: [1, 2, 3] });
-    expect(result.success).toBe(true);
-  });
-
-  it('rejects empty content', () => {
-    const result = groupMessageSchema.safeParse({ content: '', memberIds: [1] });
-    expect(result.success).toBe(false);
-  });
-
-  it('rejects an empty member list', () => {
-    const result = groupMessageSchema.safeParse({ content: 'hi', memberIds: [] });
-    expect(result.success).toBe(false);
-  });
-
-  it('rejects non-numeric member ids', () => {
-    const result = groupMessageSchema.safeParse({ content: 'hi', memberIds: ['a'] });
-    expect(result.success).toBe(false);
+  it('rejects content above the direct-message limit', () => {
+    expect(validateDirectMessageInput(1, 'x'.repeat(4_001))).toEqual({
+      ok: false,
+      message: 'Message content is too long',
+    });
   });
 });

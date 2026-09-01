@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from "react";
-import { MessageSquare, MessageCircle, Loader2, Search, ArrowLeft, SendHorizontal, Plus, X } from "lucide-react";
+import { MessageSquare, MessageCircle, Loader2, Search, SendHorizontal } from "lucide-react";
 import { type User, type Message } from "@shared/schema";
 import { useLocation } from "wouter";
 import ProfileDialog from "@/components/profile-dialog";
-import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import ConnectionsCarousel from "@/components/connections-carousel";
 import { Input } from "@/components/ui/input";
@@ -15,10 +15,6 @@ import { useAuth } from "@/hooks/use-auth";
 import { MessageList } from "@/components/message-list";
 import { useToast } from "@/hooks/use-toast";
 import { ExtendedMessage } from "@/types/message";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { useGlobalWebSocket, CONNECTION_STATES } from "@/hooks/use-global-websocket";
 
 // Define the type for connection data
@@ -53,8 +49,6 @@ interface WebSocketMessage {
   [key: string]: unknown;
 }
 
-const isGroupChatFeatureEnabled = () => false;
-
 export default function ConnectionsPage() {
   // References and state for messaging functionality
   const messageContainerRef = useRef<HTMLDivElement>(null);
@@ -66,10 +60,6 @@ export default function ConnectionsPage() {
   const [currentLocation, navigate] = useLocation();
   const [selectedProfile, setSelectedProfile] = useState<User | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>("");
-  const [isGroupChatOpen, setIsGroupChatOpen] = useState(false);
-  const [isCreatingGroupChat, setIsCreatingGroupChat] = useState(false);
-  const [groupChatSearchQuery, setGroupChatSearchQuery] = useState<string>("");
-  const [selectedGroupMembers, setSelectedGroupMembers] = useState<User[]>([]);
   const deviceType = useDeviceType();
 
   // Use the global WebSocket hook for real-time updates
@@ -83,81 +73,6 @@ export default function ConnectionsPage() {
     }
   }, [currentLocation, deviceType]);
   
-  // Define response type for the group message mutation
-  interface GroupMessageResponse {
-    conversationId?: number;
-    messageId?: number;
-    success: boolean;
-  }
-
-  // Create a mutation for sending a group message
-  const sendGroupMessageMutation = useMutation<
-    GroupMessageResponse, 
-    Error, 
-    { content: string; memberIds: number[] }
-  >({
-    mutationFn: async ({ content, memberIds }) => {
-      console.log("sendGroupMessageMutation called with:", { content, memberIds });
-      
-      try {
-        console.log("Making API request to /api/messages/group");
-        const response = await apiRequest(
-          "POST",
-          "/api/messages/group", 
-          {
-            content: content,
-            memberIds: memberIds
-          }
-        );
-        
-        console.log("API response received:", response);
-        const data = await response.json();
-        console.log("Response data:", data);
-        return data as GroupMessageResponse;
-      } catch (error) {
-        console.error("Error in sendGroupMessageMutation:", error);
-        throw error;
-      }
-    },
-    onSuccess: (data) => {
-      console.log("Group message sent successfully:", data);
-      
-      // Invalidate conversations cache to refresh the conversations list
-      queryClient.invalidateQueries({ queryKey: ["/api/conversations"] });
-      
-      // Clear the message input
-      setNewMessage("");
-      
-      // Show a success toast
-      toast({
-        title: "Message sent",
-        description: `Group message sent to ${selectedGroupMembers.length} member${selectedGroupMembers.length > 1 ? 's' : ''}`,
-      });
-      
-      // Navigate to the new conversation
-      if (data?.conversationId) {
-        console.log(`Navigating to chat/${data.conversationId}`);
-        navigate(`/chat/${data.conversationId}`);
-      } else {
-        console.log("No conversationId received, navigating to connections page");
-        navigate('/connections');
-      }
-      
-      // Reset group chat state
-      setIsCreatingGroupChat(false);
-      setSelectedGroupMembers([]);
-      setGroupChatSearchQuery("");
-    },
-    onError: (error: Error) => {
-      console.error("Error in message mutation:", error);
-      toast({
-        variant: "destructive",
-        title: "Error sending message",
-        description: "Could not send your message. Please try again.",
-      });
-    },
-  });
-
   // For desktop split view - track active conversation
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
   const [location] = useLocation();
@@ -696,161 +611,6 @@ export default function ConnectionsPage() {
                     </form>
                   </div>
                 </div>
-              ) : isGroupChatFeatureEnabled() && isCreatingGroupChat ? (
-                // Show group chat creation interface in the right panel
-                <div className="w-2/3 h-full flex flex-col bg-background overflow-hidden border-l">
-                  {/* Group Chat Header - iOS-inspired style */}
-                  <div className="px-4 py-4 border-b bg-background flex justify-between items-center flex-shrink-0">
-                    <div className="flex items-center">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="mr-2"
-                        onClick={() => setIsCreatingGroupChat(false)}
-                      >
-                        <ArrowLeft className="h-5 w-5" strokeWidth={2.5} />
-                      </Button>
-                      <div className="flex flex-col items-center">
-                        <h3 className="font-semibold text-lg">New Group Chat</h3>
-                        <p className="text-xs text-muted-foreground">
-                          {selectedGroupMembers.length === 0 
-                            ? "Select members and send a message" 
-                            : `${selectedGroupMembers.length} member${selectedGroupMembers.length !== 1 ? 's' : ''} selected`}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                  
-                  {/* Group Chat Creation Content */}
-                  <div className="flex-1 flex flex-col h-full overflow-hidden">
-                    {/* Search and Selected Members */}
-                    <div className="p-4 border-b">
-                      <div className="relative mb-4">
-                        <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
-                          <Search className="h-4 w-4 text-muted-foreground" />
-                        </div>
-                        <Input
-                          type="text"
-                          placeholder="Search connections..."
-                          className="pl-10 py-2 text-sm border bg-background"
-                          value={groupChatSearchQuery}
-                          onChange={(e) => setGroupChatSearchQuery(e.target.value)}
-                        />
-                      </div>
-                      
-                      {/* Selected members */}
-                      {selectedGroupMembers.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mb-2">
-                          {selectedGroupMembers.map(member => (
-                            <Badge 
-                              key={member.id} 
-                              variant="secondary"
-                              className="flex items-center gap-1 p-1 pl-2"
-                            >
-                              {member.fullName}
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-5 w-5 p-0 rounded-full"
-                                onClick={() => {
-                                  setSelectedGroupMembers(prev => prev.filter(m => m.id !== member.id));
-                                }}
-                              >
-                                <X className="h-3 w-3" />
-                              </Button>
-                            </Badge>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    
-                    {/* Connections List */}
-                    <ScrollArea className="flex-1">
-                      <div className="p-2">
-                        {safeConnections
-                          .filter(conn => 
-                            !selectedGroupMembers.some(member => member.id === conn.otherUser.id) &&
-                            (groupChatSearchQuery === "" || 
-                              conn.otherUser.fullName.toLowerCase().includes(groupChatSearchQuery.toLowerCase()))
-                          )
-                          .map(connection => (
-                            <div 
-                              key={connection.id}
-                              className="flex items-center p-3 hover:bg-muted rounded-md cursor-pointer"
-                              onClick={() => {
-                                setSelectedGroupMembers(prev => [...prev, connection.otherUser]);
-                              }}
-                            >
-                              <div className="mr-3">
-                                <Avatar className="h-10 w-10">
-                                  {connection.otherUser.photo ? (
-                                    <AvatarImage src={connection.otherUser.photo} alt={connection.otherUser.fullName} />
-                                  ) : (
-                                    <AvatarFallback>{getInitials(connection.otherUser.fullName)}</AvatarFallback>
-                                  )}
-                                </Avatar>
-                              </div>
-                              <div className="flex-1">
-                                <p className="font-medium">{connection.otherUser.fullName}</p>
-                                <p className="text-sm text-muted-foreground truncate">{connection.otherUser.title}</p>
-                              </div>
-                              <Button variant="ghost" size="sm" className="rounded-full">
-                                <Plus className="h-4 w-4" />
-                              </Button>
-                            </div>
-                          ))
-                        }
-                      </div>
-                    </ScrollArea>
-                    
-                    {/* Message Input Field */}
-                    <div className="p-4 border-t">
-                      <form 
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          if (newMessage.trim() && selectedGroupMembers.length > 0) {
-                            // Use sendGroupMessageMutation from group-chat-page
-                            console.log("Sending group message", {
-                              messageContent: newMessage.trim(),
-                              memberIds: selectedGroupMembers.map(member => member.id)
-                            });
-                            
-                            // Send the message to create a group chat
-                            sendGroupMessageMutation.mutate({
-                              content: newMessage.trim(),
-                              memberIds: selectedGroupMembers.map(member => member.id)
-                            });
-                          }
-                        }}
-                        className="w-full"
-                      >
-                        <div className="flex items-center gap-2">
-                          <div className="relative flex-1">
-                            <Input
-                              value={newMessage}
-                              onChange={(e) => setNewMessage(e.target.value)}
-                              placeholder="Message"
-                              className="pr-10 py-6 rounded-full bg-muted/40 border-none shadow-inner focus-visible:ring-0"
-                              disabled={selectedGroupMembers.length === 0}
-                            />
-                          </div>
-                          <button
-                            className={`rounded-full p-3 flex items-center justify-center transition-colors ${
-                              !newMessage.trim() || selectedGroupMembers.length === 0
-                                ? 'bg-primary/50 text-white/70 cursor-not-allowed'
-                                : 'bg-primary text-white hover:bg-primary/90 active:bg-primary/80'
-                            }`}
-                            disabled={!newMessage.trim() || selectedGroupMembers.length === 0}
-                            type="submit"
-                            aria-label="Send message"
-                          >
-                            <SendHorizontal className="h-5 w-5" />
-                          </button>
-                        </div>
-                      </form>
-                    </div>
-                  </div>
-                </div>
               ) : activeConversationId ? (
                 // Show a blank messaging interface when a user is selected but no conversation exists yet
                 <div className="w-2/3 h-full flex flex-col bg-background overflow-hidden border-l">
@@ -1223,131 +983,6 @@ export default function ConnectionsPage() {
         />
       )}
 
-      {/* Group chat is intentionally unsupported; keep the retired UI unreachable. */}
-      {isGroupChatFeatureEnabled() && (
-      <Dialog open={isGroupChatOpen} onOpenChange={setIsGroupChatOpen}>
-        <DialogContent className="sm:max-w-[500px] max-h-[80vh] overflow-hidden flex flex-col">
-          <DialogHeader>
-            <DialogTitle>Create Group Chat</DialogTitle>
-          </DialogHeader>
-          
-          {/* Search for connections */}
-          <div className="relative my-2">
-            <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
-              <Search className="h-4 w-4 text-muted-foreground" />
-            </div>
-            <Input
-              type="text"
-              placeholder="Search connections..."
-              className="pl-10 py-2 text-sm border bg-background focus-visible:ring-1"
-              value={groupChatSearchQuery}
-              onChange={(e) => setGroupChatSearchQuery(e.target.value)}
-            />
-          </div>
-          
-          {/* Selected members */}
-          {selectedGroupMembers.length > 0 && (
-            <div className="flex flex-wrap gap-1 mb-2">
-              {selectedGroupMembers.map(member => (
-                <Badge 
-                  key={member.id} 
-                  variant="secondary"
-                  className="flex items-center gap-1 p-1 pl-2"
-                >
-                  {member.fullName}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-5 w-5 p-0 rounded-full"
-                    onClick={() => {
-                      setSelectedGroupMembers(prev => prev.filter(m => m.id !== member.id));
-                    }}
-                  >
-                    <X className="h-3 w-3" />
-                  </Button>
-                </Badge>
-              ))}
-            </div>
-          )}
-          
-          {/* Connections list */}
-          <ScrollArea className="flex-1 pr-4 min-h-[300px]">
-            {safeConnections.length === 0 ? (
-              <div className="text-center py-8">
-                <p className="text-muted-foreground">No connections found</p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {safeConnections
-                  .filter(conn => 
-                    !selectedGroupMembers.some(member => member.id === conn.otherUser.id) &&
-                    (groupChatSearchQuery === "" || 
-                      conn.otherUser.fullName.toLowerCase().includes(groupChatSearchQuery.toLowerCase()))
-                  )
-                  .map(connection => (
-                    <div 
-                      key={connection.id}
-                      className="flex items-center p-2 hover:bg-muted rounded-md cursor-pointer"
-                      onClick={() => {
-                        setSelectedGroupMembers(prev => [...prev, connection.otherUser]);
-                      }}
-                    >
-                      <div className="mr-3">
-                        <Avatar className="h-10 w-10">
-                          {connection.otherUser.photo ? (
-                            <AvatarImage src={connection.otherUser.photo} alt={connection.otherUser.fullName} />
-                          ) : (
-                            <AvatarFallback>{getInitials(connection.otherUser.fullName)}</AvatarFallback>
-                          )}
-                        </Avatar>
-                      </div>
-                      <div className="flex-1">
-                        <p className="font-medium">{connection.otherUser.fullName}</p>
-                        <p className="text-sm text-muted-foreground truncate">{connection.otherUser.title}</p>
-                      </div>
-                      <Button variant="ghost" size="sm" className="ml-2 rounded-full">
-                        <Plus className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  ))
-                }
-              </div>
-            )}
-          </ScrollArea>
-          
-          <DialogFooter className="mt-4">
-            <Button 
-              variant="secondary" 
-              onClick={() => {
-                setIsGroupChatOpen(false);
-                setSelectedGroupMembers([]);
-                setGroupChatSearchQuery("");
-              }}
-            >
-              Cancel
-            </Button>
-            <Button 
-              disabled={selectedGroupMembers.length === 0}
-              onClick={() => {
-                if (selectedGroupMembers.length > 0) {
-                  // TODO: Create the group chat and navigate to it
-                  toast({
-                    title: "Group chat created",
-                    description: `Created a group chat with ${selectedGroupMembers.map(m => m.fullName).join(", ")}`,
-                  });
-                  setIsGroupChatOpen(false);
-                  // Reset the state after creating the group
-                  setSelectedGroupMembers([]);
-                  setGroupChatSearchQuery("");
-                }
-              }}
-            >
-              Start Chat
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-      )}
     </div>
   );
 }

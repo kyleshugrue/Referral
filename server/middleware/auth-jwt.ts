@@ -6,7 +6,7 @@
  * 
  * Authentication Flow:
  * 1. Check Authorization header for JWT token (mobile apps)
- * 2. Fall back to session authentication (web browsers)
+ * 2. Use session authentication only when no Bearer credential is supplied
  * 3. Reject if neither method succeeds
  * 
  * Usage:
@@ -44,7 +44,7 @@ type AuthRequest = Request & {
  * Security Flow:
  * 1. Check for JWT token in Authorization header
  * 2. If JWT is valid, fetch user from database and attach to req.user
- * 3. If no JWT or JWT is invalid, fall back to session authentication
+ * 3. If no Bearer header is present, use session authentication
  * 4. If neither method succeeds, return 401 Unauthorized
  */
 export async function requireAuthJWT(
@@ -61,7 +61,8 @@ export async function requireAuthJWT(
   // This is the primary method for mobile apps
   const authHeader = req.headers.authorization;
   
-  if (authHeader && authHeader.startsWith('Bearer ')) {
+  const hasBearerHeader = typeof authHeader === 'string' && /^Bearer\s+/i.test(authHeader);
+  if (hasBearerHeader) {
     const token = authHeader.substring(7); // Remove 'Bearer ' prefix
     
     logger.debug(
@@ -102,8 +103,8 @@ export async function requireAuthJWT(
         } catch (dbError) {
           // Database error while fetching user
           logger.error(
-            `[Auth:JWT] [ReqID: ${requestId}] Database error fetching user ${payload.userId}:`,
-            dbError
+            `[Auth:JWT] [ReqID: ${requestId}] Database error fetching authenticated user`,
+            { errorClass: dbError instanceof Error ? dbError.name : 'UnknownError' }
           );
         }
       } else {
@@ -118,19 +119,25 @@ export async function requireAuthJWT(
         action: 'auth_failed',
         userId: 'unknown',
         ...extractRequestMetadata(req),
-        details: { error: jwtError instanceof Error ? jwtError.message : 'Invalid token', path: requestPath }
+        details: {
+          errorClass: jwtError instanceof Error ? jwtError.name : 'UnknownError',
+          path: requestPath,
+        }
       });
       logger.debug(
-        `[Auth:JWT] [ReqID: ${requestId}] JWT verification error for ${requestMethod} ${requestPath}:`,
-        jwtError instanceof Error ? jwtError.message : jwtError
+        `[Auth:JWT] [ReqID: ${requestId}] JWT verification error for ${requestMethod} ${requestPath}`,
+        { errorClass: jwtError instanceof Error ? jwtError.name : 'UnknownError' }
       );
     }
     
-    // If we reach here, JWT authentication failed
-    // Fall through to session authentication
+    // A supplied Bearer credential is an explicit authentication choice. Do
+    // not let a stale/invalid mobile token fall through to a different user's
+    // browser session on the same request.
     logger.debug(
-      `[Auth:JWT] [ReqID: ${requestId}] JWT authentication failed, falling back to session auth`
+      `[Auth:JWT] [ReqID: ${requestId}] JWT authentication failed; rejecting request`
     );
+    res.status(401).json({ error: 'Authentication required' });
+    return;
   }
 
   // AUTHENTICATION METHOD 2: Session-based authentication (Passport)
@@ -142,12 +149,10 @@ export async function requireAuthJWT(
   const hasCookieHeader = !!req.headers.cookie;
   const isAuthenticated = req.isAuthenticated?.() ?? false;
   const hasReqUser = !!req.user;
-  const sessionId = req.session?.id?.substring(0, 8) || 'none';
-  
   logger.debug(
     `[Auth:JWT] [ReqID: ${requestId}] Session auth check for ${requestMethod} ${requestPath}: ` +
     `{ hasSession: ${hasSession}, hasSessionUser: ${hasSessionUser}, hasCookieHeader: ${hasCookieHeader}, ` +
-    `isAuthenticated: ${isAuthenticated}, hasReqUser: ${hasReqUser}, sessionId: ${sessionId}... }`
+    `isAuthenticated: ${isAuthenticated}, hasReqUser: ${hasReqUser} }`
   );
   
   if (isAuthenticated && req.user) {
@@ -168,20 +173,15 @@ export async function requireAuthJWT(
   // Log detailed diagnostics for failed PATCH requests specifically
   if (requestMethod === 'PATCH') {
     logger.error(
-      `[Auth:JWT] [ReqID: ${requestId}] 🚨 PATCH AUTH FAILURE DIAGNOSTICS: ` +
-      JSON.stringify({
+      `[Auth:JWT] [ReqID: ${requestId}] PATCH authentication rejected`,
+      {
         path: requestPath,
         hasSession,
         hasSessionUser,
         hasCookieHeader,
-        cookieHeaderLength: req.headers.cookie?.length || 0,
         isAuthenticated,
         hasReqUser,
-        sessionId,
-        origin: req.headers.origin,
-        contentType: req.headers['content-type'],
-        userAgent: req.headers['user-agent']?.substring(0, 50)
-      }, null, 2)
+      }
     );
   }
   

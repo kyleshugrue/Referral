@@ -17,20 +17,17 @@ export const initGA = () => {
   }
 
   // Add Google Analytics script to the head
+  window.dataLayer = window.dataLayer || [];
+  window.gtag = (...args: unknown[]) => {
+    window.dataLayer.push(args);
+  };
+  window.gtag('js', new Date());
+  window.gtag('config', measurementId);
+
   const script1 = document.createElement('script');
   script1.async = true;
   script1.src = `https://www.googletagmanager.com/gtag/js?id=${measurementId}`;
   document.head.appendChild(script1);
-
-  // Initialize gtag
-  const script2 = document.createElement('script');
-  script2.textContent = `
-    window.dataLayer = window.dataLayer || [];
-    function gtag(){dataLayer.push(arguments);}
-    gtag('js', new Date());
-    gtag('config', '${measurementId}');
-  `;
-  document.head.appendChild(script2);
 };
 
 // Track page views - useful for single-page applications

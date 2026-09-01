@@ -6,6 +6,7 @@ import fs from 'fs';
 import { promisify } from 'util';
 import { execFile } from 'child_process';
 import { logger } from '../lib/logger';
+import { UPLOAD_LIMITS } from '../lib/upload-validation';
 const execFileAsync = promisify(execFile);
 
 const MANAGED_MEDIA_PREFIXES = [
@@ -15,6 +16,15 @@ const MANAGED_MEDIA_PREFIXES = [
   'legacy/',
 ] as const;
 const SIGNED_URL_TTL_MS = 10 * 60 * 1000;
+const MAX_MEDIA_ID_LENGTH = 512;
+
+export function isManagedMediaObjectKey(fileName: string): boolean {
+  return MANAGED_MEDIA_PREFIXES.some((prefix) => fileName.startsWith(prefix))
+    && !fileName.includes('..')
+    && !fileName.startsWith('/')
+    && !fileName.includes('\\')
+    && !fileName.includes('\0');
+}
 
 export interface UploadResult {
   url: string;
@@ -31,9 +41,7 @@ export class FirebaseStorageService {
   private bucket = firebaseStorage?.bucket();
 
   private isAllowedObjectKey(fileName: string): boolean {
-    return MANAGED_MEDIA_PREFIXES.some((prefix) => fileName.startsWith(prefix))
-      && !fileName.includes('..')
-      && !fileName.startsWith('/');
+    return isManagedMediaObjectKey(fileName);
   }
 
   private toMediaId(fileName: string): string {
@@ -44,6 +52,13 @@ export class FirebaseStorageService {
   }
 
   private fromMediaId(mediaId: string): string {
+    if (
+      mediaId.length === 0 ||
+      mediaId.length > MAX_MEDIA_ID_LENGTH ||
+      !/^[A-Za-z0-9_-]+$/.test(mediaId)
+    ) {
+      throw new Error('Invalid managed media identifier');
+    }
     const fileName = Buffer.from(mediaId, 'base64url').toString('utf8');
     if (!this.isAllowedObjectKey(fileName)) {
       throw new Error('Invalid managed media identifier');
@@ -135,7 +150,7 @@ export class FirebaseStorageService {
 
     try {
       // Process image with sharp for optimization
-      const processedBuffer = await sharp(fileBuffer)
+       const processedBuffer = await sharp(fileBuffer, { limitInputPixels: UPLOAD_LIMITS.maxImagePixels })
         .resize(400, 400, { 
           fit: 'cover',
           position: 'center'
@@ -170,15 +185,17 @@ export class FirebaseStorageService {
       });
 
        const mediaUrl = await this.responseUrl(fileName, userId, firebaseUid);
-      logger.info('[Firebase Storage] Private profile picture uploaded', { fileName });
+      logger.info('[Firebase Storage] Private profile picture uploaded');
 
       return {
         url: mediaUrl,
         fileName
       };
     } catch (error) {
-      logger.error('[Firebase Storage] Error uploading profile picture:', error);
-       throw new Error(`Failed to upload profile picture: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
+      logger.error('[Firebase Storage] Error uploading profile picture', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+      throw new Error('Failed to upload profile picture', { cause: error });
     }
   }
 
@@ -188,20 +205,32 @@ export class FirebaseStorageService {
     }
 
     try {
+      if (!this.isAllowedObjectKey(fileName) || !fileName.startsWith('profile-pictures/')) {
+        throw new Error('Invalid profile picture object key');
+      }
       const file = this.bucket.file(fileName);
       await file.delete();
-      logger.info('[Firebase Storage] Profile picture deleted', { fileName });
+      logger.info('[Firebase Storage] Profile picture deleted');
     } catch (error) {
-      logger.error('[Firebase Storage] Error deleting profile picture:', error);
-      // Don't throw error for delete operations to avoid breaking user experience
+      logger.error('[Firebase Storage] Error deleting profile picture', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+      throw new Error('Failed to delete profile picture', { cause: error });
     }
   }
 
   // Extract filename from Firebase Storage URL for deletion
   extractFileName(url: string): string | null {
     try {
-      const matches = url.match(/\/([^/]+)$/);
-      return matches ? matches[1] : null;
+      const parsed = new URL(url);
+      const encodedPath = parsed.hostname === 'storage.googleapis.com'
+        ? parsed.pathname.split('/').slice(2).join('/')
+        : parsed.hostname === 'firebasestorage.googleapis.com'
+          ? parsed.pathname.match(/^\/v0\/b\/[^/]+\/o\/(.+)$/)?.[1]
+          : undefined;
+      if (!encodedPath) return null;
+      const fileName = decodeURIComponent(encodedPath);
+      return this.isAllowedObjectKey(fileName) ? fileName : null;
     } catch {
       return null;
     }
@@ -248,7 +277,7 @@ export class FirebaseStorageService {
       });
 
        const mediaUrl = await this.responseUrl(fileName, userId, firebaseUid);
-      logger.info('[Firebase Storage] Private resume uploaded', { fileName });
+      logger.info('[Firebase Storage] Private resume uploaded');
 
       // Generate preview URLs if it's a PDF
       let previewUrls: string[] = [];
@@ -256,7 +285,9 @@ export class FirebaseStorageService {
         try {
            previewUrls = await this.generatePdfPreviewsFromBuffer(fileBuffer, fileName, userId, firebaseUid);
         } catch (previewError) {
-          console.error('[Firebase Storage] Error generating PDF previews:', previewError);
+           logger.error('[Firebase Storage] Error generating PDF previews', {
+             errorClass: previewError instanceof Error ? previewError.name : 'UnknownError',
+           });
           // Continue without previews rather than failing the entire upload
         }
       }
@@ -267,8 +298,10 @@ export class FirebaseStorageService {
         previewUrls
       };
     } catch (error) {
-      logger.error('[Firebase Storage] Error uploading resume:', error);
-       throw new Error(`Failed to upload resume: ${error instanceof Error ? error.message : 'Unknown error'}`, { cause: error });
+      logger.error('[Firebase Storage] Error uploading resume', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+      throw new Error('Failed to upload resume', { cause: error });
     }
   }
 
@@ -289,19 +322,23 @@ export class FirebaseStorageService {
       // Generate JPEG previews
       const outputPrefix = path.join(previewDir, 'page');
       logger.debug('[Firebase Storage] Generating PDF previews');
-      await execFileAsync('pdftoppm', [
+       await execFileAsync('pdftoppm', [
         '-jpeg',
         '-r',
         '200',
         '-scale-to',
         '1200',
+         '-f',
+         '1',
+         '-l',
+         String(UPLOAD_LIMITS.maxPreviewPages),
         tempPdfPath,
         outputPrefix,
       ], { timeout: 15_000 });
 
       // Get generated preview files
       const files = await fs.promises.readdir(previewDir);
-      const previewFiles = files
+       const previewFiles = files
         .filter(f => f.endsWith('.jpg'))
         .sort((a, b) => {
           const pageA = parseInt(a.match(/-(\d+)\.jpg$/)?.[1] || '0');
@@ -309,13 +346,17 @@ export class FirebaseStorageService {
           return pageA - pageB;
         });
 
+       if (previewFiles.length > UPLOAD_LIMITS.maxPreviewPages) {
+         throw new Error(`PDF exceeds the ${UPLOAD_LIMITS.maxPreviewPages}-page preview limit.`);
+       }
+
       // Upload each preview to Firebase Storage
       for (const previewFile of previewFiles) {
         const previewPath = path.join(previewDir, previewFile);
         const previewBuffer = await fs.promises.readFile(previewPath);
 
         // Optimize with sharp
-        const optimizedBuffer = await sharp(previewBuffer)
+         const optimizedBuffer = await sharp(previewBuffer, { limitInputPixels: UPLOAD_LIMITS.maxImagePixels })
           .jpeg({
             quality: 90,
             progressive: true
@@ -361,7 +402,9 @@ export class FirebaseStorageService {
          // The temporary file may already be absent; continue cleanup and rethrow the original error.
        }
       
-      logger.error('[Firebase Storage] Error generating PDF previews:', error);
+      logger.error('[Firebase Storage] Error generating PDF previews', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
       throw error;
     }
   }
@@ -372,12 +415,17 @@ export class FirebaseStorageService {
     }
 
     try {
+      if (!this.isAllowedObjectKey(fileName) || !fileName.startsWith('resumes/')) {
+        throw new Error('Invalid resume object key');
+      }
       const file = this.bucket.file(fileName);
       await file.delete();
-      logger.info('[Firebase Storage] Resume deleted', { fileName });
+      logger.info('[Firebase Storage] Resume deleted');
     } catch (error) {
-      logger.error('[Firebase Storage] Error deleting resume:', error);
-      // Don't throw error for delete operations to avoid breaking user experience
+      logger.error('[Firebase Storage] Error deleting resume', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+      throw new Error('Failed to delete resume', { cause: error });
     }
   }
 

@@ -93,20 +93,43 @@ export function requireTrustedOriginForSessionMutation(
  *
  * - X-Content-Type-Options: prevents MIME sniffing everywhere.
  * - Referrer-Policy: limits referrer leakage.
- * - X-Frame-Options / HSTS: production only, because the Replit development
+ * - X-Frame-Options / HSTS / CSP: production only, because the Replit development
  *   preview renders the app inside an iframe over a proxy.
  *
- * A Content-Security-Policy is intentionally NOT set: the app loads Firebase,
- * Google APIs, and Vite-injected inline scripts, so a strict CSP would break
- * it. This is documented as a known limitation in SECURITY.md.
+ * The policy permits the app's known Firebase/Google integrations while
+ * explicitly disallowing eval, plugin
+ * content, and framing by other origins. Keep this list synchronized with the
+ * client resource inventory when integrations change.
  */
 export function securityHeaders(isProduction: boolean) {
   return (req: Request, res: Response, next: NextFunction) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+    res.setHeader('X-DNS-Prefetch-Control', 'off');
     if (isProduction) {
       res.setHeader('X-Frame-Options', 'SAMEORIGIN');
       res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+      res.setHeader(
+        'Content-Security-Policy',
+        [
+          "default-src 'self'",
+          "base-uri 'self'",
+          "object-src 'none'",
+          "frame-ancestors 'self'",
+           "script-src 'self' https://apis.google.com https://www.gstatic.com https://www.googletagmanager.com https://maps.googleapis.com",
+          "style-src 'self'",
+           "connect-src 'self' https://*.googleapis.com https://*.google.com https://*.firebaseio.com https://www.google-analytics.com https://analytics.google.com",
+          "img-src 'self' data: blob: https:",
+          "font-src 'self' data: https:",
+          "worker-src 'self' blob:",
+          "manifest-src 'self'",
+          "form-action 'self'",
+        ].join('; '),
+      );
+      res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self "capacitor://localhost" "ionic://localhost")');
+      res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+      res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
     }
     next();
   };

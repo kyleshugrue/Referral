@@ -7,31 +7,31 @@ import { MAX_WEBSOCKET_CHAT_CONTENT_LENGTH } from './websocket-security';
  * This schema intentionally lives outside the server wiring so validation
  * tests can load it without initializing storage, sessions, or a database.
  */
-export const messageSchema = z.object({
-  type: z.enum([
-    'authenticate',
-    'chat',
-    'loadMessages',
-    'test',
-    'connectionRejected',
-    'newMatch',
-    'matchRefresh',
-    'matchesUpdated',
-  ]),
-  content: z.string().max(MAX_WEBSOCKET_CHAT_CONTENT_LENGTH).optional(),
-  receiverId: z.number().int().positive().optional(),
-  partnerId: z.number().int().positive().optional(),
-  requestId: z.number().int().positive().optional(),
-  timestamp: z.string().optional(),
-  matchData: z
-    .object({
-      profileId: z.number(),
-      name: z.string(),
-      title: z.string().optional(),
-      company: z.string().optional(),
-      lastActive: z.string().optional(),
-      image: z.string().optional(),
-      matchDescription: z.string().optional(),
-    })
-    .optional(),
-});
+const positiveId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const timestamp = z.union([
+  z.string().datetime({ offset: true }).max(64),
+  z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+]);
+
+export const messageSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('authenticate') }).strict(),
+  z.object({
+    type: z.literal('chat'),
+    receiverId: positiveId,
+    content: z.string().trim().min(1).max(MAX_WEBSOCKET_CHAT_CONTENT_LENGTH),
+  }).strict(),
+  z.object({
+    type: z.literal('loadMessages'),
+    partnerId: positiveId,
+  }).strict(),
+  z.object({
+    type: z.literal('test'),
+    content: z.string().max(MAX_WEBSOCKET_CHAT_CONTENT_LENGTH).optional(),
+    timestamp: timestamp.optional(),
+  }).strict(),
+  z.object({
+    type: z.literal('connectionRejected'),
+    requestId: positiveId,
+    receiverId: positiveId,
+  }).strict(),
+]);

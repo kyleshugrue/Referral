@@ -8,10 +8,11 @@ import {
   createDeviceInfo,
   isRefreshTokenExpired
 } from '../lib/jwt-service';
-import { requireAuth, requireAuthJWT } from '../auth';
+import { requireAuthJWT } from '../auth';
 import { logger } from '../lib/logger';
 import { logSecurityEvent, extractRequestMetadata } from '../lib/security-logger';
 import { issueWebSocketTicket } from '../lib/websocket-tickets';
+import { boundedString } from '../lib/request-validation';
 
 const router = Router();
 
@@ -21,7 +22,10 @@ router.post('/ws-ticket', requireAuthJWT, async (req, res) => {
     const ticket = await issueWebSocketTicket(req.user.id, req.sessionID);
     return res.json({ ticket, expiresInSeconds: 60 });
   } catch (error) {
-    logger.error('[Auth] WebSocket ticket issuance failed:', error);
+    logger.error('[Auth] WebSocket ticket issuance failed', {
+      errorClass: error instanceof Error ? error.name : 'UnknownError',
+      operation: 'websocket_ticket',
+    });
     return res.status(503).json({ message: 'WebSocket authentication is temporarily unavailable' });
   }
 });
@@ -38,10 +42,12 @@ router.post('/refresh', async (req, res) => {
     const { refreshToken, deviceId } = req.body;
 
     // Validate request body
-    if (!refreshToken || !deviceId) {
+    const normalizedRefreshToken = boundedString(refreshToken, 4096);
+    const normalizedDeviceId = boundedString(deviceId, 256);
+    if (!normalizedRefreshToken || !normalizedDeviceId) {
       logSecurityEvent('warn', 'Token Refresh - Missing Fields', {
         action: 'validation_failed',
-        deviceId: deviceId || 'unknown',
+        deviceId: normalizedDeviceId || 'unknown',
         userId: 'unknown',
         ...extractRequestMetadata(req),
         details: { hasRefreshToken: !!refreshToken, hasDeviceId: !!deviceId }
@@ -51,10 +57,10 @@ router.post('/refresh', async (req, res) => {
       });
     }
 
-    logger.info('[Token Refresh] Processing refresh request for deviceId:', deviceId);
+    logger.info('[Token Refresh] Processing refresh request');
 
     // Hash the incoming refresh token
-    const hashedToken = hashRefreshToken(refreshToken);
+    const hashedToken = hashRefreshToken(normalizedRefreshToken);
 
     // Get token from database
     const tokenRecord = await storage.getRefreshTokenByHash(hashedToken);
@@ -64,7 +70,7 @@ router.post('/refresh', async (req, res) => {
       logSecurityEvent('error', 'Token Refresh - Token Not Found', {
         action: 'possible_reuse',
         userId: 'unknown',
-        deviceId,
+        deviceId: normalizedDeviceId,
         ...extractRequestMetadata(req)
       });
       
@@ -72,15 +78,18 @@ router.post('/refresh', async (req, res) => {
       try {
         await storage.logRefreshTokenReuse({
           userId: 0, // Unknown user since token doesn't exist
-          deviceId,
+          deviceId: normalizedDeviceId,
           tokenHash: hashedToken,
           detectedAt: new Date().toISOString(),
-          ipAddress: req.ip || req.headers['x-forwarded-for'] as string || 'unknown',
+          ipAddress: req.ip || 'unknown',
           userAgent: req.headers['user-agent'] || 'unknown',
           action: 'logged'
         });
       } catch (logError) {
-        logger.error('[Token Refresh] Failed to log token reuse:', logError);
+        logger.error('[Token Refresh] Failed to log token reuse', {
+          errorClass: logError instanceof Error ? logError.name : 'UnknownError',
+          operation: 'token_reuse_audit',
+        });
       }
 
       return res.status(401).json({ 
@@ -93,7 +102,7 @@ router.post('/refresh', async (req, res) => {
       logSecurityEvent('warn', 'Token Refresh - Token Expired', {
         action: 'token_expired',
         userId: tokenRecord.userId,
-        deviceId,
+        deviceId: normalizedDeviceId,
         ...extractRequestMetadata(req),
         details: { expiresAt: tokenRecord.expiresAt }
       });
@@ -107,22 +116,22 @@ router.post('/refresh', async (req, res) => {
     }
 
     // Validate device ID matches
-    if (tokenRecord.deviceId !== deviceId) {
+    if (tokenRecord.deviceId !== normalizedDeviceId) {
       logSecurityEvent('error', 'Token Refresh - Device Mismatch', {
         action: 'device_mismatch',
         userId: tokenRecord.userId,
-        deviceId,
+        deviceId: normalizedDeviceId,
         ...extractRequestMetadata(req),
-        details: { expectedDevice: tokenRecord.deviceId, receivedDevice: deviceId }
+        details: { expectedDevice: tokenRecord.deviceId, receivedDevice: normalizedDeviceId }
       });
 
       // Log suspicious activity
       await storage.logRefreshTokenReuse({
         userId: tokenRecord.userId,
-        deviceId,
+        deviceId: normalizedDeviceId,
         tokenHash: hashedToken,
         detectedAt: new Date().toISOString(),
-        ipAddress: req.ip || req.headers['x-forwarded-for'] as string || 'unknown',
+        ipAddress: req.ip || 'unknown',
         userAgent: req.headers['user-agent'] || 'unknown',
         action: 'logged'
       });
@@ -141,7 +150,7 @@ router.post('/refresh', async (req, res) => {
       logSecurityEvent('error', 'Token Refresh - User Not Found', {
         action: 'user_not_found',
         userId: tokenRecord.userId,
-        deviceId,
+        deviceId: normalizedDeviceId,
         ...extractRequestMetadata(req)
       });
       await storage.deleteRefreshToken(hashedToken);
@@ -150,7 +159,7 @@ router.post('/refresh', async (req, res) => {
       });
     }
 
-    logger.debug('[Token Refresh] Rotating tokens for user:', user.id);
+    logger.debug('[Token Refresh] Rotating tokens for authenticated user');
 
     // Delete the old refresh token (rotation step 1)
     await storage.deleteRefreshToken(hashedToken);
@@ -164,7 +173,7 @@ router.post('/refresh', async (req, res) => {
 
     // Create device info
     const deviceInfo = createDeviceInfo(
-      req.ip || req.headers['x-forwarded-for'] as string,
+      req.ip || 'unknown',
       req.headers['user-agent'],
       req.body.platform || 'unknown',
       req.body.deviceModel,
@@ -176,7 +185,7 @@ router.post('/refresh', async (req, res) => {
     await storage.createRefreshToken({
       userId: user.id,
       tokenHash: newHashedToken,
-      deviceId,
+      deviceId: normalizedDeviceId,
       deviceInfo,
       expiresAt: getRefreshTokenExpiry()
     });
@@ -187,7 +196,7 @@ router.post('/refresh', async (req, res) => {
     logSecurityEvent('info', 'Token Refresh - Success', {
       action: 'token_rotated',
       userId: user.id,
-      deviceId,
+      deviceId: normalizedDeviceId,
       ...extractRequestMetadata(req)
     });
 
@@ -198,13 +207,12 @@ router.post('/refresh', async (req, res) => {
     });
 
   } catch (error) {
-    const { deviceId } = req.body;
     logSecurityEvent('error', 'Token Operation - Error', {
       action: 'operation_failed',
       userId: 'unknown',
-      deviceId: deviceId || 'unknown',
+      deviceId: 'unknown',
       ...extractRequestMetadata(req),
-      details: { error: error instanceof Error ? error.message : 'Unknown error' }
+      details: { errorClass: error instanceof Error ? error.name : 'UnknownError' }
     });
     return res.status(500).json({ 
       message: 'Failed to refresh token'
@@ -223,7 +231,9 @@ router.post('/revoke', async (req, res) => {
     const { refreshToken, deviceId } = req.body;
 
     // Validate request body
-    if (!refreshToken) {
+    const normalizedRefreshToken = boundedString(refreshToken, 4096);
+    const normalizedDeviceId = boundedString(deviceId, 256);
+    if (!normalizedRefreshToken) {
       logSecurityEvent('warn', 'Token Revoke - Missing Token', {
         action: 'validation_failed',
         userId: 'unknown',
@@ -235,10 +245,10 @@ router.post('/revoke', async (req, res) => {
       });
     }
 
-    logger.debug('[Token Revoke] Revoking token for deviceId:', deviceId || 'unknown');
+    logger.debug('[Token Revoke] Revoking token');
 
     // Hash the refresh token
-    const hashedToken = hashRefreshToken(refreshToken);
+    const hashedToken = hashRefreshToken(normalizedRefreshToken);
 
     // Delete the token from database
     await storage.deleteRefreshToken(hashedToken);
@@ -246,7 +256,7 @@ router.post('/revoke', async (req, res) => {
     logSecurityEvent('info', 'Token Revoke - Success', {
       action: 'token_revoked',
       userId: 'unknown',
-      deviceId: deviceId || 'unknown',
+      deviceId: normalizedDeviceId || 'unknown',
       ...extractRequestMetadata(req)
     });
 
@@ -255,13 +265,12 @@ router.post('/revoke', async (req, res) => {
     });
 
   } catch (error) {
-    const { deviceId } = req.body;
     logSecurityEvent('error', 'Token Operation - Error', {
       action: 'operation_failed',
       userId: 'unknown',
-      deviceId: deviceId || 'unknown',
+      deviceId: 'unknown',
       ...extractRequestMetadata(req),
-      details: { error: error instanceof Error ? error.message : 'Unknown error' }
+      details: { errorClass: error instanceof Error ? error.name : 'UnknownError' }
     });
     return res.status(500).json({ 
       message: 'Failed to revoke token'
@@ -276,12 +285,12 @@ router.post('/revoke', async (req, res) => {
  * SECURITY: Requires authentication - only authenticated users can revoke their own tokens
  * Deletes all refresh tokens for the authenticated user (full logout from all devices)
  */
-router.post('/revoke-all', requireAuth, async (req, res) => {
+router.post('/revoke-all', requireAuthJWT, async (req, res) => {
   try {
     // Get userId from authenticated session instead of request body
     const userId = req.user!.id;
 
-    logger.debug('[Token Revoke All] Revoking all tokens for user:', userId);
+    logger.debug('[Token Revoke All] Revoking all tokens for authenticated user');
 
     // Delete all tokens for this authenticated user
     await storage.deleteAllUserTokens(userId);
@@ -304,7 +313,7 @@ router.post('/revoke-all', requireAuth, async (req, res) => {
       userId: userId,
       deviceId: 'all',
       ...extractRequestMetadata(req),
-      details: { error: error instanceof Error ? error.message : 'Unknown error' }
+      details: { errorClass: error instanceof Error ? error.name : 'UnknownError' }
     });
     return res.status(500).json({ 
       message: 'Failed to revoke all tokens'

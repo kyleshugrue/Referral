@@ -24,6 +24,12 @@ describe("public clean-room orchestration", () => {
   test("uses the exact lockfile-enforced install command after hygiene", () => {
     expect(CLEAN_ROOM_COMMANDS[0]).toEqual(["repo:hygiene", ["run", "repo:hygiene"]]);
     expect(CLEAN_ROOM_COMMANDS[1]).toEqual(["npm ci", ["ci", "--no-audit", "--no-fund"]]);
+    expect(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "workflow validation"))
+      .toBeGreaterThan(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "npm ci"));
+    expect(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "db:migrate:disposable"))
+      .toBeGreaterThan(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "db:verify"));
+    expect(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "db:migrate:disposable"))
+      .toBeLessThan(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "unit tests"));
     expect(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "repo:hygiene"))
       .toBeLessThan(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "npm ci"));
   });
@@ -58,7 +64,11 @@ describe("public clean-room orchestration", () => {
       const quality = buildCommandEnvironment(root, "quality");
       const build = buildProductionEnvironment(root);
       expect(quality).not.toHaveProperty("REFERRAL_CANARY_SECRET");
-      expect(quality).not.toHaveProperty("DATABASE_URL");
+      expect(quality).toMatchObject({
+        DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres",
+        RELATIONAL_TEST_DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres",
+        MATCH_GENERATION_TEST_DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres",
+      });
       expect(quality).not.toHaveProperty("NODE_ENV");
       expect(quality).not.toHaveProperty("VITE_FIREBASE_API_KEY");
       expect(quality).toMatchObject({
@@ -77,6 +87,7 @@ describe("public clean-room orchestration", () => {
         "-e",
         "process.stdout.write(process.env.REFERRAL_CANARY_INPUT || '')",
       ], { env: quality, encoding: "utf8" })).toBe("");
+      expect(build).not.toHaveProperty("DATABASE_URL");
     } finally {
       for (const [key, value] of Object.entries(original)) {
         if (value === undefined) delete process.env[key];

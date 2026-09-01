@@ -26,6 +26,11 @@ interface HybridLocationInputProps {
   placeholder?: string;
   className?: string;
   disabled?: boolean;
+  id?: string;
+  "aria-describedby"?: string;
+  "aria-invalid"?: boolean;
+  "aria-label"?: string;
+  "aria-labelledby"?: string;
 }
 
 interface PlaceResult {
@@ -43,6 +48,11 @@ export default function HybridLocationInput({
   placeholder = "Search locations...",
   className,
   disabled,
+  id,
+  "aria-describedby": ariaDescribedBy,
+  "aria-invalid": ariaInvalid,
+  "aria-label": ariaLabel,
+  "aria-labelledby": ariaLabelledBy,
 }: HybridLocationInputProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -322,6 +332,11 @@ export default function HybridLocationInput({
         variant="outline"
         role="combobox"
         aria-expanded={open}
+         id={id}
+         aria-describedby={ariaDescribedBy}
+         aria-invalid={ariaInvalid}
+         aria-label={ariaLabel || (id ? undefined : placeholder)}
+         aria-labelledby={ariaLabelledBy}
         disabled={disabled}
         className="w-full justify-between h-10 px-3 text-sm font-normal border-[hsl(215,20%,65%)]"
         onClick={() => {

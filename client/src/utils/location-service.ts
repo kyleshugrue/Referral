@@ -1,5 +1,5 @@
 import { Capacitor } from '@capacitor/core';
-import { Geolocation as CapacitorGeolocation } from '@capacitor/geolocation';
+import type { GeolocationPlugin } from '@capacitor/geolocation';
 
 export interface LocationCoordinates {
   latitude: number;
@@ -18,9 +18,18 @@ export interface LocationPermissionResult {
  */
 class LocationService {
   private isNative: boolean;
+  private nativeGeolocation: GeolocationPlugin | null = null;
 
   constructor() {
     this.isNative = Capacitor.isNativePlatform();
+  }
+
+  private async getNativeGeolocation(): Promise<GeolocationPlugin> {
+    if (!this.nativeGeolocation) {
+      const { Geolocation } = await import('@capacitor/geolocation');
+      this.nativeGeolocation = Geolocation;
+    }
+    return this.nativeGeolocation;
   }
 
   /**
@@ -32,7 +41,7 @@ class LocationService {
     if (this.isNative) {
       // Use Capacitor for native apps
       console.log('[LocationService] Using Capacitor for permissions check');
-      const permissions = await CapacitorGeolocation.checkPermissions();
+      const permissions = await (await this.getNativeGeolocation()).checkPermissions();
       const result = {
         state: permissions.location === 'granted' ? 'granted' as const : 
                permissions.location === 'denied' ? 'denied' as const : 'prompt' as const
@@ -67,7 +76,7 @@ class LocationService {
     if (this.isNative) {
       // Use Capacitor for native apps
       console.log('[LocationService] Using Capacitor to request permissions');
-      const result = await CapacitorGeolocation.requestPermissions();
+      const result = await (await this.getNativeGeolocation()).requestPermissions();
       const permissionResult = {
         state: result.location === 'granted' ? 'granted' as const : 
                result.location === 'denied' ? 'denied' as const : 'prompt' as const
@@ -102,7 +111,7 @@ class LocationService {
     if (this.isNative) {
       // Use Capacitor for native apps
       console.log('[LocationService] Using Capacitor to get position');
-      const position = await CapacitorGeolocation.getCurrentPosition(defaultOptions);
+      const position = await (await this.getNativeGeolocation()).getCurrentPosition(defaultOptions);
       const result = {
         latitude: position.coords.latitude,
         longitude: position.coords.longitude,
@@ -176,7 +185,7 @@ class LocationService {
 
     if (this.isNative) {
       // Use Capacitor for native apps
-      const watchId = await CapacitorGeolocation.watchPosition(defaultOptions, (position) => {
+      const watchId = await (await this.getNativeGeolocation()).watchPosition(defaultOptions, (position) => {
         if (position) {
           callback({
             latitude: position.coords.latitude,
@@ -228,7 +237,7 @@ class LocationService {
   async clearWatch(watchId: string): Promise<void> {
     if (this.isNative) {
       // Use Capacitor for native apps
-      await CapacitorGeolocation.clearWatch({ id: watchId });
+      await (await this.getNativeGeolocation()).clearWatch({ id: watchId });
     } else {
       // Use Web Geolocation API for browsers
       if (navigator.geolocation) {

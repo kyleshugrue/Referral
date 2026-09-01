@@ -16,6 +16,10 @@ npm run db:push
 npm run dev
 ```
 
+The server keeps process-provided variables authoritative, then loads `.env`.
+Existing workspaces may use `keys.env` as a non-overriding compatibility
+fallback; new setup should use `.env`. Never commit either local file.
+
 The Express API and Vite frontend run together on port 5000. Database schema
 changes are manual and must be reviewed before they are applied.
 

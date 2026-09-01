@@ -32,6 +32,13 @@ const SYNTHETIC_BUILD_ENV = Object.freeze({
 });
 const REPLIT_LOCKFILE_PREFIX = ["http://package-firewall", ".replit.local/npm/"].join("");
 const PUBLIC_LOCKFILE_PREFIX = "https://registry.npmjs.org/";
+const CLEAN_ROOM_DATABASE_ENDPOINT = Object.freeze([
+  "postgres://",
+  "postgres",
+  ":",
+  "postgres",
+  "@127.0.0.1:5432/postgres",
+]);
 
 const fail = (message) => {
   throw new Error(message);
@@ -197,6 +204,12 @@ export const buildCommandEnvironment = (root, phase) => {
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_OPTIONAL_LOCKS: "0",
   };
+  if (phase === "quality") {
+    const databaseUrl = CLEAN_ROOM_DATABASE_ENDPOINT.join("");
+    env.DATABASE_URL = databaseUrl;
+    env.RELATIONAL_TEST_DATABASE_URL = databaseUrl;
+    env.MATCH_GENERATION_TEST_DATABASE_URL = databaseUrl;
+  }
   if (phase === "build") env.NODE_ENV = "production";
   return env;
 };
@@ -468,7 +481,9 @@ export const compareRuntimeOutputs = async ({ canonicalRoot, publicRoot }) => {
 export const CLEAN_ROOM_COMMANDS = Object.freeze([
   ["repo:hygiene", ["run", "repo:hygiene"]],
   ["npm ci", ["ci", "--no-audit", "--no-fund"]],
+  ["workflow validation", ["run", "workflows:validate"]],
   ["db:verify", ["run", "db:verify"]],
+  ["db:migrate:disposable", ["run", "db:migrate:disposable"]],
   ["lint", ["run", "lint"]],
   ["typecheck:gate", ["run", "typecheck:gate"]],
   ["unit tests", ["run", "test:unit"]],

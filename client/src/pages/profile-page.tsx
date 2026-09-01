@@ -890,6 +890,7 @@ export default function ProfilePage() {
               <Input
                 type="file"
                 accept=".pdf,.doc,.docx"
+                aria-label="Upload resume"
                 className="h-10 bg-white dark:bg-slate-900 border"
                 disabled={isSaving}
                 onChange={async (e) => {
@@ -1050,6 +1051,7 @@ export default function ProfilePage() {
                   id="photo-upload"
                   type="file"
                   accept="image/*"
+                  aria-label="Upload profile picture"
                   className="hidden"
                   disabled={isSaving}
                   onChange={(e) => {
@@ -1420,6 +1422,7 @@ export default function ProfilePage() {
                                   value={field.value || ''}
                                   onChange={field.onChange}
                                   disabled={isSaving}
+                                  aria-label="Bio"
                                 />
                               </div>
                             </FormControl>

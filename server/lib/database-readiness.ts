@@ -4,6 +4,7 @@ export const REQUIRED_SCHEMA_TABLES = [
   'callback_notification_queue',
   'fcm_tokens',
   'match_generation_jobs',
+  'rate_limit_windows',
   'session',
   'websocket_tickets',
 ] as const;

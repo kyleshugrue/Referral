@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { Capacitor } from "@capacitor/core";
 
 export interface LocationInputProps {
   value: string;
@@ -28,13 +29,8 @@ export function LocationInput({
   useEffect(() => {
     const checkIOSNative = () => {
       try {
-        // Import dynamically to avoid issues if Capacitor is not available
-        import('@capacitor/core').then(({ Capacitor }) => {
-          const isNative = Capacitor.getPlatform() === 'ios' && Capacitor.isNativePlatform();
-          setIsIOSNative(isNative);
-        }).catch(() => {
-          setIsIOSNative(false);
-        });
+        const isNative = Capacitor.getPlatform() === 'ios' && Capacitor.isNativePlatform();
+        setIsIOSNative(isNative);
         return false; // Default until async check completes
       } catch {
         return false;

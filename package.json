@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "tsx server/index.ts",
-    "build": "vite build && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist && node scripts/generate-release-manifest.mjs",
+    "build": "vite build && esbuild server/index.ts --platform=node --packages=external --bundle --splitting --format=esm --outdir=dist && node scripts/generate-release-manifest.mjs",
     "bundle:budget": "node scripts/check-bundle-budget.mjs",
     "start": "NODE_ENV=production node dist/index.js",
     "check": "NODE_OPTIONS=--max-old-space-size=6144 tsc",
@@ -18,6 +18,7 @@
     "db:verify": "node scripts/verify-migrations.mjs",
     "repo:hygiene": "node scripts/repository-hygiene.mjs",
     "validate:public": "node scripts/validate-public-checkout.mjs",
+    "workflows:validate": "node scripts/validate-workflows.mjs .github/workflows",
     "release:manifest": "node scripts/generate-release-manifest.mjs",
     "release:validate": "npm run db:verify && npm run lint && npm run typecheck:gate && npm run test:unit && npm run build && npm run bundle:budget",
     "release:validate:clean": "REQUIRE_CLEAN_TREE=1 npm run release:validate",
@@ -139,6 +140,7 @@
     "vitest": "^4.1.10",
     "wouter": "^3.3.5",
     "ws": "^8.18.1",
+    "yaml": "^2.9.0",
     "zod": "^3.23.8",
     "zod-validation-error": "^3.4.0"
   },

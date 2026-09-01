@@ -16,6 +16,7 @@ import {
 import { locationCacheService } from './services/location-cache';
 import { broadcastMatchRefresh, broadcastMatchRefreshToUsers } from './websocket-utils';
 import { logger } from './lib/logger';
+import { parseServerEnvironment } from './lib/env';
 
 const PostgresSessionStore = connectPg(session);
 type UserWrite = Partial<InsertUser> & Record<string, unknown>;
@@ -194,10 +195,10 @@ export class DatabaseStorage implements IStorage {
         // Schema changes are release-time migrations, never a startup side
         // effect. Missing schema is surfaced by /api/ready and release checks.
         createTableIfMissing: false,
-        ttl: 365 * 24 * 60 * 60, // 1 year in seconds (matches cookie maxAge)
-        disableTouch: false // Refresh session expiration on each request (rolling sessions like LinkedIn)
+        ttl: Math.floor(parseServerEnvironment(process.env).sessionMaxAgeMs / 1000),
+        disableTouch: true,
       });
-      logger.debug(`[${new Date().toISOString()}] Session store initialized with 1-year TTL and rolling sessions`);
+      logger.debug(`[${new Date().toISOString()}] Session store initialized with bounded TTL and non-rolling expiry`);
       
       // SESSION PERSISTENCE: Verify session table exists and is accessible
       try {
@@ -402,12 +403,16 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getUserByMediaReference(reference: string): Promise<User | undefined> {
-    const allUsers = await db.select().from(users);
-    return allUsers.find((user) =>
-      user.photo === reference ||
-      user.resumeUrl === reference ||
-      (user.resumePreviewUrls ?? []).includes(reference)
-    );
+    const [owner] = await db
+      .select()
+      .from(users)
+      .where(or(
+        eq(users.photo, reference),
+        eq(users.resumeUrl, reference),
+        sql`${reference} = ANY(${users.resumePreviewUrls})`,
+      ))
+      .limit(1);
+    return owner;
   }
 
   async getUserByEmail(email: string): Promise<User | undefined> {

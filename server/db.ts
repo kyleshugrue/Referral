@@ -1,12 +1,6 @@
-import dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import { loadProjectEnvironment } from './lib/env';
 
-// Ensure environment variables are loaded before anything else
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const envPath = path.resolve(__dirname, '..', 'keys.env');
-dotenv.config({ path: envPath });
+loadProjectEnvironment();
 
 import { Pool as NeonPool } from '@neondatabase/serverless';
 import type { Pool as PostgresPool } from 'pg';
@@ -43,19 +37,20 @@ export const pool = createDatabasePool({
   // Don't exit the process immediately, let individual queries handle errors
   const errorCode = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
   if (errorCode === 'ECONNRESET' || errorCode === '57P01') {
-    console.log('[ConnectionPool] Connection reset detected, pool will recover automatically');
+    logger.warn('[ConnectionPool] Connection reset detected; pool will recover automatically');
   }
 });
 
 // Add pool metrics logging
-setInterval(() => {
-  console.log('[ConnectionPool] Metrics:', {
+const poolMetricsInterval = setInterval(() => {
+  logger.debug('[ConnectionPool] Metrics:', {
     totalCount: pool.totalCount,
     idleCount: pool.idleCount,
     waitingCount: pool.waitingCount,
     timestamp: new Date().toISOString()
   });
 }, 60000); // Log every minute
+poolMetricsInterval.unref?.();
 
 export const db = usesNativePostgres()
   ? drizzlePostgres({ client: pool as PostgresPool, schema })

@@ -12,8 +12,10 @@ import { v4 as uuidv4 } from 'uuid';
 import { User } from '@shared/schema';
 import { logger } from '../lib/logger';
 import { extractBearerToken } from '../lib/register-auth';
+import { toSelfUserDto } from '../lib/privacy-dto';
 
 const router = Router();
+const errorClass = (error: unknown) => error instanceof Error ? error.name : 'UnknownError';
 
 // Helper function to complete the auth response (JWT generation, re-fetch user, send response)
 // Used by both the already-authenticated path and the new-login path
@@ -29,9 +31,8 @@ async function completeAuthResponse(
     req.session.save(async (saveErr) => {
       if (saveErr) {
         logger.error('❌ [FIREBASE-AUTH DEBUG] Session save error:', {
-          error: saveErr.message,
-          stack: saveErr.stack,
-          sessionId: req.session?.id
+          errorClass: errorClass(saveErr),
+          operation: 'session_save'
         });
         resolve(res.status(500).json({ error: 'Session save failed' }));
         return;
@@ -94,21 +95,27 @@ async function completeAuthResponse(
             logger.debug('✅ [FIREBASE-AUTH DEBUG] Re-fetched latest user data successfully');
           }
         } catch (refetchError) {
-          logger.error('❌ [FIREBASE-AUTH DEBUG] Error re-fetching user:', refetchError);
+          logger.error('❌ [FIREBASE-AUTH DEBUG] Error re-fetching user:', {
+            errorClass: errorClass(refetchError),
+            operation: 'user_refetch',
+          });
           latestUser = user; // Fall back to cached data
         }
         
         logger.debug("📤 [FIREBASE-AUTH DEBUG] Sending successful response to client with JWT tokens");
         
         resolve(res.status(200).json({
-          ...latestUser,
+           ...toSelfUserDto(latestUser),
           accessToken,
           refreshToken,
           deviceId // Include deviceId so client can use it for token refresh
         }));
       } catch (tokenError) {
         // If token generation fails, still return user but log the error
-        logger.error('❌ [FIREBASE-AUTH DEBUG] JWT token generation failed:', tokenError);
+        logger.error('❌ [FIREBASE-AUTH DEBUG] JWT token generation failed:', {
+          errorClass: errorClass(tokenError),
+          operation: 'token_generation',
+        });
         logger.debug('⚠️ [FIREBASE-AUTH DEBUG] Falling back to session-only authentication');
         
         // Re-fetch user from database for fallback response
@@ -119,12 +126,15 @@ async function completeAuthResponse(
             latestUserFallback = user;
           }
         } catch (refetchErr) {
-          logger.error('❌ [FIREBASE-AUTH DEBUG] Error re-fetching user in fallback:', refetchErr);
+          logger.error('❌ [FIREBASE-AUTH DEBUG] Error re-fetching user in fallback:', {
+            errorClass: errorClass(refetchErr),
+            operation: 'fallback_user_refetch',
+          });
           latestUserFallback = user;
         }
         
         logger.debug("📤 [FIREBASE-AUTH DEBUG] Sending successful response to client (session-only, no tokens)");
-        resolve(res.status(200).json(latestUserFallback));
+         resolve(res.status(200).json(toSelfUserDto(latestUserFallback)));
       }
     });
   });
@@ -223,7 +233,10 @@ router.post('/', async (req, res) => {
           }
         }
       } catch (error) {
-        logger.debug('❌ [FIREBASE-AUTH DEBUG] Error searching by Firebase UID:', error);
+       logger.debug('❌ [FIREBASE-AUTH DEBUG] Error searching by Firebase UID:', {
+         errorClass: errorClass(error),
+         operation: 'firebase_uid_lookup',
+       });
       }
       
       // Only search by email if we didn't find user by Firebase UID
@@ -292,11 +305,18 @@ router.post('/', async (req, res) => {
             }
           } else {
             // User exists but has invalid data
-            logger.error('❌ [FIREBASE-AUTH DEBUG] User object found but missing ID:', user);
+            logger.error('❌ [FIREBASE-AUTH DEBUG] User object found but missing ID', {
+              operation: 'user_validation',
+              errorClass: 'InvalidUserRecord',
+            });
             throw new Error('Invalid user data retrieved from database');
           }
         } catch (error) {
-          logger.debug(`❌ [FIREBASE-AUTH DEBUG] Attempt ${attempts}: Error in getUserByEmail:`, error);
+           logger.debug(`❌ [FIREBASE-AUTH DEBUG] Attempt ${attempts}: Error in getUserByEmail`, {
+             errorClass: errorClass(error),
+             operation: 'email_lookup',
+             attempt: attempts,
+           });
           
           // If error is "user not found", that's expected for new users
           if (error instanceof Error && error.message.includes('not found')) {
@@ -311,7 +331,11 @@ router.post('/', async (req, res) => {
             await new Promise(resolve => setTimeout(resolve, 1000));
             continue;
           } else {
-            logger.error('💥 [FIREBASE-AUTH DEBUG] Max attempts reached, database query failed:', error);
+             logger.error('💥 [FIREBASE-AUTH DEBUG] Max attempts reached, database query failed', {
+               errorClass: errorClass(error),
+               operation: 'email_lookup',
+               attempt: attempts,
+             });
             throw error;
           }
         }
@@ -413,9 +437,8 @@ router.post('/', async (req, res) => {
         req.login(user, (err) => {
           if (err) {
             logger.error('❌ [FIREBASE-AUTH DEBUG] Passport login error:', {
-              error: err.message,
-              stack: err.stack,
-              sessionId: req.session?.id
+              errorClass: errorClass(err),
+              operation: 'passport_login',
             });
             return res.status(500).json({ error: 'Passport login failed' });
           }
@@ -439,21 +462,24 @@ router.post('/', async (req, res) => {
           completeAuthResponse(req, res, user, originalSessionId);
         });
       } else {
-        logger.error('❌ [FIREBASE-AUTH DEBUG] Critical error - no user found:', { 
-          hasSession: !!req.session, 
-          hasUser: !!user
+        logger.error('❌ [FIREBASE-AUTH DEBUG] Critical error - no user found', {
+          operation: 'user_resolution',
+          errorClass: 'MissingUserRecord',
         });
         return res.status(500).json({ error: 'User authentication failed' });
       }
     } catch (tokenError) {
-      logger.error('❌ [FIREBASE-AUTH DEBUG] Firebase token verification failed:', {
-        error: tokenError instanceof Error ? tokenError.message : 'Unknown error',
-        hasToken: !!token
+      logger.error('❌ [FIREBASE-AUTH DEBUG] Firebase token verification failed', {
+        operation: 'firebase_token_verification',
+        errorClass: tokenError instanceof Error ? tokenError.name : 'UnknownError',
       });
       return res.status(401).json({ message: 'Invalid Firebase token' });
     }
   } catch (error) {
-    logger.error('💥 [FIREBASE-AUTH DEBUG] Critical error in Firebase auth processing:', { error });
+    logger.error('💥 [FIREBASE-AUTH DEBUG] Critical error in Firebase auth processing:', {
+      errorClass: errorClass(error),
+      operation: 'firebase_auth',
+    });
     return res.status(500).json({ message: 'Authentication failed' });
   }
 });

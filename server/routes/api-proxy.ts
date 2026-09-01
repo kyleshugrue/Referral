@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { geocodingService } from '../services/geocoding.js';
 import { rateLimit } from 'express-rate-limit';
 import { logger } from '../lib/logger';
+import { boundedString } from '../lib/request-validation';
 
 const router = Router();
 const geocodeLimiter = rateLimit({
@@ -17,13 +18,14 @@ router.get('/geocode', geocodeLimiter, async (req, res) => {
   try {
     const { address } = req.query;
     
-    if (!address || typeof address !== 'string' || address.length > 200) {
+    const normalizedAddress = boundedString(address, 200);
+    if (!normalizedAddress) {
       return res.status(400).json({ 
         error: 'Address parameter is required' 
       });
     }
 
-    const coordinates = await geocodingService.geocodeLocation(address);
+    const coordinates = await geocodingService.geocodeLocation(normalizedAddress);
     
     if (!coordinates) {
       return res.status(404).json({ 
@@ -35,7 +37,7 @@ router.get('/geocode', geocodeLimiter, async (req, res) => {
     res.json({
       success: true,
       coordinates,
-      address
+      address: normalizedAddress
     });
   } catch (error) {
     logger.error('[API Proxy] Geocoding error:', error);

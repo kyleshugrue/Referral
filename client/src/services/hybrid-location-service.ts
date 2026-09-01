@@ -1,5 +1,5 @@
 import { Capacitor } from '@capacitor/core';
-import { NativeGeocoder, ForwardOptions, ReverseOptions } from '@capgo/nativegeocoder';
+import type { ForwardOptions, ReverseOptions } from '@capgo/nativegeocoder';
 import { locationService } from '@/utils/location-service';
 import config from '@/lib/config';
 
@@ -69,6 +69,8 @@ class HybridLocationService {
   private isIOSNative: boolean;
   private isWebPlatform: boolean;
   private googleMapsLoaded: boolean = false;
+  private readonly googleMapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY?.trim() ?? "";
+  private nativeGeocoder: typeof import('@capgo/nativegeocoder').NativeGeocoder | null = null;
   private autocompleteService: google.maps.places.AutocompleteService | null = null;
   private geocoder: google.maps.Geocoder | null = null;
 
@@ -88,21 +90,29 @@ class HybridLocationService {
       isWebPlatform: this.isWebPlatform,
       userAgent: navigator.userAgent,
       usingAppleMaps: this.isIOSNative,
-      usingGoogleMaps: this.isWebPlatform
+      usingGoogleMaps: this.isWebPlatform && Boolean(this.googleMapsApiKey)
     });
+  }
+
+  private async getNativeGeocoder() {
+    if (!this.nativeGeocoder) {
+      const { NativeGeocoder } = await import('@capgo/nativegeocoder');
+      this.nativeGeocoder = NativeGeocoder;
+    }
+    return this.nativeGeocoder;
   }
 
   /**
    * Initialize Google Maps services for web platform
    */
   private async initializeGoogleMaps(): Promise<void> {
-    if (!this.isWebPlatform || this.googleMapsLoaded) return;
+    if (!this.isWebPlatform || this.googleMapsLoaded || !this.googleMapsApiKey) return;
 
     try {
       // Import and initialize Google Maps
       const { Loader } = await import('@googlemaps/js-api-loader');
       const loader = new Loader({
-        apiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY || "",
+        apiKey: this.googleMapsApiKey,
         version: "weekly",
         libraries: ["places"]
       });
@@ -164,12 +174,6 @@ class HybridLocationService {
       try {
         console.log('[HybridLocationService] Using Apple MapKit for reverse geocoding');
         
-        // Additional safety check - verify we're actually in a native environment
-        if (typeof NativeGeocoder === 'undefined') {
-          console.error('[HybridLocationService] NativeGeocoder not available - falling back to Google Maps');
-          return this.reverseGeocodeWithGoogleMaps(coordinates);
-        }
-        
         const options: ReverseOptions = {
           latitude: coordinates.latitude,
           longitude: coordinates.longitude,
@@ -177,7 +181,7 @@ class HybridLocationService {
           maxResults: 1
         };
 
-        const response = await NativeGeocoder.reverseGeocode(options);
+        const response = await (await this.getNativeGeocoder()).reverseGeocode(options);
         
         if (response.addresses && response.addresses.length > 0) {
           const result = response.addresses[0];
@@ -265,17 +269,11 @@ class HybridLocationService {
       try {
         console.log('[HybridLocationService] Using Apple MapKit for forward geocoding');
         
-        // Additional safety check - verify we're actually in a native environment
-        if (typeof NativeGeocoder === 'undefined') {
-          console.error('[HybridLocationService] NativeGeocoder not available - falling back to Google Maps');
-          return this.forwardGeocodeWithGoogleMaps(address);
-        }
-        
         const options: ForwardOptions = {
           addressString: address
         };
 
-        const response = await NativeGeocoder.forwardGeocode(options);
+        const response = await (await this.getNativeGeocoder()).forwardGeocode(options);
         
         if (response.addresses && response.addresses.length > 0) {
           const result = response.addresses[0];
@@ -508,6 +506,8 @@ class HybridLocationService {
       return true;
     } else {
       // Check if Google Maps can be loaded
+      if (!this.googleMapsApiKey) return false;
+
       try {
         await this.initializeGoogleMaps();
         return this.googleMapsLoaded;

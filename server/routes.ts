@@ -34,6 +34,8 @@ import {
   passwordResetLimiter,
   uploadLimiter,
   internalLimiter,
+  publicLookupLimiter,
+  expensiveRequestLimiter,
 } from "./lib/rate-limits";
 import { requireCompleteRegistration } from "./middleware/require-complete-registration";
 import { requireAuthJWT } from "./auth";
@@ -48,11 +50,14 @@ import {
   toSelfUserDto,
 } from "./lib/privacy-dto";
 import guidesRouter from "./seo/guides-router";
+import { parseBoundedIntegerQuery, parseStrictPositiveInteger, boundedString } from "./lib/request-validation";
+import { parseServerEnvironment } from "./lib/env";
 
 const PRIVACY_LAST_MODIFIED = "2025-01-01";
 const PRIVACY_LAST_MODIFIED_DISPLAY = new Date(PRIVACY_LAST_MODIFIED + "T00:00:00Z").toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
 
 export async function registerRoutes(app: Express): Promise<void> {
+  const serverEnv = parseServerEnvironment();
   // Public GEO/SEO guide pages + discovery files (robots.txt, sitemap.xml, llms.txt)
   app.use(guidesRouter);
 
@@ -241,16 +246,16 @@ export async function registerRoutes(app: Express): Promise<void> {
   });
 
   // Register the locations router first (before auth middleware)
-  app.use('/api/locations', locationRouter);
+  app.use('/api/locations', publicLookupLimiter, locationRouter);
 
   // Register messages router
-  app.use('/api/messages', messagesRouter);
+  app.use('/api/messages', expensiveRequestLimiter, messagesRouter);
 
   // Register matches router
-  app.use('/api/matches', matchesRouter);
+  app.use('/api/matches', expensiveRequestLimiter, matchesRouter);
   
   // Register notifications router
-  app.use('/api/notifications', notificationsRouter);
+  app.use('/api/notifications', expensiveRequestLimiter, notificationsRouter);
   
   // Register password reset router (no auth required, rate limited)
   app.use('/api/password-reset', passwordResetLimiter, passwordResetRouter);
@@ -271,22 +276,22 @@ export async function registerRoutes(app: Express): Promise<void> {
   app.use('/api/user', userRouter);
   
   // Register API proxy router (requires authentication for security)
-  app.use('/api/proxy', apiProxyRouter);
+  app.use('/api/proxy', publicLookupLimiter, apiProxyRouter);
   
   // Register cost analysis router (requires authentication)
-  app.use('/api/cost-analysis', costAnalysisRouter);
+  app.use('/api/cost-analysis', publicLookupLimiter, costAnalysisRouter);
   
   // Register ZIP code analysis router (requires authentication)
   app.use('/api/zip-analysis', zipAnalysisRoutes);
   
   // Register hybrid locations router (requires authentication)
-  app.use('/api/hybrid-locations', hybridLocationsRouter);
+  app.use('/api/hybrid-locations', expensiveRequestLimiter, hybridLocationsRouter);
   
   // Register push notifications router (requires authentication)
   app.use('/api/push-notifications', pushNotificationsRouter);
   
   // Register admin router (requires authentication)
-  app.use('/api/admin', adminRouter);
+  app.use('/api/admin', expensiveRequestLimiter, adminRouter);
 
   // CMDCC: Centralized Match & Description Command Center routes (requires authentication)
   
@@ -297,10 +302,10 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
     
     try {
-      const userId = parseInt(req.params.userId);
+      const userId = parseStrictPositiveInteger(req.params.userId);
       const { changes } = req.body;
       
-      if (!userId || isNaN(userId)) {
+      if (!userId) {
         return res.status(400).json({ error: 'Invalid user ID' });
       }
       
@@ -336,9 +341,9 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
     
     try {
-      const userId = parseInt(req.params.userId);
+      const userId = parseStrictPositiveInteger(req.params.userId);
       
-      if (!userId || isNaN(userId)) {
+      if (!userId) {
         return res.status(400).json({ error: 'Invalid user ID' });
       }
       
@@ -369,9 +374,9 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
     
     try {
-      const userId = parseInt(req.params.userId);
+      const userId = parseStrictPositiveInteger(req.params.userId);
       
-      if (!userId || isNaN(userId)) {
+      if (!userId) {
         return res.status(400).json({ error: 'Invalid user ID' });
       }
       
@@ -415,16 +420,16 @@ export async function registerRoutes(app: Express): Promise<void> {
   });
 
   // Search through all messages in conversations
-  app.get("/api/conversations/search", requireAuthJWT, requireCompleteRegistration, async (req, res) => {
+  app.get("/api/conversations/search", expensiveRequestLimiter, requireAuthJWT, requireCompleteRegistration, async (req, res) => {
     if (!req.user) {
         return res.sendStatus(401);
     }
 
     try {
         const currentUserId = req.user!.id;
-        const searchQuery = req.query.q as string;
+        const searchQuery = boundedString(req.query.q, 100);
 
-        if (!searchQuery || typeof searchQuery !== 'string' || searchQuery.trim().length === 0) {
+        if (!searchQuery) {
             return res.status(400).json({ message: "Search query is required" });
         }
 
@@ -448,9 +453,9 @@ export async function registerRoutes(app: Express): Promise<void> {
 
     try {
         const currentUserId = req.user!.id;
-        const otherUserId = parseInt(req.params.userId);
+        const otherUserId = parseStrictPositiveInteger(req.params.userId);
 
-        if (isNaN(otherUserId)) {
+        if (!otherUserId) {
             logger.debug('[Routes] Invalid user ID provided:', req.params.userId);
             return res.status(400).json({ message: "Invalid user ID" });
         }
@@ -481,13 +486,16 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
   });
 
-  app.get("/api/network/potential", requireAuthJWT, requireCompleteRegistration, async (req, res) => {
+  app.get("/api/network/potential", expensiveRequestLimiter, requireAuthJWT, requireCompleteRegistration, async (req, res) => {
     if (!req.user) {
       return res.sendStatus(401);
     }
     try {
-      const page = parseInt(req.query.page as string) || 1;
-      const perPage = parseInt(req.query.perPage as string) || 10;
+      const page = parseBoundedIntegerQuery(req.query.page, 1, 1, 100);
+      const perPage = parseBoundedIntegerQuery(req.query.perPage, 10, 1, 50);
+      if (page === undefined || perPage === undefined) {
+        return res.status(400).json({ message: "Invalid pagination" });
+      }
       
       // Extract search parameters from query
       const searchParams: Partial<User> = {};
@@ -529,12 +537,15 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
   });
 
-  app.get("/api/network/shared-interests", requireAuthJWT, requireCompleteRegistration, async (req, res) => {
+  app.get("/api/network/shared-interests", expensiveRequestLimiter, requireAuthJWT, requireCompleteRegistration, async (req, res) => {
     if (!req.user) {
       return res.sendStatus(401);
     }
     try {
-      const radiusInMiles = parseInt(req.query.radius as string) || 50;
+      const radiusInMiles = parseBoundedIntegerQuery(req.query.radius, 50, 1, 500);
+      if (radiusInMiles === undefined) {
+        return res.status(400).json({ message: "Invalid radius" });
+      }
       const currentUser = await storage.getUser(req.user.id);
       
       if (!currentUser) {
@@ -609,7 +620,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   });
 
   // Connection management routes
-  app.post("/api/connections/request/:userId", requireAuthJWT, requireCompleteRegistration, async (req, res) => {
+  app.post("/api/connections/request/:userId", expensiveRequestLimiter, requireAuthJWT, requireCompleteRegistration, async (req, res) => {
     if (!req.user) {
       logger.debug("[ConnectionRequest] User not authenticated, returning 401");
       return res.sendStatus(401);
@@ -619,10 +630,10 @@ export async function registerRoutes(app: Express): Promise<void> {
 
     try {
       const senderId = req.user.id;
-      const receiverId = parseInt(req.params.userId);
+      const receiverId = parseStrictPositiveInteger(req.params.userId);
       logger.debug(`[ConnectionRequest] User ${senderId} is requesting connection with user ${receiverId}`);
 
-      if (isNaN(receiverId)) {
+      if (!receiverId) {
         logger.debug("[ConnectionRequest] Invalid user ID:", req.params.userId);
         return res.status(400).json({ message: "Invalid user ID" });
       }
@@ -760,14 +771,14 @@ export async function registerRoutes(app: Express): Promise<void> {
   });
   
   // Delete connection (disconnect from user)
-  app.delete("/api/connections/:userId", requireAuthJWT, requireCompleteRegistration, async (req, res) => {
+  app.delete("/api/connections/:userId", expensiveRequestLimiter, requireAuthJWT, requireCompleteRegistration, async (req, res) => {
     if (!req.user) return res.sendStatus(401);
     
     try {
       const currentUserId = req.user.id;
-      const otherUserId = parseInt(req.params.userId);
+      const otherUserId = parseStrictPositiveInteger(req.params.userId);
       
-      if (isNaN(otherUserId)) {
+      if (!otherUserId) {
         return res.status(400).json({ message: "Invalid user ID" });
       }
       
@@ -795,10 +806,13 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
 
     try {
-      const requestId = parseInt(req.params.id);
+      const requestId = parseStrictPositiveInteger(req.params.id);
       const currentUserId = req.user.id;
       const { status } = req.body;
 
+      if (!requestId) {
+        return res.status(400).json({ message: "Invalid connection request ID" });
+      }
       if (!["accepted", "rejected"].includes(status)) {
         return res.status(400).json({ message: "Invalid status" });
       }
@@ -914,13 +928,13 @@ export async function registerRoutes(app: Express): Promise<void> {
   });
 
   // Delete connection request route
-  app.delete("/api/connections/request/:userId", requireAuthJWT, requireCompleteRegistration, async (req, res) => {
+  app.delete("/api/connections/request/:userId", expensiveRequestLimiter, requireAuthJWT, requireCompleteRegistration, async (req, res) => {
     if (!req.user) return res.sendStatus(401);
     try {
       const senderId = req.user.id;
-      const receiverId = parseInt(req.params.userId);
+      const receiverId = parseStrictPositiveInteger(req.params.userId);
       
-      if (isNaN(receiverId)) {
+      if (!receiverId) {
         return res.status(400).json({ message: "Invalid user ID" });
       }
       
@@ -967,9 +981,9 @@ export async function registerRoutes(app: Express): Promise<void> {
         authenticatedUser: req.user.id
       });
       
-      const userId = parseInt(req.params.id);
+      const userId = parseStrictPositiveInteger(req.params.id);
       
-      if (isNaN(userId)) {
+      if (!userId) {
         logger.error(`[User Update] Invalid user ID: ${req.params.id}`);
         return res.status(400).json({ message: "Invalid user ID" });
       }
@@ -1143,9 +1157,9 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
     
     try {
-      const userId = parseInt(req.params.id);
+      const userId = parseStrictPositiveInteger(req.params.id);
       
-      if (isNaN(userId)) {
+      if (!userId) {
         return res.status(400).json({ message: "Invalid user ID" });
       }
       
@@ -1189,9 +1203,9 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
     
     try {
-      const userId = parseInt(req.params.id);
+      const userId = parseStrictPositiveInteger(req.params.id);
       
-      if (isNaN(userId)) {
+      if (!userId) {
         return res.status(400).json({ message: "Invalid user ID" });
       }
       
@@ -1223,16 +1237,16 @@ export async function registerRoutes(app: Express): Promise<void> {
   });
   
   // Block user endpoint
-  app.post("/api/users/block/:userId", requireAuthJWT, requireCompleteRegistration, async (req, res) => {
+  app.post("/api/users/block/:userId", expensiveRequestLimiter, requireAuthJWT, requireCompleteRegistration, async (req, res) => {
     if (!req.user) {
       return res.sendStatus(401);
     }
     
     try {
       const currentUserId = req.user.id;
-      const blockedUserId = parseInt(req.params.userId);
+      const blockedUserId = parseStrictPositiveInteger(req.params.userId);
       
-      if (isNaN(blockedUserId)) {
+      if (!blockedUserId) {
         return res.status(400).json({ message: "Invalid user ID" });
       }
       
@@ -1260,16 +1274,16 @@ export async function registerRoutes(app: Express): Promise<void> {
   });
   
   // Unblock user endpoint
-  app.delete("/api/users/block/:userId", requireAuthJWT, requireCompleteRegistration, async (req, res) => {
+  app.delete("/api/users/block/:userId", expensiveRequestLimiter, requireAuthJWT, requireCompleteRegistration, async (req, res) => {
     if (!req.user) {
       return res.sendStatus(401);
     }
     
     try {
       const currentUserId = req.user.id;
-      const blockedUserId = parseInt(req.params.userId);
+      const blockedUserId = parseStrictPositiveInteger(req.params.userId);
       
-      if (isNaN(blockedUserId)) {
+      if (!blockedUserId) {
         return res.status(400).json({ message: "Invalid user ID" });
       }
       
@@ -1323,7 +1337,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     } catch (error) {
       logger.warn('[Media] Legacy media lookup failed', {
         requestId: req.requestId,
-        error,
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
       });
       return res.status(404).end();
     }
@@ -1365,7 +1379,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     } catch (error) {
       logger.warn('[Media] Private media lookup failed', {
         requestId: req.requestId,
-        error,
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
       });
       return res.status(404).json({ message: 'Media not found' });
     }
@@ -1381,11 +1395,11 @@ export async function registerRoutes(app: Express): Promise<void> {
     
     try {
       const currentUserId = req.user.id;
-      const recipientId = parseInt(req.params.recipientId);
+      const recipientId = parseStrictPositiveInteger(req.params.recipientId);
       
       logger.debug(`[Messages] Getting messages between ${currentUserId} and ${recipientId}`);
       
-      if (isNaN(recipientId)) {
+      if (!recipientId) {
         logger.debug(`[Messages] Invalid recipient ID: ${req.params.recipientId}`);
         return res.status(400).json({ message: "Invalid recipient ID" });
       }
@@ -1448,12 +1462,9 @@ export async function registerRoutes(app: Express): Promise<void> {
        const userId = req.isAuthenticated() ? req.user.id : undefined;
        const firebaseUid = !userId ? getRegistrant(req).uid : undefined;
       
-      // Log authentication status for debugging
-      if (userId) {
-        logger.debug('[Resume Upload] Processing resume upload for authenticated user:', userId);
-      } else {
-        logger.debug('[Resume Upload] Processing resume upload for unauthenticated user (during registration)');
-      }
+       logger.debug('[Resume Upload] Processing upload', {
+         authenticated: Boolean(userId),
+       });
 
       logger.debug(`[Resume Upload] File received (${req.file.mimetype}, ${req.file.size} bytes)`);
 
@@ -1493,7 +1504,7 @@ export async function registerRoutes(app: Express): Promise<void> {
           previewUrls: firebaseResult.previewUrls || []
         };
         
-        logger.debug('[Resume Upload] Firebase upload successful:', result);
+         logger.debug('[Resume Upload] Firebase upload successful');
 
         // Clean up local temp file if it exists
         if (req.file.path) {
@@ -1501,7 +1512,9 @@ export async function registerRoutes(app: Express): Promise<void> {
             fs.unlinkSync(req.file.path);
             logger.debug('[Resume Upload] Cleaned up local temp file');
           } catch (error) {
-            logger.debug('[Resume Upload] Could not clean up temp file:', error);
+             logger.debug('[Resume Upload] Could not clean up temp file', {
+               errorClass: error instanceof Error ? error.name : 'UnknownError',
+             });
           }
         }
        } else if (!userId) {
@@ -1510,13 +1523,13 @@ export async function registerRoutes(app: Express): Promise<void> {
         logger.debug('[Resume Upload] Firebase Storage not available, using local processing');
         // Fallback to local processing
         result = await processResumeUpload(req.file);
-        logger.debug('[Resume Upload] Local processing complete, returned data:', result);
+         logger.debug('[Resume Upload] Local processing complete');
       }
       
       // If the user is authenticated, update their profile with the resume info
       if (req.isAuthenticated() && req.user && req.user.id) {
         try {
-          logger.debug(`[Resume Upload] Updating resume for existing user ${req.user.id}`);
+           logger.debug('[Resume Upload] Updating resume for existing user');
           
           // Get the existing user first to preserve current values
           const currentUser = await storage.getUser(req.user.id);
@@ -1530,9 +1543,11 @@ export async function registerRoutes(app: Express): Promise<void> {
             resumePreviewUrls: result.previewUrls
           });
           
-          logger.debug(`[Resume Upload] Successfully updated resume for user ${req.user.id}`);
+           logger.debug('[Resume Upload] Successfully updated resume for existing user');
         } catch (updateError) {
-          logger.error('[Resume Upload] Error updating user resume:', updateError);
+           logger.error('[Resume Upload] Error updating user resume', {
+             errorClass: updateError instanceof Error ? updateError.name : 'UnknownError',
+           });
           // We continue even if update fails - just log the error
         }
       } else {
@@ -1541,10 +1556,11 @@ export async function registerRoutes(app: Express): Promise<void> {
       
       res.json(result);
     } catch (error) {
-      logger.error('[Resume Upload] Error:', error);
+       logger.error('[Resume Upload] Error', {
+         errorClass: error instanceof Error ? error.name : 'UnknownError',
+       });
       res.status(500).json({ 
-        message: 'Failed to upload resume', 
-        error: error instanceof Error ? error.message : 'Unknown error'
+         message: 'Failed to upload resume',
       });
     }
   });
@@ -1552,14 +1568,13 @@ export async function registerRoutes(app: Express): Promise<void> {
   // Profile photo upload endpoint (two routes for backward compatibility)
   app.post(['/api/upload/photo', '/api/upload/profile-photo'], uploadLimiter, requireTrustedOriginForSessionMutation, requireUploadPrincipal, uploadPhoto.single('photo'), async (req, res) => {
     // Accept photos even if not authenticated (for registration process)
-    // But log the authentication status for debugging
+     // Keep only bounded authentication metadata in logs.
     const userId = req.isAuthenticated() ? req.user.id : undefined;
     const firebaseUid = !userId ? getRegistrant(req).uid : undefined;
-    if (userId) {
-      logger.debug('[Photo Upload] Processing photo upload for authenticated user:', userId);
-    } else {
-      logger.debug('[Photo Upload] Processing photo upload for unauthenticated user (likely registration)');
-    }
+     logger.debug('[Photo Upload] Processing upload', {
+       authenticated: Boolean(userId),
+       hasFirebaseRegistrant: Boolean(firebaseUid),
+     });
 
     try {
       if (!req.file) {
@@ -1601,7 +1616,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         );
 
         fileUrl = result.url;
-        logger.debug('[Photo Upload] Firebase upload successful:', fileUrl);
+         logger.debug('[Photo Upload] Firebase upload successful');
 
         // Clean up local temp file if it exists
         if (req.file.path) {
@@ -1609,22 +1624,24 @@ export async function registerRoutes(app: Express): Promise<void> {
             fs.unlinkSync(req.file.path);
             logger.debug('[Photo Upload] Cleaned up local temp file');
           } catch (error) {
-            logger.debug('[Photo Upload] Could not clean up temp file:', error);
+             logger.debug('[Photo Upload] Could not clean up temp file', {
+               errorClass: error instanceof Error ? error.name : 'UnknownError',
+             });
           }
         }
        } else if (!userId) {
          return res.status(503).json({ message: 'Managed media storage is unavailable' });
        } else {
-        logger.debug('[Photo Upload] Firebase Storage not available, using local storage');
+         logger.debug('[Photo Upload] Firebase Storage not available, using local storage');
         // Fallback to local storage
         fileUrl = `/uploads/${path.basename(req.file.path)}`.replace(/\\/g, '/');
-        logger.debug('[Photo Upload] Generated local file URL:', fileUrl);
+         logger.debug('[Photo Upload] Generated local media reference');
       }
       
       // If the user is authenticated, update their profile with the photo URL
       if (req.isAuthenticated() && req.user && req.user.id) {
         try {
-          logger.debug(`[Photo Upload] Updating photo for authenticated user ${req.user.id}`);
+           logger.debug('[Photo Upload] Updating photo for authenticated user');
           
           // Get the existing user first to preserve current values
           const currentUser = await storage.getUser(req.user.id);
@@ -1637,9 +1654,11 @@ export async function registerRoutes(app: Express): Promise<void> {
             photo: fileUrl
           });
           
-          logger.debug(`[Photo Upload] Successfully updated photo for user ${req.user.id}`);
+           logger.debug('[Photo Upload] Successfully updated photo for authenticated user');
         } catch (updateError) {
-          logger.error('[Photo Upload] Error updating user photo:', updateError);
+           logger.error('[Photo Upload] Error updating user photo', {
+             errorClass: updateError instanceof Error ? updateError.name : 'UnknownError',
+           });
           // We continue even if update fails - just log the error
         }
       } else {
@@ -1649,10 +1668,11 @@ export async function registerRoutes(app: Express): Promise<void> {
       // Return the URL to the uploaded file
       res.json({ url: fileUrl });
     } catch (error) {
-      logger.error('[Photo Upload] Error:', error);
+       logger.error('[Photo Upload] Error', {
+         errorClass: error instanceof Error ? error.name : 'UnknownError',
+       });
       res.status(500).json({ 
-        message: 'Failed to upload photo', 
-        error: error instanceof Error ? error.message : 'Unknown error'
+         message: 'Failed to upload photo',
       });
     }
   });
@@ -1708,7 +1728,7 @@ export async function registerRoutes(app: Express): Promise<void> {
 
   // Internal callback endpoint for worker to trigger WebSocket match refresh
   // This allows the worker VM to notify the main app when matches are ready
-  app.post('/internal/matches/refresh', internalLimiter, express.json(), async (req, res) => {
+  app.post('/internal/matches/refresh', internalLimiter, express.json({ limit: serverEnv.internalBodyLimitBytes }), async (req, res) => {
     try {
       // Verify internal API secret (constant-time comparison)
       if (!process.env.INTERNAL_API_SECRET) {
@@ -1725,12 +1745,18 @@ export async function registerRoutes(app: Express): Promise<void> {
       // the Worker VM has finished regenerating.
       const { userIds } = req.body;
 
-      if (!Array.isArray(userIds) || userIds.length === 0 || !userIds.every((id: unknown) => typeof id === 'number')) {
+      if (!Array.isArray(userIds) || userIds.length === 0 || !userIds.every((id: unknown) =>
+        typeof id === 'number' && Number.isSafeInteger(id) && id > 0
+      )) {
         return res.status(400).json({ error: 'userIds array of numbers required' });
       }
 
       if (userIds.length > 1000) {
         return res.status(400).json({ error: 'userIds array too large (max 1000)' });
+      }
+      const uniqueUserIds = [...new Set(userIds as number[])];
+      if (uniqueUserIds.length !== userIds.length) {
+        return res.status(400).json({ error: 'userIds must not contain duplicates' });
       }
 
       logger.debug(`[Internal API] Match refresh callback received for ${userIds.length} user(s)`);
@@ -1739,20 +1765,19 @@ export async function registerRoutes(app: Express): Promise<void> {
       const { broadcastMatchRefreshToUsers } = await import('./websocket-utils');
       
       // Broadcast match refresh to all affected users
-      const successCount = await broadcastMatchRefreshToUsers(userIds);
+      const successCount = await broadcastMatchRefreshToUsers(uniqueUserIds);
       
-      logger.debug(`[Internal API] Broadcasted match refresh to ${successCount}/${userIds.length} users`);
+      logger.debug(`[Internal API] Broadcasted match refresh to ${successCount}/${uniqueUserIds.length} users`);
       
       res.json({ 
         success: true, 
         broadcastCount: successCount,
-        totalUsers: userIds.length 
+        totalUsers: uniqueUserIds.length
       });
     } catch (error) {
       logger.error('[Internal API] Error processing match refresh callback:', error);
       res.status(500).json({ 
         error: 'Internal server error',
-        message: error instanceof Error ? error.message : 'Unknown error'
       });
     }
   });

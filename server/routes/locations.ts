@@ -1,5 +1,6 @@
 import { Router } from "express";
 import citiesData from "cities.json" with { type: 'json' };
+import { boundedString, parseFiniteCoordinate } from "../lib/request-validation";
 
 const router = Router();
 
@@ -99,8 +100,7 @@ const cityList = (() => {
 
 router.get("/search", (req, res) => {
   try {
-    const query = (req.query.q as string || "").toLowerCase().trim();
-    console.log("Search query:", query);
+    const query = (boundedString(req.query.q, 100) || "").toLowerCase();
 
     if (!query || query.length < 2) {
       return res.json([]);
@@ -142,10 +142,10 @@ router.get("/search", (req, res) => {
 
 router.get("/reverse-geocode", async (req, res) => {
   try {
-    const lat = parseFloat(req.query.lat as string);
-    const lng = parseFloat(req.query.lng as string);
+    const lat = parseFiniteCoordinate(req.query.lat, -90, 90);
+    const lng = parseFiniteCoordinate(req.query.lng, -180, 180);
 
-    if (isNaN(lat) || isNaN(lng)) {
+    if (lat === undefined || lng === undefined) {
       return res.status(400).json({ error: 'Invalid coordinates' });
     }
 

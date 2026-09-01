@@ -1,5 +1,3 @@
-import { z } from 'zod';
-
 /**
  * Pure validation for the direct-message creation endpoint. No DB/network
  * access, so it can be unit tested with plain inputs.
@@ -20,11 +18,10 @@ export function validateDirectMessageInput(
     return { ok: false, message: 'Message content is required' };
   }
 
-  return { ok: true, content: content.trim() };
-}
+  const normalizedContent = content.trim();
+  if (normalizedContent.length > 4_000) {
+    return { ok: false, message: 'Message content is too long' };
+  }
 
-/** Validation schema for the group-message creation endpoint. */
-export const groupMessageSchema = z.object({
-  content: z.string().min(1, 'Message content is required'),
-  memberIds: z.array(z.number()).min(1, 'At least one member must be selected'),
-});
+  return { ok: true, content: normalizedContent };
+}

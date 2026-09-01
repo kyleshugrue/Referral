@@ -14,6 +14,7 @@ import {
   getSafeExtension,
   isAllowedMimeType,
   matchesMagicBytes,
+  UPLOAD_LIMITS,
 } from './lib/upload-validation';
 
 const execFileAsync = promisify(execFile);
@@ -110,7 +111,7 @@ async function generatePdfPreviews(pdfPath: string): Promise<string[]> {
     // shell-injection risk from filenames. Timeout kills runaway processes.
     const { stderr } = await execFileAsync(
       'pdftoppm',
-      ['-jpeg', '-r', '200', '-scale-to', '1200', pdfPath, outputPrefix],
+      ['-jpeg', '-r', '200', '-scale-to', '1200', '-f', '1', '-l', String(UPLOAD_LIMITS.maxPreviewPages), pdfPath, outputPrefix],
       { timeout: 8000 }
     );
 
@@ -130,12 +131,16 @@ async function generatePdfPreviews(pdfPath: string): Promise<string[]> {
         return pageA - pageB;
       });
 
+    if (previewFiles.length > UPLOAD_LIMITS.maxPreviewPages) {
+      throw new Error(`PDF exceeds the ${UPLOAD_LIMITS.maxPreviewPages}-page preview limit.`);
+    }
+
     logger.debug(`[PDF Processing] Sorted ${previewFiles.length} preview file(s)`);
 
     // Process each preview file with sharp
     for (const file of previewFiles) {
       const filePath = path.join(previewDir, file);
-      await sharp(filePath)
+      await sharp(filePath, { limitInputPixels: UPLOAD_LIMITS.maxImagePixels })
         .jpeg({
           quality: 90,
           progressive: true
@@ -185,7 +190,11 @@ export const uploadResume = multer({
   storage: storage,
   fileFilter: resumeFileFilter,
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB limit
+    fileSize: UPLOAD_LIMITS.resumeBytes,
+    files: 1,
+    fields: UPLOAD_LIMITS.maxFields,
+    fieldSize: UPLOAD_LIMITS.maxFieldBytes,
+    parts: UPLOAD_LIMITS.maxParts,
   }
 });
 
@@ -193,7 +202,11 @@ export const uploadPhoto = multer({
   storage: storage,
   fileFilter: imageFileFilter,
   limits: {
-    fileSize: 25 * 1024 * 1024 // 25MB limit for high-resolution smartphone photos
+    fileSize: UPLOAD_LIMITS.photoBytes,
+    files: 1,
+    fields: UPLOAD_LIMITS.maxFields,
+    fieldSize: UPLOAD_LIMITS.maxFieldBytes,
+    parts: UPLOAD_LIMITS.maxParts,
   }
 });
 

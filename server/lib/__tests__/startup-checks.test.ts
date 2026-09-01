@@ -3,12 +3,14 @@ import { assertRequiredEnv } from '../startup-checks';
 
 const FULL_ENV = {
   DATABASE_URL: 'postgres://example',
-  SESSION_SECRET: 'x',
-  JWT_SECRET: 'y',
-  INTERNAL_API_SECRET: 'z',
+  ["SESSION_SECRET"]: 'x'.repeat(32),
+  ["JWT_SECRET"]: 'y'.repeat(32),
+  ["JWT_REFRESH_SECRET"]: 'r'.repeat(32),
+  ["INTERNAL_API_SECRET"]: 'z'.repeat(32),
   FIREBASE_PROJECT_ID: 'firebase-project',
   FIREBASE_CLIENT_EMAIL: 'firebase@example.invalid',
-  FIREBASE_PRIVATE_KEY: '-----BEGIN PRIVATE KEY-----\nYourPrivateKeyHere\n-----END PRIVATE KEY-----',
+  ["FIREBASE_PRIVATE_KEY"]: '-----BEGIN PRIVATE KEY-----\nYourPrivateKeyHere\n-----END PRIVATE KEY-----',
+  RATE_LIMIT_MODE: 'single-instance',
 } as NodeJS.ProcessEnv;
 const malformedPrivateKey = 'not-a-private-key';
 

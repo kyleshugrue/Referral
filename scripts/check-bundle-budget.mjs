@@ -4,6 +4,12 @@ import zlib from 'node:zlib';
 
 const assetsDirectory = path.resolve('dist/public/assets');
 const html = fs.readFileSync(path.resolve('dist/public/index.html'), 'utf8');
+const bannedAssetNames = ['keyboard-test', 'device-test', 'synergy-button-demo'];
+const assetNames = fs.readdirSync(assetsDirectory);
+const bannedAssets = assetNames.filter((file) => bannedAssetNames.some((name) => file.includes(name)));
+if (bannedAssets.length > 0) {
+  throw new Error(`Development-only assets are present in the production build: ${bannedAssets.join(', ')}`);
+}
 const initialScripts = [...html.matchAll(/<script[^>]+src="\/assets\/([^"]+\.js)"/g)].map((match) => match[1]);
 if (initialScripts.length === 0) throw new Error('No initial JavaScript entry was found in the production HTML.');
 

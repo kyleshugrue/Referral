@@ -4,6 +4,7 @@ import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration.js';
 import { requireAdmin } from '../middleware/require-admin';
 import { logger } from '../lib/logger';
+import { parseBoundedIntegerQuery, parseStrictPositiveInteger } from '../lib/request-validation';
 
 const router = Router();
 
@@ -14,10 +15,10 @@ router.use(requireAdmin);
 
 router.get('/dead-letters', async (req, res) => {
   try {
-    const requestedLimit = Number.parseInt(req.query.limit as string, 10);
-    const limit = Number.isFinite(requestedLimit)
-      ? Math.min(100, Math.max(1, requestedLimit))
-      : 50;
+    const limit = parseBoundedIntegerQuery(req.query.limit, 50, 1, 100);
+    if (limit === undefined) {
+      return res.status(400).json({ success: false, error: 'Invalid limit' });
+    }
     
     const deadLetters = await storage.getDeadLetterJobs(limit);
     
@@ -37,9 +38,9 @@ router.get('/dead-letters', async (req, res) => {
 
 router.post('/dead-letters/:id/retry', async (req, res) => {
   try {
-    const deadLetterId = parseInt(req.params.id);
+    const deadLetterId = parseStrictPositiveInteger(req.params.id);
     
-    if (isNaN(deadLetterId)) {
+    if (!deadLetterId) {
       return res.status(400).json({
         success: false,
         error: 'Invalid dead letter ID'

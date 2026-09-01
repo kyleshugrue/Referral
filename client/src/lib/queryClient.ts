@@ -2,6 +2,7 @@ import { QueryClient, QueryFunction } from "@tanstack/react-query";
 import * as firebaseLib from "./firebase";
 import { config } from "./config";
 import { getCurrentAccessToken, refreshAccessToken, waitForTokensReady, isRefreshInProgress, waitForRefreshComplete } from './token-manager';
+import { Capacitor } from "@capacitor/core";
 
 /**
  * Convert relative URLs to absolute URLs using the configured API base URL
@@ -75,8 +76,6 @@ export async function apiRequest(
     
     // Add platform detection headers for backend routing
     try {
-      // Dynamic import to avoid issues in SSR or when Capacitor isn't available
-      const { Capacitor } = await import('@capacitor/core');
       const platform = Capacitor.getPlatform();
       const isNativePlatform = Capacitor.isNativePlatform();
       
@@ -255,8 +254,6 @@ export const getQueryFn: <T>(options: {
     
     // Add platform detection headers for backend routing
     try {
-      // Dynamic import to avoid issues in SSR or when Capacitor isn't available
-      const { Capacitor } = await import('@capacitor/core');
       const platform = Capacitor.getPlatform();
       const isNativePlatform = Capacitor.isNativePlatform();
       

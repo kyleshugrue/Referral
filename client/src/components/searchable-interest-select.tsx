@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { toTitleCase } from "@/utils/text-utils";
 import { useUserAgentDetection } from "@/hooks/use-user-agent-detection";
+import { Capacitor } from "@capacitor/core";
 
 interface SearchableInterestSelectProps {
   options: string[];
@@ -16,6 +17,11 @@ interface SearchableInterestSelectProps {
   badgeVariant?: "default" | "secondary" | "outline" | "destructive";
   applyTitleCase?: boolean; // New prop to control title case application
   disabled?: boolean;
+  id?: string;
+  "aria-describedby"?: string;
+  "aria-invalid"?: boolean;
+  "aria-label"?: string;
+  "aria-labelledby"?: string;
 }
 
 export default function SearchableInterestSelect({
@@ -27,7 +33,12 @@ export default function SearchableInterestSelect({
   allowCustom = false,
   badgeVariant = "default",
   applyTitleCase = false,
-  disabled = false
+  disabled = false,
+  id,
+  "aria-describedby": ariaDescribedBy,
+  "aria-invalid": ariaInvalid,
+  "aria-label": ariaLabel,
+  "aria-labelledby": ariaLabelledBy,
 }: SearchableInterestSelectProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -41,13 +52,8 @@ export default function SearchableInterestSelect({
   useEffect(() => {
     const checkIOSNative = () => {
       try {
-        // Import dynamically to avoid issues if Capacitor is not available
-        import('@capacitor/core').then(({ Capacitor }) => {
-          const isNative = Capacitor.getPlatform() === 'ios' && Capacitor.isNativePlatform();
-          setIsIOSNative(isNative);
-        }).catch(() => {
-          setIsIOSNative(false);
-        });
+        const isNative = Capacitor.getPlatform() === 'ios' && Capacitor.isNativePlatform();
+        setIsIOSNative(isNative);
         return false; // Default until async check completes
       } catch {
         return false;
@@ -165,6 +171,11 @@ export default function SearchableInterestSelect({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={handleKeyDown}
+            id={id}
+            aria-describedby={ariaDescribedBy}
+            aria-invalid={ariaInvalid}
+            aria-label={ariaLabel || (id ? undefined : placeholder)}
+            aria-labelledby={ariaLabelledBy}
             placeholder={selected.length > 0 ? "Search to add more..." : placeholder}
             className="w-full h-10 px-3 text-sm border border-input rounded-md bg-background focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none disabled:opacity-50 disabled:cursor-not-allowed"
             disabled={disabled}
@@ -273,6 +284,11 @@ export default function SearchableInterestSelect({
               }
             }}
             disabled={disabled}
+            id={id}
+            aria-describedby={ariaDescribedBy}
+            aria-invalid={ariaInvalid}
+            aria-label={ariaLabel || (id ? undefined : placeholder)}
+            aria-labelledby={ariaLabelledBy}
             placeholder={selected.length === 0 ? placeholder : "Add more..."}
             className="flex-1 bg-transparent outline-none border-0 p-0 text-sm placeholder:text-muted-foreground min-w-[120px] disabled:cursor-not-allowed"
           />

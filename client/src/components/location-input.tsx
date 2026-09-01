@@ -18,6 +18,7 @@ import {
   CommandItem,
 } from "@/components/ui/command";
 import { useToast } from "@/hooks/use-toast";
+import { Capacitor } from "@capacitor/core";
 import {
   useLoadScript,
   Libraries
@@ -62,13 +63,8 @@ export default function LocationInput({
   useEffect(() => {
     const checkIOSNative = () => {
       try {
-        // Import dynamically to avoid issues if Capacitor is not available
-        import('@capacitor/core').then(({ Capacitor }) => {
-          const isNative = Capacitor.getPlatform() === 'ios' && Capacitor.isNativePlatform();
-          setIsIOSNative(isNative);
-        }).catch(() => {
-          setIsIOSNative(false);
-        });
+        const isNative = Capacitor.getPlatform() === 'ios' && Capacitor.isNativePlatform();
+        setIsIOSNative(isNative);
         return false; // Default until async check completes
       } catch {
         return false;

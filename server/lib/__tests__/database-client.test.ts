@@ -78,7 +78,7 @@ describe('usesNativePostgres', () => {
   });
 
   it('does not select native PostgreSQL when the URL is missing or malformed', () => {
-    expect(usesNativePostgres(undefined)).toBe(false);
+    expect(usesNativePostgres('')).toBe(false);
     expect(usesNativePostgres('not-a-database-url')).toBe(false);
   });
 });

@@ -5,6 +5,8 @@ import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration';
 import { requireAdmin } from '../middleware/require-admin';
 import { logger } from '../lib/logger';
+import { publicLookupLimiter } from '../lib/rate-limits';
+import { parseBoundedIntegerQuery, parseStrictPositiveInteger } from '../lib/request-validation';
 
 const router = Router();
 
@@ -40,8 +42,8 @@ router.get("/analysis", requireAuthJWT, requireCompleteRegistration, requireAdmi
 // Get cost analysis for a specific user
 router.get("/user/:userId", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
-    const userId = parseInt(req.params.userId);
-    if (isNaN(userId)) {
+    const userId = parseStrictPositiveInteger(req.params.userId);
+    if (!userId) {
       return res.status(400).json({ message: "Invalid user ID" });
     }
 
@@ -189,18 +191,15 @@ router.get("/breakdown", requireAuthJWT, requireCompleteRegistration, requireAdm
 });
 
 // Public endpoint for cost estimation (no auth required)
-router.get("/estimate", async (req, res) => {
+router.get("/estimate", publicLookupLimiter, async (req, res) => {
   try {
     const { matches = 1, users = 1 } = req.query;
     
-    const parsedMatches = Number.parseInt(matches as string, 10);
-    const parsedUsers = Number.parseInt(users as string, 10);
-    const matchCount = Number.isSafeInteger(parsedMatches)
-      ? Math.min(1_000_000, Math.max(1, parsedMatches))
-      : 1;
-    const userCount = Number.isSafeInteger(parsedUsers)
-      ? Math.min(1_000_000, Math.max(1, parsedUsers))
-      : 1;
+    const matchCount = parseBoundedIntegerQuery(matches, 1, 1, 1_000_000);
+    const userCount = parseBoundedIntegerQuery(users, 1, 1, 1_000_000);
+    if (matchCount === undefined || userCount === undefined) {
+      return res.status(400).json({ message: 'matches and users must be whole numbers between 1 and 1000000' });
+    }
     
     logger.debug('[Cost Analysis] Estimating costs', { matchCount, userCount });
     
@@ -269,8 +268,11 @@ router.get("/estimate", async (req, res) => {
 router.get("/individual-matches", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
     const { limit = 100, offset = 0 } = req.query;
-    const limitNum = Math.min(1000, Math.max(1, parseInt(limit as string) || 100));
-    const offsetNum = Math.max(0, parseInt(offset as string) || 0);
+    const limitNum = parseBoundedIntegerQuery(limit, 100, 1, 1000);
+    const offsetNum = parseBoundedIntegerQuery(offset, 0, 0, 1_000_000);
+    if (limitNum === undefined || offsetNum === undefined) {
+      return res.status(400).json({ success: false, message: 'Invalid pagination' });
+    }
 
     logger.debug('[Cost Analysis] Getting individual match costs', { limit: limitNum, offset: offsetNum });
     
@@ -311,7 +313,10 @@ router.get("/individual-matches", requireAuthJWT, requireCompleteRegistration, r
 router.get("/top-users", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
     const { limit = 20 } = req.query;
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit as string) || 20));
+    const limitNum = parseBoundedIntegerQuery(limit, 20, 1, 100);
+    if (limitNum === undefined) {
+      return res.status(400).json({ success: false, message: 'Invalid limit' });
+    }
 
     logger.debug('[Cost Analysis] Getting top cost users', { limit: limitNum });
     
@@ -349,7 +354,10 @@ router.get("/top-users", requireAuthJWT, requireCompleteRegistration, requireAdm
 router.get("/daily-breakdown", requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
   try {
     const { days = 30 } = req.query;
-    const daysNum = Math.min(365, Math.max(1, parseInt(days as string) || 30));
+    const daysNum = parseBoundedIntegerQuery(days, 30, 1, 365);
+    if (daysNum === undefined) {
+      return res.status(400).json({ success: false, message: 'Invalid days' });
+    }
 
     logger.debug('[Cost Analysis] Getting daily cost breakdown', { days: daysNum });
     
@@ -393,11 +401,17 @@ router.get("/comprehensive-report", requireAuthJWT, requireCompleteRegistration,
       dailyBreakdownDays = 30
     } = req.query;
 
+    const parsedIndividualMatchesLimit = parseBoundedIntegerQuery(individualMatchesLimit, 100, 1, 1000);
+    const parsedTopUsersLimit = parseBoundedIntegerQuery(topUsersLimit, 20, 1, 100);
+    const parsedDailyBreakdownDays = parseBoundedIntegerQuery(dailyBreakdownDays, 30, 1, 365);
+    if (parsedIndividualMatchesLimit === undefined || parsedTopUsersLimit === undefined || parsedDailyBreakdownDays === undefined) {
+      return res.status(400).json({ success: false, message: 'Invalid report limits' });
+    }
     const options = {
       includeIndividualMatches: includeIndividualMatches === 'true',
-      individualMatchesLimit: Math.min(1000, Math.max(1, parseInt(individualMatchesLimit as string) || 100)),
-      topUsersLimit: Math.min(100, Math.max(1, parseInt(topUsersLimit as string) || 20)),
-      dailyBreakdownDays: Math.min(365, Math.max(1, parseInt(dailyBreakdownDays as string) || 30)),
+      individualMatchesLimit: parsedIndividualMatchesLimit,
+      topUsersLimit: parsedTopUsersLimit,
+      dailyBreakdownDays: parsedDailyBreakdownDays,
     };
 
     logger.debug('[Cost Analysis] Generating comprehensive cost report', { optionKeys: Object.keys(options) });

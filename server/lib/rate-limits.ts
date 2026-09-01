@@ -1,4 +1,6 @@
 import rateLimit from 'express-rate-limit';
+import { ipKeyGenerator } from 'express-rate-limit';
+import { PostgresRateLimitStore, pseudonymousRateLimitKey } from './postgres-rate-limit-store';
 
 /**
  * Rate limiters for sensitive endpoints.
@@ -18,12 +20,24 @@ const jsonMessage = (message: string) => ({
   message,
 });
 
+const standardLimiterOptions = {
+  standardHeaders: 'draft-7' as const,
+  legacyHeaders: false,
+  passOnStoreError: false,
+  keyGenerator: (req: { ip?: string }) =>
+    pseudonymousRateLimitKey('ip', ipKeyGenerator(req.ip || 'unknown')),
+};
+
+const sharedStore = (scope: string) => process.env.RATE_LIMIT_MODE === 'postgres'
+  ? { store: new PostgresRateLimitStore(scope) }
+  : {};
+
 /** Login/token endpoints: 30 attempts per 5 minutes per IP. */
 export const authLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   limit: 30,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
+  ...standardLimiterOptions,
+  ...sharedStore('auth'),
   message: jsonMessage('Too many authentication attempts. Please try again in a few minutes.'),
 });
 
@@ -31,8 +45,8 @@ export const authLimiter = rateLimit({
 export const tokenRefreshLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   limit: 60,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
+  ...standardLimiterOptions,
+  ...sharedStore('token-refresh'),
   message: jsonMessage('Too many token requests. Please try again in a few minutes.'),
 });
 
@@ -40,8 +54,8 @@ export const tokenRefreshLimiter = rateLimit({
 export const registerLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   limit: 30,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
+  ...standardLimiterOptions,
+  ...sharedStore('register'),
   message: jsonMessage('Too many registration attempts. Please try again later.'),
 });
 
@@ -49,8 +63,8 @@ export const registerLimiter = rateLimit({
 export const passwordResetLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 5,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
+  ...standardLimiterOptions,
+  ...sharedStore('password-reset'),
   message: jsonMessage('Too many password reset requests. Please try again later.'),
 });
 
@@ -58,8 +72,8 @@ export const passwordResetLimiter = rateLimit({
 export const uploadLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   limit: 30,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
+  ...standardLimiterOptions,
+  ...sharedStore('upload'),
   message: jsonMessage('Too many uploads. Please try again later.'),
 });
 
@@ -67,7 +81,25 @@ export const uploadLimiter = rateLimit({
 export const internalLimiter = rateLimit({
   windowMs: 60 * 1000,
   limit: 120,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
+  ...standardLimiterOptions,
+  ...sharedStore('internal'),
+  message: jsonMessage('Too many requests.'),
+});
+
+/** Public lookups still need a bounded abuse budget because they are unauthenticated. */
+export const publicLookupLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 60,
+  ...standardLimiterOptions,
+  ...sharedStore('public-lookup'),
+  message: jsonMessage('Too many lookup requests.'),
+});
+
+/** Expensive authenticated mutations and external-service lookups. */
+export const expensiveRequestLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  ...standardLimiterOptions,
+  ...sharedStore('expensive'),
   message: jsonMessage('Too many requests.'),
 });

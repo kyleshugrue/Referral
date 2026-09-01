@@ -69,11 +69,10 @@ export function logSecurityEvent(
 
 // Helper to extract request metadata
 export function extractRequestMetadata(req: Request): Pick<SecurityEventMetadata, 'ip' | 'userAgent' | 'platform'> {
-  const forwardedFor = req.headers['x-forwarded-for'];
-  const forwardedIp = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
-
   return {
-    ip: req.ip || forwardedIp || 'unknown',
+    // Express has already resolved the client address using the configured
+    // trusted proxy ranges. Never fall back to the raw X-Forwarded-For chain.
+    ip: req.ip || 'unknown',
     userAgent: req.headers?.['user-agent'] || 'unknown',
     platform: req.body?.platform || req.headers?.['x-platform'] || 'unknown',
   };

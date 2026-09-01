@@ -4,6 +4,7 @@ import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration.js';
 import { logger } from '../lib/logger';
 import { toNotificationDto } from "../lib/privacy-dto";
+import { parseStrictPositiveInteger } from "../lib/request-validation";
 
 const router = Router();
 
@@ -64,8 +65,8 @@ router.patch("/:id", async (req, res) => {
     if (!req.user) {
       return res.status(401).json({ message: 'User not found' });
     }
-    const notificationId = parseInt(req.params.id);
-    if (isNaN(notificationId)) {
+    const notificationId = parseStrictPositiveInteger(req.params.id);
+    if (!notificationId) {
       return res.status(400).json({ error: "Invalid notification ID" });
     }
 
@@ -87,8 +88,8 @@ router.patch("/read-conversation/:conversationId", async (req, res) => {
       return res.status(401).json({ message: 'User not found' });
     }
     
-    const conversationId = parseInt(req.params.conversationId);
-    if (isNaN(conversationId)) {
+    const conversationId = parseStrictPositiveInteger(req.params.conversationId);
+    if (!conversationId) {
       return res.status(400).json({ error: "Invalid conversation ID" });
     }
 
@@ -108,8 +109,8 @@ router.patch("/read-connection/:connectionId", async (req, res) => {
       return res.status(401).json({ message: 'User not found' });
     }
     
-    const connectionId = parseInt(req.params.connectionId);
-    if (isNaN(connectionId)) {
+    const connectionId = parseStrictPositiveInteger(req.params.connectionId);
+    if (!connectionId) {
       return res.status(400).json({ error: "Invalid connection ID" });
     }
 

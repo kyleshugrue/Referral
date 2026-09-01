@@ -457,6 +457,7 @@ export default function RegisterPage() {
                       <FormControl>
                         <div className="space-y-2">
                           <SecureInput 
+                            aria-label="Password"
                             placeholder="Create a password" 
                             autoComplete="new-password"
                             enterKeyHint="next"
@@ -480,6 +481,7 @@ export default function RegisterPage() {
                       <FormLabel className="text-[hsl(215,25%,27%)]">Confirm Password</FormLabel>
                       <FormControl>
                         <SecureInput 
+                          aria-label="Confirm Password"
                           placeholder="Confirm your password" 
                           autoComplete="new-password"
                           enterKeyHint="done"

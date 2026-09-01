@@ -172,7 +172,7 @@ export default function MobileNav({ children }: MobileNavProps) {
     { icon: Share2, label: "Network", href: "/" },
     { icon: Users2, label: "Requests", href: "/requests" },
     { icon: MessageSquare, label: "Connections", href: "/connections" },
-    { href: "/profile", isAvatar: true }
+    { href: "/profile", label: "Profile", isAvatar: true }
   ];
 
   return (
@@ -268,6 +268,7 @@ export default function MobileNav({ children }: MobileNavProps) {
                 <div key={item.href} className="relative flex items-center justify-center">
                   <Link
                     href={item.href}
+                    aria-label={item.label}
                     className={cn(
                       "flex items-center justify-center w-10 h-10",
                       isActive ? "text-white" : "text-[hsl(215,20%,65%)]",
@@ -306,6 +307,7 @@ export default function MobileNav({ children }: MobileNavProps) {
               <div key={item.href} className="relative flex items-center justify-center">
                 <Link
                   href={item.href}
+                  aria-label={item.label}
                   className={cn(
                     "flex items-center justify-center w-10 h-10",
                     isActive ? "text-white" : "text-[hsl(215,20%,65%)]",
