@@ -23,7 +23,17 @@ afterEach(async () => {
 describe("public clean-room orchestration", () => {
   test("uses the exact lockfile-enforced install command after hygiene", () => {
     expect(CLEAN_ROOM_COMMANDS[0]).toEqual(["repo:hygiene", ["run", "repo:hygiene"]]);
-    expect(CLEAN_ROOM_COMMANDS[1]).toEqual(["npm ci", ["ci", "--no-audit", "--no-fund"]]);
+    expect(CLEAN_ROOM_COMMANDS[1]).toEqual(["npm ci", [
+      "ci",
+      "--include=dev",
+      "--legacy-peer-deps",
+      "--bin-links=true",
+      "--install-links=true",
+      "--package-lock=true",
+      "--no-audit",
+      "--no-fund",
+      "--registry=https://registry.npmjs.org/",
+    ]]);
     expect(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "workflow validation"))
       .toBeGreaterThan(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "npm ci"));
     expect(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "db:migrate:disposable"))
@@ -56,18 +66,20 @@ describe("public clean-room orchestration", () => {
       REFERRAL_CANARY_INPUT: process.env.REFERRAL_CANARY_INPUT,
       NODE_ENV: process.env.NODE_ENV,
       DATABASE_URL: process.env.DATABASE_URL,
+      CLEAN_ROOM_DATABASE_URL: process.env.CLEAN_ROOM_DATABASE_URL,
     };
     process.env.REFERRAL_CANARY_INPUT = "must-not-cross-process-boundary";
     process.env.NODE_ENV = "development";
     process.env.DATABASE_URL = "postgres://canary.invalid";
+    process.env.CLEAN_ROOM_DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:5432/ci_clean_room";
     try {
       const quality = buildCommandEnvironment(root, "quality");
       const build = buildProductionEnvironment(root);
       expect(quality).not.toHaveProperty("REFERRAL_CANARY_SECRET");
       expect(quality).toMatchObject({
-        DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres",
-        RELATIONAL_TEST_DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres",
-        MATCH_GENERATION_TEST_DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5432/postgres",
+        DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5432/ci_clean_room",
+        RELATIONAL_TEST_DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5432/ci_clean_room",
+        MATCH_GENERATION_TEST_DATABASE_URL: "postgres://postgres:postgres@127.0.0.1:5432/ci_clean_room",
       });
       expect(quality).not.toHaveProperty("NODE_ENV");
       expect(quality).not.toHaveProperty("VITE_FIREBASE_API_KEY");
@@ -114,6 +126,7 @@ describe("public clean-room orchestration", () => {
       fileCount: 2,
       totalBytes: 17,
       source: { commit: "a".repeat(40), tree: "b".repeat(40), dirty: false },
+      selectionPolicy: null,
     });
     expect(manifest.files).toEqual([
       {

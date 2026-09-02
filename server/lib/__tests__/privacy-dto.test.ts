@@ -3,6 +3,7 @@ import type { Message, User } from '@shared/schema';
 import {
   toMatchDto,
   toMessageDto,
+  toAuthorizedPeerProfileDto,
   toPublicProfileDto,
   toSelfUserDto,
 } from '../privacy-dto';
@@ -84,6 +85,16 @@ describe('privacy response DTOs', () => {
     expect(self).not.toHaveProperty('currentLocationLat');
     expect(self).not.toHaveProperty('currentSnapshotId');
     expect(self).not.toHaveProperty('initialMatchJobsQueuedAt');
+  });
+
+  it('includes resume references only in the authorized peer projection', () => {
+    const profile = toAuthorizedPeerProfileDto(user);
+
+    expect(profile.resumeUrl).toBe(user.resumeUrl);
+    expect(profile.resumePreviewUrls).toEqual(user.resumePreviewUrls);
+    expect(profile).not.toHaveProperty('email');
+    expect(profile).not.toHaveProperty('firebaseUid');
+    expect(profile).not.toHaveProperty('currentLocationLat');
   });
 
   it('does not spread internal match or message rows', () => {

@@ -124,6 +124,22 @@ function makeStorage(state: HarnessState) {
       [...state.connectionRequests.values()].filter(
         (request) => request.senderId === senderId && request.status === "requested",
       ),
+    getConnectionBetweenUsers: async (userId: number, otherUserId: number) => {
+      const connection = [...state.connectionRequests.values()].find(
+        (request) =>
+          request.status === "accepted" &&
+          ((request.senderId === userId && request.receiverId === otherUserId) ||
+            (request.senderId === otherUserId && request.receiverId === userId)),
+      );
+      return connection
+        ? {
+            id: connection.id,
+            user1Id: connection.senderId,
+            user2Id: connection.receiverId,
+            createdAt: "2030-01-01T00:00:00.000Z",
+          }
+        : undefined;
+    },
     createConnectionRequest: async (senderId: number, receiverId: number) => {
       const request = {
         id: state.nextConnectionRequestId++,

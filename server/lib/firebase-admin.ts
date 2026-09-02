@@ -15,6 +15,13 @@ export interface FirebaseAdminConfig {
   storageBucket?: string;
 }
 
+export interface FirebaseProviderEvidence {
+  uidMatches: boolean;
+  emailMatches: boolean;
+  providerEmailVerified: boolean;
+  allGatesPass: boolean;
+}
+
 export function isSyntheticSmokeTest(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.CI === 'true' && env.SMOKE_TEST === 'true';
 }
@@ -46,6 +53,29 @@ export function readFirebaseAdminConfig(
   }
 
   return { clientEmail, privateKey, projectId, storageBucket };
+}
+
+export function evaluateFirebaseProviderEvidence(
+  expectedUid: string,
+  expectedEmail: string | null | undefined,
+  providerUser: { uid: string; email?: string | null; emailVerified: boolean },
+): FirebaseProviderEvidence {
+  const normalizedExpectedEmail = expectedEmail?.trim().toLowerCase();
+  const normalizedProviderEmail = providerUser.email?.trim().toLowerCase();
+  const uidMatches = providerUser.uid === expectedUid;
+  const emailMatches = Boolean(
+    normalizedExpectedEmail &&
+    normalizedProviderEmail &&
+    normalizedExpectedEmail === normalizedProviderEmail,
+  );
+  const providerEmailVerified = providerUser.emailVerified === true;
+
+  return {
+    uidMatches,
+    emailMatches,
+    providerEmailVerified,
+    allGatesPass: uidMatches && emailMatches && providerEmailVerified,
+  };
 }
 
 export class FirebaseAdminUnavailableError extends Error {
@@ -107,6 +137,10 @@ export const auth = {
   verifyIdToken: async (token: string) => {
     if (!firebaseAuth) throw new FirebaseAdminUnavailableError();
     return firebaseAuth.verifyIdToken(token);
+  },
+  getUser: async (uid: string) => {
+    if (!firebaseAuth) throw new FirebaseAdminUnavailableError();
+    return firebaseAuth.getUser(uid);
   },
 };
 

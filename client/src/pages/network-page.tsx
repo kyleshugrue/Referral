@@ -34,6 +34,9 @@ interface MatchWithDescription extends User {
 interface MatchesResponse {
   matches: MatchWithDescription[];
   apiConnectionIssue: boolean;
+  matchState?: 'ready' | 'empty' | 'profile_incomplete';
+  requiresAction?: 'complete_profile' | 'verify_email' | 'make_profile_visible';
+  discoverabilityPolicyVersion?: string;
 }
 
 interface PendingResponse {
@@ -164,6 +167,11 @@ export default function NetworkPage() {
   // 2. Backend says pending
   // 3. Truly loading with no cache
   const shouldShowGenerating = matchDisplayState.shouldShowGenerating;
+  const needsProfileCompletion = Boolean(
+    matchesData &&
+    !isPendingResponse(matchesData) &&
+    matchesData.matchState === 'profile_incomplete'
+  );
   
   // Clear generation flag when backend returns non-pending data (generation complete)
   useEffect(() => {
@@ -700,8 +708,23 @@ export default function NetworkPage() {
                   )}
                   
 
+                  {needsProfileCompletion && !shouldShowGenerating && (
+                    <div className="flex-1 flex justify-center items-center" style={{ minHeight: '60vh' }}>
+                      <div className="flex flex-col items-center gap-3 max-w-md text-center bg-white/80 p-6 rounded-xl backdrop-blur-sm">
+                        <SynergyIcon className="h-10 w-10 text-muted-foreground" />
+                        <h3 className="text-xl font-semibold">Complete your profile to discover matches</h3>
+                        <p className="text-muted-foreground">
+                          Add your professional preferences and required profile details. We’ll start generating your matches as soon as your profile is ready.
+                        </p>
+                        <Button variant="default" onClick={() => setLocation('/profile')}>
+                          Complete Profile
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* No matches state - only show when not generating and truly have no matches */}
-                  {!shouldShowGenerating && !isMatchesError && !hasMatchesTimedOut && matchDisplayState.shouldShowEmpty && (
+                  {!needsProfileCompletion && !shouldShowGenerating && !isMatchesError && !hasMatchesTimedOut && matchDisplayState.shouldShowEmpty && (
                     <div className="flex-1 flex justify-center items-center" style={{ minHeight: '60vh' }}>
                       <div className="flex flex-col items-center gap-3 max-w-md text-center bg-white/80 p-6 rounded-xl backdrop-blur-sm">
                         <SynergyIcon className="h-10 w-10 text-muted-foreground" />

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  evaluateFirebaseProviderEvidence,
   FirebaseAdminUnavailableError,
   isSyntheticSmokeTest,
   readFirebaseAdminConfig,
@@ -47,6 +48,25 @@ describe('Firebase Admin configuration', () => {
     expect(new FirebaseAdminUnavailableError().message).toBe(
       'Firebase Admin authentication is unavailable',
     );
+  });
+
+  it('requires all provider evidence gates before allowing reconciliation', () => {
+    expect(evaluateFirebaseProviderEvidence('uid-1', 'Person@Example.com', {
+      uid: 'uid-1',
+      email: 'person@example.com',
+      emailVerified: true,
+    })).toEqual({
+      uidMatches: true,
+      emailMatches: true,
+      providerEmailVerified: true,
+      allGatesPass: true,
+    });
+
+    expect(evaluateFirebaseProviderEvidence('uid-1', 'person@example.com', {
+      uid: 'uid-2',
+      email: 'other@example.com',
+      emailVerified: false,
+    }).allGatesPass).toBe(false);
   });
 
   it('only enables the Firebase Admin bypass for the isolated CI smoke seam', () => {

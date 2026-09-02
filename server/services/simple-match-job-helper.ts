@@ -41,7 +41,7 @@ export class SimpleMatchJobHelper {
       }
 
       // Find all potential matching user IDs
-      const potentialMatchIds = await this.storage.findUsersMatchingWithUser(viewingUserId);
+       const potentialMatchIds = await this.storage.findPotentialMatchUserIds(viewingUserId);
       console.log(`[SimpleMatchJobHelper] Found ${potentialMatchIds.length} potential matches for user ${viewingUserId}`);
 
       if (potentialMatchIds.length === 0) {

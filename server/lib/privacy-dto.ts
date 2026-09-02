@@ -27,6 +27,11 @@ export type PublicProfileDto = {
   institution: string | null;
 };
 
+export type AuthorizedPeerProfileDto = PublicProfileDto & {
+  resumeUrl: string | null;
+  resumePreviewUrls: string[];
+};
+
 export type SelfUserDto = PublicProfileDto & {
   email: string;
   birthday: string | null;
@@ -110,6 +115,19 @@ export function toPublicProfileDto(user: User): PublicProfileDto {
     languages: user.languages ?? [],
     educationLevel: user.educationLevel,
     institution: user.institution,
+  };
+}
+
+/**
+ * Resume references are private media capabilities, not public profile data.
+ * Routes must call this only after verifying that the viewer owns the profile
+ * or has an accepted connection to an otherwise eligible peer.
+ */
+export function toAuthorizedPeerProfileDto(user: User): AuthorizedPeerProfileDto {
+  return {
+    ...toPublicProfileDto(user),
+    resumeUrl: user.resumeUrl,
+    resumePreviewUrls: user.resumePreviewUrls ?? [],
   };
 }
 
