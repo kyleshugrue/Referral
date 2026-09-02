@@ -1230,15 +1230,23 @@ export async function registerRoutes(app: Express): Promise<void> {
         return res.status(404).json({ message: "User not found" });
       }
       
-      // Delete the user
-      await storage.deleteUser(userId);
-      
-      // Logout the user
+      // Account removal is durable and asynchronous. Access is disabled and
+      // refresh credentials are revoked in the same transaction that queues
+      // the provider/media cleanup job.
+      const erasureJob = await storage.requestAccountErasure(userId);
+      void import("./services/account-erasure")
+        .then(({ processAccountErasureJobs }) => processAccountErasureJobs(1))
+        .catch((error) => logger.error('Account-erasure worker start failed', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
+        }));
+
       req.logout(function(err) {
         if (err) {
           logger.error('Logout error after user deletion:', err);
         }
-        res.sendStatus(200);
+        res.status(202).json({
+          status: erasureJob.status === 'completed' ? 'completed' : 'pending',
+        });
       });
     } catch (error) {
       logger.error('Delete user error:', error);

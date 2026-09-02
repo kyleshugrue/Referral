@@ -121,8 +121,28 @@ export const users = pgTable("users", {
   // Initial match job queueing tracking (prevents duplicate job creation)
   initialMatchJobsQueued: boolean("initial_match_jobs_queued").notNull().default(false),
   initialMatchJobsQueuedAt: timestamp("initial_match_jobs_queued_at", { withTimezone: true, mode: "string" }),
+  accountStatus: text("account_status").notNull().default("active"),
+  deletionRequestedAt: timestamp("deletion_requested_at", { withTimezone: true, mode: "string" }),
+  deletionCompletedAt: timestamp("deletion_completed_at", { withTimezone: true, mode: "string" }),
 }, (table) => ({
   firebaseUidIdx: index("firebase_uid_idx").on(table.firebaseUid),
+}));
+
+// Durable account-erasure state. userId intentionally has no foreign key so
+// the journal can survive a future archival/deletion policy change.
+export const accountErasureJobs = pgTable("account_erasure_jobs", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  status: text("status").notNull().default("pending"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
+  lastErrorCode: text("last_error_code"),
+  requestedAt: timestamp("requested_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
+  startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
+  completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+}, (table) => ({
+  userIdUniqueIdx: uniqueIndex("account_erasure_jobs_user_id_idx").on(table.userId),
+  statusAttemptIdx: index("account_erasure_jobs_status_attempt_idx").on(table.status, table.nextAttemptAt),
 }));
 
 // Immutable profile snapshots for rollback-proof job processing
@@ -793,3 +813,4 @@ export type FcmToken = typeof fcmTokens.$inferSelect;
 export type CallbackNotification = typeof callbackNotificationQueue.$inferSelect;
 export type RefreshToken = typeof refreshTokens.$inferSelect;
 export type RefreshTokenReuseEvent = typeof refreshTokenReuseEvents.$inferSelect;
+export type AccountErasureJob = typeof accountErasureJobs.$inferSelect;

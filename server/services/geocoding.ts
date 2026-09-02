@@ -12,7 +12,16 @@ interface Coordinates {
 }
 
 class GeocodingService {
-  private cache = new Map<string, Coordinates>();
+  private readonly cache = new Map<string, { value: Coordinates | null; expiresAt: number }>();
+  private readonly inFlight = new Map<string, Promise<Coordinates | null>>();
+  private providerFailures = 0;
+  private providerOpenUntil = 0;
+  private readonly cacheTtlMs = 15 * 60_000;
+  private readonly negativeCacheTtlMs = 60_000;
+  private readonly maxCacheEntries = 1000;
+  private readonly providerTimeoutMs = 5000;
+  private readonly circuitFailureThreshold = 5;
+  private readonly circuitOpenMs = 30_000;
 
   /**
    * Convert a city name to coordinates using optimal geocoding strategy
@@ -21,66 +30,105 @@ class GeocodingService {
    * 3. Fall back to Google Geocoding API if needed
    */
   async geocodeLocation(location: string): Promise<Coordinates | null> {
-    if (!location?.trim()) return null;
+    if (!location?.trim() || location.trim().length > 200) return null;
 
     const normalizedLocation = location.trim().toLowerCase();
-    
-    // Check cache first
-    if (this.cache.has(normalizedLocation)) {
-      return this.cache.get(normalizedLocation)!;
+    const cached = this.cache.get(normalizedLocation);
+    if (cached) {
+      if (cached.expiresAt > Date.now()) return cached.value;
+      this.cache.delete(normalizedLocation);
     }
 
+    const pending = this.inFlight.get(normalizedLocation);
+    if (pending) return pending;
+
+    const operation = this.geocodeLocationUncached(location, normalizedLocation);
+    this.inFlight.set(normalizedLocation, operation);
+    try {
+      return await operation;
+    } finally {
+      this.inFlight.delete(normalizedLocation);
+    }
+  }
+
+  private async geocodeLocationUncached(location: string, normalizedLocation: string): Promise<Coordinates | null> {
     // Try ZIP code approximation first (massive cost savings)
     try {
       const zipCoordinates = await zipCodeGeocoder.geocodeByZip(location);
-      if (zipCoordinates) {
-        // Cache the ZIP-based result
-        this.cache.set(normalizedLocation, zipCoordinates);
-        console.log(`[GeocodingService] ZIP approximation for ${location}: ${zipCoordinates.lat}, ${zipCoordinates.lng} (API call saved)`);
+      if (zipCoordinates && this.isValidCoordinates(zipCoordinates)) {
+        this.setCache(normalizedLocation, zipCoordinates);
         return zipCoordinates;
       }
     } catch (error) {
-      console.warn(`[GeocodingService] ZIP code approximation failed for ${location}:`, error);
+      console.warn('[GeocodingService] ZIP approximation failed', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
     }
 
-    // Fall back to Google Geocoding API for non-ZIP locations
+    const fallback = this.getFallbackCoordinates(location);
+    const apiKey = process.env.VITE_GOOGLE_MAPS_API_KEY;
+    if (!apiKey || Date.now() < this.providerOpenUntil) {
+      this.setCache(normalizedLocation, fallback);
+      return fallback;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.providerTimeoutMs);
     try {
-      const apiKey = process.env.VITE_GOOGLE_MAPS_API_KEY;
-      if (!apiKey) {
-        console.warn('[GeocodingService] Google Maps API key not found, using fallback coordinates');
-        return this.getFallbackCoordinates(location);
-      }
-
       const encodedLocation = encodeURIComponent(location);
-      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodedLocation}&key=${apiKey}`;
-      
-      console.log(`[GeocodingService] Using Google API for ${location} (ZIP not found)`);
-      const response = await fetch(url);
-      const data = await response.json() as {
-        status: string;
-        results: Array<{ geometry: { location: { lat: number; lng: number } } }>;
+      const response = await fetch(
+        `https://maps.googleapis.com/maps/api/geocode/json?address=${encodedLocation}&key=${apiKey}`,
+        { signal: controller.signal },
+      );
+      const contentLength = Number(response.headers.get('content-length') ?? 0);
+      if (contentLength > 64 * 1024) throw new Error('Geocoder response too large');
+      const body = await response.text();
+      if (body.length > 64 * 1024) throw new Error('Geocoder response too large');
+      const data = JSON.parse(body) as {
+        status?: string;
+        results?: Array<{ geometry?: { location?: { lat?: number; lng?: number } } }>;
       };
-
-      if (data.status === 'OK' && data.results.length > 0) {
-        const result = data.results[0];
-        const coordinates = {
-          lat: result.geometry.location.lat,
-          lng: result.geometry.location.lng
-        };
-        
-        // Cache the result
-        this.cache.set(normalizedLocation, coordinates);
-        console.log(`[GeocodingService] Google geocoded ${location} to ${coordinates.lat}, ${coordinates.lng}`);
-        
-        return coordinates;
-      } else {
-        console.warn(`[GeocodingService] Failed to geocode ${location}: ${data.status}`);
-        return this.getFallbackCoordinates(location);
+      const providerCoordinates = data.results?.[0]?.geometry?.location;
+      if (response.ok && data.status === 'OK' && providerCoordinates && this.isValidCoordinates(providerCoordinates)) {
+        this.providerFailures = 0;
+        this.setCache(normalizedLocation, providerCoordinates);
+        return providerCoordinates;
       }
+      throw new Error(`Geocoder returned ${data.status || response.status}`);
     } catch (error) {
-      console.error(`[GeocodingService] Error geocoding ${location}:`, error);
-      return this.getFallbackCoordinates(location);
+      this.providerFailures++;
+      if (this.providerFailures >= this.circuitFailureThreshold) {
+        this.providerOpenUntil = Date.now() + this.circuitOpenMs;
+      }
+      console.warn('[GeocodingService] Provider request failed', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+        circuitOpen: Date.now() < this.providerOpenUntil,
+      });
+      this.setCache(normalizedLocation, fallback);
+      return fallback;
+    } finally {
+      clearTimeout(timeout);
     }
+  }
+
+  private setCache(key: string, value: Coordinates | null): void {
+    if (this.cache.size >= this.maxCacheEntries) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey) this.cache.delete(oldestKey);
+    }
+    this.cache.set(key, {
+      value,
+      expiresAt: Date.now() + (value ? this.cacheTtlMs : this.negativeCacheTtlMs),
+    });
+  }
+
+  private isValidCoordinates(value: Partial<Coordinates>): value is Coordinates {
+    return Number.isFinite(value.lat) &&
+      Number.isFinite(value.lng) &&
+      value.lat! >= -90 &&
+      value.lat! <= 90 &&
+      value.lng! >= -180 &&
+      value.lng! <= 180;
   }
 
   /**
@@ -118,7 +166,7 @@ class GeocodingService {
     const coord2 = await this.geocodeLocation(location2);
     
     if (!coord1 || !coord2) {
-      console.warn(`[GeocodingService] Could not geocode locations: ${location1}, ${location2}`);
+      console.warn('[GeocodingService] Could not geocode one or more locations');
       // Fall back to exact string matching if geocoding fails
       return location1.toLowerCase().trim() === location2.toLowerCase().trim();
     }
@@ -391,13 +439,11 @@ class GeocodingService {
     const coords = fallbackCoordinates[normalizedLocation];
     
     if (coords) {
-      console.log(`[GeocodingService] Using fallback coordinates for ${location}: ${coords.lat}, ${coords.lng}`);
-      // Cache the fallback result
-      this.cache.set(normalizedLocation, coords);
+      this.setCache(normalizedLocation, coords);
       return coords;
     }
     
-    console.warn(`[GeocodingService] No fallback coordinates found for ${location}`);
+    console.warn('[GeocodingService] No fallback coordinates found');
     return null;
   }
 }

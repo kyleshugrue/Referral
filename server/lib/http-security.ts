@@ -1,5 +1,36 @@
 import type { Request, Response, NextFunction } from 'express';
 
+function isTrustedProxyAddress(address: string): boolean {
+  const normalized = address.trim().replace(/^::ffff:/i, '');
+  if (normalized === '::1' || normalized.startsWith('127.')) return true;
+  if (normalized.startsWith('10.') || normalized.startsWith('192.168.')) return true;
+  const octets = normalized.split('.').map(Number);
+  if (octets.length === 4 && octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) return true;
+  return /^(fc|fd|fe8|fe9|fea|feb)/i.test(normalized);
+}
+
+/**
+ * Resolve the client address for HTTP upgrades. Express's trust-proxy
+ * configuration does not run for ws verifyClient, so apply the same
+ * right-to-left private-hop rule explicitly.
+ */
+export function getTrustedClientIp(
+  headers: Record<string, string | string[] | undefined>,
+  remoteAddress: string | undefined,
+): string {
+  const socketAddress = remoteAddress?.trim() || 'unknown';
+  if (!isTrustedProxyAddress(socketAddress)) return socketAddress;
+  const forwarded = headers['x-forwarded-for'] || headers['X-Forwarded-For'];
+  const chain = (Array.isArray(forwarded) ? forwarded.join(',') : forwarded || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  for (let index = chain.length - 1; index >= 0; index--) {
+    if (!isTrustedProxyAddress(chain[index])) return chain[index];
+  }
+  return chain[0] || socketAddress;
+}
+
 /**
  * CORS origin policy.
  *

@@ -57,6 +57,13 @@
       "when": 1788283912173,
       "tag": "0007_delivery_obligations",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788340000000,
+      "tag": "0008_account_erasure",
+      "breakpoints": true
     }
   ]
 }

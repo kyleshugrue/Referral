@@ -32,6 +32,10 @@
     {
       "file": "0007_delivery_obligations.sql",
       "sha256": "a9bdb9e1658572094d95a7ce0e797c981847c87dc931d7b5325262e7567a90a4"
+    },
+    {
+      "file": "0008_account_erasure.sql",
+      "sha256": "a4b58b09017c25dc1c0fd9274c7c63d5af5a9c30c2b90b059a783c7957082ea3"
     }
   ]
 }

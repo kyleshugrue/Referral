@@ -142,6 +142,10 @@ export const auth = {
     if (!firebaseAuth) throw new FirebaseAdminUnavailableError();
     return firebaseAuth.getUser(uid);
   },
+  deleteUser: async (uid: string) => {
+    if (!firebaseAuth) throw new FirebaseAdminUnavailableError();
+    return firebaseAuth.deleteUser(uid);
+  },
 };
 
 export { firebaseStorage };

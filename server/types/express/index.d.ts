@@ -13,6 +13,7 @@ declare global {
     interface User {
       id: number;
       registrationCompleted?: boolean;
+      accountStatus?: string;
     }
   }
 }

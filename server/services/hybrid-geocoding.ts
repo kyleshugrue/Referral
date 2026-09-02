@@ -5,6 +5,7 @@
  */
 
 import { zipCodeGeocoder } from './zip-code-geocoder';
+import { geocodingService } from './geocoding';
 
 // Platform detection types
 type PlatformType = 'ios-native' | 'web';
@@ -27,6 +28,7 @@ interface ClientLocationData {
 
 class HybridGeocodingService {
   private cache = new Map<string, Coordinates>();
+  private readonly maxCacheEntries = 1000;
 
   /**
    * Extract platform information from request headers
@@ -34,8 +36,6 @@ class HybridGeocodingService {
   private getPlatformFromHeaders(headers: Record<string, string | string[] | undefined>): PlatformType {
     const platformHeader = headers['x-platform'] || headers['X-Platform'];
     const platform = Array.isArray(platformHeader) ? platformHeader[0] : platformHeader;
-    
-    console.log('[HybridGeocodingService] Request platform:', platform);
     
     return platform === 'ios-native' ? 'ios-native' : 'web';
   }
@@ -49,8 +49,6 @@ class HybridGeocodingService {
     headers: Record<string, string | string[] | undefined>
   ): Promise<Coordinates | null> {
     const platform = this.getPlatformFromHeaders(headers);
-    
-    console.log(`[HybridGeocodingService] Geocoding ${location} for platform: ${platform}`);
     
     if (platform === 'ios-native') {
       // For iOS native, we expect coordinates to be provided client-side via Apple MapKit
@@ -72,7 +70,6 @@ class HybridGeocodingService {
     
     // Check cache first
     if (this.cache.has(normalizedLocation)) {
-      console.log('[HybridGeocodingService] iOS Native - Cache hit for:', location);
       return this.cache.get(normalizedLocation)!;
     }
 
@@ -80,16 +77,16 @@ class HybridGeocodingService {
     try {
       const zipCoordinates = await zipCodeGeocoder.geocodeByZip(location);
       if (zipCoordinates) {
-        this.cache.set(normalizedLocation, zipCoordinates);
-        console.log(`[HybridGeocodingService] iOS Native - ZIP approximation for ${location}: ${zipCoordinates.lat}, ${zipCoordinates.lng} (Google API avoided)`);
+        this.setCached(normalizedLocation, zipCoordinates);
         return zipCoordinates;
       }
     } catch (error) {
-      console.warn(`[HybridGeocodingService] iOS Native - ZIP code approximation failed for ${location}:`, error);
+      console.warn('[HybridGeocodingService] iOS ZIP approximation failed', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
     }
 
     // Fall back to hardcoded coordinates only (never Google API)
-    console.log(`[HybridGeocodingService] iOS Native - Using fallback coordinates for ${location} (Google API avoided)`);
     return this.getFallbackCoordinates(location);
   }
 
@@ -101,22 +98,18 @@ class HybridGeocodingService {
     locationData: ClientLocationData, 
     headers?: Record<string, string | string[] | undefined>
   ): Promise<Coordinates | null> {
-    console.log('[HybridGeocodingService] Processing client location:', locationData);
-
     // If coordinates are already provided (from iOS Apple MapKit), use them
     if (locationData.coordinates) {
-      console.log('[HybridGeocodingService] Using provided coordinates from client:', locationData.coordinates);
-      
       // Cache the coordinates for future use
       const normalizedLocation = locationData.location.trim().toLowerCase();
-      this.cache.set(normalizedLocation, locationData.coordinates);
+      this.setCached(normalizedLocation, locationData.coordinates);
       
       return locationData.coordinates;
     }
 
+    if (!locationData.location?.trim() || locationData.location.length > 200) return null;
+
     // Otherwise, geocode the location string using platform-aware service
-    console.log('[HybridGeocodingService] Geocoding location string:', locationData.location);
-    
     if (headers) {
       return await this.geocodeLocationWithPlatform(locationData.location, headers);
     } else {
@@ -132,67 +125,7 @@ class HybridGeocodingService {
    * 3. Fall back to Google Geocoding API if needed
    */
   async geocodeLocation(location: string): Promise<Coordinates | null> {
-    if (!location?.trim()) return null;
-
-    const normalizedLocation = location.trim().toLowerCase();
-    
-    // Check cache first
-    if (this.cache.has(normalizedLocation)) {
-      console.log('[HybridGeocodingService] Cache hit for:', location);
-      return this.cache.get(normalizedLocation)!;
-    }
-
-    // Try ZIP code approximation first (massive cost savings)
-    try {
-      const zipCoordinates = await zipCodeGeocoder.geocodeByZip(location);
-      if (zipCoordinates) {
-        // Cache the ZIP-based result
-        this.cache.set(normalizedLocation, zipCoordinates);
-        console.log(`[HybridGeocodingService] ZIP approximation for ${location}: ${zipCoordinates.lat}, ${zipCoordinates.lng} (API call saved)`);
-        return zipCoordinates;
-      }
-    } catch (error) {
-      console.warn(`[HybridGeocodingService] ZIP code approximation failed for ${location}:`, error);
-    }
-
-    // Fall back to Google Geocoding API for non-ZIP locations
-    try {
-      const apiKey = process.env.VITE_GOOGLE_MAPS_API_KEY;
-      if (!apiKey) {
-        console.warn('[HybridGeocodingService] Google Maps API key not found, using fallback coordinates');
-        return this.getFallbackCoordinates(location);
-      }
-
-      const encodedLocation = encodeURIComponent(location);
-      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodedLocation}&key=${apiKey}`;
-      
-      console.log(`[HybridGeocodingService] Using Google API for ${location} (ZIP not found)`);
-      const response = await fetch(url);
-      const data = await response.json() as {
-        status: string;
-        results: Array<{ geometry: { location: { lat: number; lng: number } } }>;
-      };
-
-      if (data.status === 'OK' && data.results.length > 0) {
-        const result = data.results[0];
-        const coordinates = {
-          lat: result.geometry.location.lat,
-          lng: result.geometry.location.lng
-        };
-        
-        // Cache the result
-        this.cache.set(normalizedLocation, coordinates);
-        console.log(`[HybridGeocodingService] Google geocoded ${location} to ${coordinates.lat}, ${coordinates.lng}`);
-        
-        return coordinates;
-      } else {
-        console.warn(`[HybridGeocodingService] Failed to geocode ${location}: ${data.status}`);
-        return this.getFallbackCoordinates(location);
-      }
-    } catch (error) {
-      console.error(`[HybridGeocodingService] Error geocoding ${location}:`, error);
-      return this.getFallbackCoordinates(location);
-    }
+    return geocodingService.geocodeLocation(location);
   }
 
   /**
@@ -204,8 +137,6 @@ class HybridGeocodingService {
     locations: string[], 
     headers?: Record<string, string | string[] | undefined>
   ): Promise<Map<string, Coordinates | null>> {
-    console.log('[HybridGeocodingService] OPTIMIZED batch geocoding', locations.length, 'locations');
-    
     const results = new Map<string, Coordinates | null>();
     const uniqueLocations = [...new Set(locations.filter(loc => loc?.trim()))];
     
@@ -224,22 +155,20 @@ class HybridGeocodingService {
       }
     }
     
-    console.log(`[HybridGeocodingService] Cache optimization: ${cachedLocations.length} cached, ${uncachedLocations.length} need geocoding`);
-    
-    // Process only uncached locations in parallel using platform-aware methods (major performance gain)
+    // Process only uncached locations in bounded chunks using platform-aware
+    // methods; the shared geocoder also deduplicates concurrent misses.
     if (uncachedLocations.length > 0) {
-      const promises = uncachedLocations.map(async (location) => {
-        // Use platform-aware geocoding if headers are provided
-        const coordinates = headers 
-          ? await this.geocodeLocationWithPlatform(location, headers)
-          : await this.geocodeLocation(location);
-        results.set(location, coordinates);
-      });
-      
-      await Promise.all(promises);
+      for (let index = 0; index < uncachedLocations.length; index += 4) {
+        const chunk = uncachedLocations.slice(index, index + 4);
+        await Promise.all(chunk.map(async (location) => {
+          const coordinates = headers
+            ? await this.geocodeLocationWithPlatform(location, headers)
+            : await this.geocodeLocation(location);
+          results.set(location, coordinates);
+        }));
+      }
     }
     
-    console.log('[HybridGeocodingService] OPTIMIZED batch geocoding completed:', results.size, 'results,', (cachedLocations.length / uniqueLocations.length * 100).toFixed(1), '% cache hit rate');
     return results;
   }
 
@@ -285,7 +214,7 @@ class HybridGeocodingService {
       : await this.processClientLocation(location2, headers);
     
     if (!coord1 || !coord2) {
-      console.warn(`[HybridGeocodingService] Could not geocode locations:`, location1, location2);
+      console.warn('[HybridGeocodingService] Could not geocode one or more locations');
       
       // Fall back to exact string matching if geocoding fails
       const loc1Str = typeof location1 === 'string' ? location1 : location1.location;
@@ -296,7 +225,6 @@ class HybridGeocodingService {
     const distance = this.calculateDistance(coord1, coord2);
     const withinRadius = distance <= radiusMiles;
     
-    console.log(`[HybridGeocodingService] Distance check: ${distance} miles <= ${radiusMiles} miles = ${withinRadius}`);
     return withinRadius;
   }
 
@@ -406,13 +334,12 @@ class HybridGeocodingService {
     const fallback = fallbacks[normalizedLocation];
     
     if (fallback) {
-      console.log(`[HybridGeocodingService] Using fallback coordinates for ${location}: ${fallback.lat}, ${fallback.lng}`);
       // Cache the fallback result
-      this.cache.set(normalizedLocation, fallback);
+          this.setCached(normalizedLocation, fallback);
       return fallback;
     }
     
-    console.warn(`[HybridGeocodingService] No fallback coordinates available for ${location}`);
+    console.warn('[HybridGeocodingService] No fallback coordinates available');
     return null;
   }
 
@@ -432,6 +359,14 @@ class HybridGeocodingService {
   clearCache() {
     this.cache.clear();
     console.log('[HybridGeocodingService] Cache cleared');
+  }
+
+  private setCached(key: string, value: Coordinates): void {
+    if (this.cache.size >= this.maxCacheEntries) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey) this.cache.delete(oldestKey);
+    }
+    this.cache.set(key, value);
   }
 }
 

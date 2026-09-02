@@ -5,7 +5,9 @@ import { logger } from './lib/logger';
 interface ConnectedClient {
   ws: WebSocket;
   userId: number;
-  lastPing: number;
+  lastPong: number;
+  pingSentAt: number | null;
+  pingTimeout?: NodeJS.Timeout;
   reconnectAttempts: number;
 }
 

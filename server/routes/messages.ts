@@ -6,6 +6,11 @@ import { validateDirectMessageInput } from '../lib/message-validation';
 import { logger } from '../lib/logger';
 import { toMessageDto } from "../lib/privacy-dto";
 import { parseStrictPositiveInteger } from "../lib/request-validation";
+import {
+  decodeMessageCursor,
+  DEFAULT_MESSAGE_PAGE_SIZE,
+  MAX_MESSAGE_PAGE_SIZE,
+} from "../lib/message-pagination";
 
 const router = Router();
 
@@ -35,10 +40,31 @@ router.get("/:userId", async (req, res) => {
       return res.status(400).json({ message: "Invalid user ID" });
     }
 
-    // Get messages between users using the storage interface
-    const messagesList = await storage.getMessages(currentUserId, otherUserId);
+    const rawLimit = Number(req.query.limit ?? DEFAULT_MESSAGE_PAGE_SIZE);
+    if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > MAX_MESSAGE_PAGE_SIZE) {
+      return res.status(400).json({ message: `limit must be an integer between 1 and ${MAX_MESSAGE_PAGE_SIZE}` });
+    }
+    const cursor = req.query.cursor ? decodeMessageCursor(req.query.cursor) : undefined;
+    if (req.query.cursor && !cursor) {
+      return res.status(400).json({ message: "Invalid message cursor" });
+    }
 
-    res.json(messagesList.map(toMessageDto));
+    const page = await storage.getMessagesPage(currentUserId, otherUserId, {
+      limit: rawLimit,
+      cursor,
+    });
+
+    const serializedMessages = page.items.map(toMessageDto);
+    // Preserve the legacy array response for existing web and native clients.
+    // Callers that opt into cursor pagination receive metadata alongside the
+    // bounded page.
+    if (!req.query.cursor && req.query.limit === undefined) {
+      return res.json(serializedMessages);
+    }
+    return res.json({
+      messages: serializedMessages,
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+    });
 
   } catch (error) {
     logger.error("Error fetching messages:", error);

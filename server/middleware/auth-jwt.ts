@@ -121,7 +121,7 @@ export async function requireAuthJWT(
         try {
           const user = await storage.getUser(payload.userId);
           
-          if (user) {
+          if (user && (!user.accountStatus || user.accountStatus === 'active')) {
             // SUCCESS: JWT authentication successful
             // Attach user to request object for downstream handlers
             req.user = user;
@@ -136,6 +136,8 @@ export async function requireAuthJWT(
             
              requireTrustedOriginForSessionMutation(req, res, next);
              return;
+          } else if (user) {
+            logger.warn(`[Auth:JWT] Account is not active for user ${user.id}`);
           } else {
             // JWT is valid but user not found in database
             logger.warn(

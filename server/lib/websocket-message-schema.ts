@@ -23,6 +23,8 @@ export const messageSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('loadMessages'),
     partnerId: positiveId,
+    limit: z.number().int().positive().max(100).optional(),
+    cursor: z.string().min(1).max(256).optional(),
   }).strict(),
   z.object({
     type: z.literal('test'),

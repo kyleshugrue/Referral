@@ -16,7 +16,9 @@ import {
   decideWebSocketVerification,
   MAX_WEBSOCKET_PAYLOAD_BYTES,
 } from './lib/websocket-security';
-import { isOriginAllowed } from './lib/http-security';
+import { getTrustedClientIp, isOriginAllowed } from './lib/http-security';
+import { decodeMessageCursor, DEFAULT_MESSAGE_PAGE_SIZE } from './lib/message-pagination';
+import { toMessageDto } from './lib/privacy-dto';
 
 interface SessionRequest extends IncomingMessage {
   session?: Session & { userId?: number };
@@ -26,7 +28,9 @@ interface SessionRequest extends IncomingMessage {
 interface ConnectedClient {
   ws: WebSocket;
   userId: number;
-  lastPing: number;
+  lastPong: number;
+  pingSentAt: number | null;
+  pingTimeout?: NodeJS.Timeout;
   reconnectAttempts: number;
   firstConnectTime: number;
   platform?: string; // Track web vs native platform
@@ -68,7 +72,7 @@ export function setupWebSocketServer(server: HTTPServer) {
     maxPayload: MAX_WEBSOCKET_PAYLOAD_BYTES,
     verifyClient: async (info, callback) => {
       try {
-        const sourceAddress = info.req.socket.remoteAddress || 'unknown';
+        const sourceAddress = getTrustedClientIp(info.req.headers, info.req.socket.remoteAddress);
         if (!websocketAdmissionGuard.allow(sourceAddress)) {
           callback(false, 429, 'Too many WebSocket connection attempts');
           return;
@@ -141,7 +145,7 @@ export function setupWebSocketServer(server: HTTPServer) {
           logSecurityEvent('warn', 'WebSocket - Missing Auth', {
             action: 'websocket_auth_missing',
             userId: 'unknown',
-            ip: info.req.socket.remoteAddress || 'unknown',
+            ip: getTrustedClientIp(info.req.headers, info.req.socket.remoteAddress),
             userAgent: info.req.headers['user-agent'] || 'unknown',
             platform: 'unknown'
           });
@@ -167,6 +171,17 @@ export function setupWebSocketServer(server: HTTPServer) {
           clearTimeout(verificationTimeout!);
         }
         const verificationDecision = decideWebSocketVerification(user, verificationError);
+        if (
+          verificationDecision.allowed &&
+          typeof user === 'object' &&
+          user !== null &&
+          'accountStatus' in user &&
+          (user as { accountStatus?: string }).accountStatus &&
+          (user as { accountStatus: string }).accountStatus !== 'active'
+        ) {
+          callback(false, 403, 'Account is not active');
+          return;
+        }
         if (!verificationDecision.allowed) {
           if (verificationError) {
             logger.error('[WebSocket] User verification unavailable:', verificationError);
@@ -190,7 +205,7 @@ export function setupWebSocketServer(server: HTTPServer) {
   const cleanupInterval = setInterval(() => {
     const now = Date.now();
     for (const [userId, client] of connectedClients.entries()) {
-      if (now - client.lastPing > PING_INTERVAL + PING_TIMEOUT) {
+        if (now - client.lastPong > PING_INTERVAL + PING_TIMEOUT) {
         logger.debug(`[WebSocket] Cleaning up stale connection for user ${userId}`);
         try {
           client.ws.terminate();
@@ -287,7 +302,8 @@ export function setupWebSocketServer(server: HTTPServer) {
       connectedClients.set(userId, {
         ws,
         userId,
-        lastPing: now,
+        lastPong: now,
+        pingSentAt: null,
         reconnectAttempts: newReconnectAttempts,
         firstConnectTime: existingClient?.firstConnectTime || now,
         platform
@@ -299,7 +315,7 @@ export function setupWebSocketServer(server: HTTPServer) {
       logSecurityEvent('info', 'WebSocket - Connected', {
         action: 'websocket_connected',
         userId: userId,
-        ip: request.socket.remoteAddress || 'unknown',
+        ip: getTrustedClientIp(request.headers, request.socket.remoteAddress),
         userAgent: request.headers['user-agent'] || 'unknown',
         platform: platform
       });
@@ -315,11 +331,21 @@ export function setupWebSocketServer(server: HTTPServer) {
       // Setup ping/pong for connection monitoring
       pingInterval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
-          ws.ping();
           const client = connectedClients.get(userId!);
-          if (client) {
-            client.lastPing = Date.now();
+          if (!client || client.pingSentAt !== null) {
+            return;
           }
+          const pingSentAt = Date.now();
+          client.pingSentAt = pingSentAt;
+          ws.ping(String(pingSentAt));
+          client.pingTimeout = setTimeout(() => {
+            const current = connectedClients.get(userId!);
+            if (current?.ws === ws && current.pingSentAt === pingSentAt) {
+              logger.debug(`[WebSocket] Pong timeout; terminating stale connection for user ${userId}`);
+              current.pingTimeout = undefined;
+              ws.terminate();
+            }
+          }, PING_TIMEOUT);
         }
       }, PING_INTERVAL);
 
@@ -361,10 +387,12 @@ export function setupWebSocketServer(server: HTTPServer) {
 
             case 'loadMessages':
               try {
-                const { partnerId } = validatedMessage;
+                const { partnerId, limit = DEFAULT_MESSAGE_PAGE_SIZE, cursor: rawCursor } = validatedMessage;
                 if (!partnerId) {
                   throw new Error('Invalid or missing partner ID');
                 }
+                const cursor = rawCursor ? decodeMessageCursor(rawCursor) : undefined;
+                if (rawCursor && !cursor) throw new Error('Invalid message cursor');
 
                 // First check if the users are connected
                 try {
@@ -386,29 +414,13 @@ export function setupWebSocketServer(server: HTTPServer) {
                 }
                 
                 // Get messages - include conversation ID in response for client-side reference
-                const messages = await storage.getMessages(userId!, partnerId);
-                logger.debug(`[WebSocket] Loaded ${messages.length} messages for user ${userId} with partner ${partnerId}, conversation ID: ${conversation.id}`);
+                const page = await storage.getMessagesPage(userId!, partnerId, { limit, cursor });
+                logger.debug(`[WebSocket] Loaded ${page.items.length} messages for user ${userId} with partner ${partnerId}, conversation ID: ${conversation.id}`);
                 ws.send(JSON.stringify({
                   type: 'messagesLoaded',
-                  messages: messages.map((message) => ({
-                    id: message.id,
-                    conversationId: message.conversationId,
-                    senderId: message.senderId,
-                    receiverId: message.receiverId,
-                    content: message.content,
-                    createdAt: message.createdAt,
-                    sender: {
-                      id: message.sender.id,
-                      fullName: message.sender.fullName,
-                      photo: message.sender.photo,
-                    },
-                    receiver: {
-                      id: message.receiver.id,
-                      fullName: message.receiver.fullName,
-                      photo: message.receiver.photo,
-                    },
-                  })),
-                  conversationId: conversation.id
+                  messages: page.items.map(toMessageDto),
+                  conversationId: conversation.id,
+                  ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
                 }));
               } catch (error) {
                 if (error instanceof Error && error.message === 'Users are not connected') {
@@ -541,6 +553,11 @@ export function setupWebSocketServer(server: HTTPServer) {
         if (userId) {
           const client = connectedClients.get(userId);
           if (client) {
+            if (client.pingTimeout) {
+              clearTimeout(client.pingTimeout);
+              client.pingTimeout = undefined;
+            }
+            client.pingSentAt = null;
             // Only remove client if this is the current WebSocket instance
             if (client.ws === ws) {
               // For clean disconnections (code 1000) or if max attempts reached, remove client
@@ -558,10 +575,19 @@ export function setupWebSocketServer(server: HTTPServer) {
       });
 
       // Handle pong responses
-      ws.on('pong', () => {
+      ws.on('pong', (payload) => {
         const client = connectedClients.get(userId!);
-        if (client) {
-          client.lastPing = Date.now();
+        if (client?.ws === ws && client.pingSentAt !== null) {
+          const expectedPayload = String(client.pingSentAt);
+          if (payload.toString() !== expectedPayload) {
+            return;
+          }
+          if (client.pingTimeout) {
+            clearTimeout(client.pingTimeout);
+            client.pingTimeout = undefined;
+          }
+          client.lastPong = Date.now();
+          client.pingSentAt = null;
         }
       });
 
@@ -582,6 +608,7 @@ export function setupWebSocketServer(server: HTTPServer) {
     clearInterval(cleanupInterval);
     for (const client of connectedClients.values()) {
       try {
+        if (client.pingTimeout) clearTimeout(client.pingTimeout);
         client.ws.close(1000, 'Server shutting down');
       } catch (error) {
         logger.error('[WebSocket] Error during shutdown cleanup:', error);

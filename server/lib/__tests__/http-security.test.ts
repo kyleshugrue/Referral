@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isOriginAllowed, getAllowedOrigins, securityHeaders } from '../http-security';
+import { isOriginAllowed, getAllowedOrigins, securityHeaders, getTrustedClientIp } from '../http-security';
 
 const PROD = true;
 const DEV = false;
@@ -50,6 +50,29 @@ describe('isOriginAllowed (development)', () => {
     expect(isOriginAllowed('https://evil.example.com', DEV)).toBe(false);
     expect(isOriginAllowed('https://replit.dev.evil.com', DEV)).toBe(false);
     expect(isOriginAllowed('not-a-url', DEV)).toBe(false);
+  });
+});
+
+describe('getTrustedClientIp', () => {
+  it('uses the first non-private address from a trusted proxy chain', () => {
+    expect(getTrustedClientIp(
+      { 'x-forwarded-for': '198.51.100.20, 10.0.0.4, 127.0.0.1' },
+      '127.0.0.1',
+    )).toBe('198.51.100.20');
+  });
+
+  it('ignores forged forwarding headers from an untrusted direct peer', () => {
+    expect(getTrustedClientIp(
+      { 'x-forwarded-for': '198.51.100.20, 10.0.0.4' },
+      '198.51.100.99',
+    )).toBe('198.51.100.99');
+  });
+
+  it('does not treat private addresses in a forwarded chain as the client', () => {
+    expect(getTrustedClientIp(
+      { 'x-forwarded-for': '10.0.0.2, 192.168.1.3' },
+      '::1',
+    )).toBe('10.0.0.2');
   });
 });
 

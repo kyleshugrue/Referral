@@ -9,10 +9,12 @@ import { requireAuthJWT } from "../auth";
 import { requireCompleteRegistration } from "../middleware/require-complete-registration";
 import { logger } from "../lib/logger";
 import { boundedString } from "../lib/request-validation";
+import { geocodingQuotaLimiter } from "../lib/geocoding-controls";
 
 const router = express.Router();
 router.use(requireAuthJWT);
 router.use(requireCompleteRegistration);
+router.use(geocodingQuotaLimiter);
 
 /**
  * POST /api/hybrid-locations/process
@@ -24,6 +26,20 @@ router.post("/process", async (req, res) => {
     
     if (!locationData || !boundedString(locationData.location, 200)) {
       return res.status(400).json({ error: "Location is required" });
+    }
+
+    if (
+      locationData.coordinates &&
+      (
+        !Number.isFinite(locationData.coordinates.lat) ||
+        !Number.isFinite(locationData.coordinates.lng) ||
+        locationData.coordinates.lat < -90 ||
+        locationData.coordinates.lat > 90 ||
+        locationData.coordinates.lng < -180 ||
+        locationData.coordinates.lng > 180
+      )
+    ) {
+      return res.status(400).json({ error: "Coordinates are invalid" });
     }
 
     logger.debug('[HybridLocations] Processing location', {
@@ -69,27 +85,30 @@ router.post("/batch-process", async (req, res) => {
 
     const results = new Map<string, unknown>();
     
-    // Process locations in parallel using platform-aware method
-    const promises = locations.map(async (locationData) => {
-      try {
-        const coordinates = await hybridGeocodingService.processClientLocation(locationData, req.headers);
-        results.set(locationData.location, {
-          success: true,
-          location: locationData.location,
-          coordinates,
-          source: locationData.source || 'unknown'
-        });
-      } catch (error) {
-        logger.error('[HybridLocations] Error processing location:', error);
-        results.set(locationData.location, {
-          success: false,
-          location: locationData.location,
-          error: 'Processing failed'
-        });
+    // Bound provider work even when a client submits the maximum batch.
+    for (let index = 0; index < locations.length; index += 4) {
+      const chunk = locations.slice(index, index + 4);
+      await Promise.all(chunk.map(async (locationData) => {
+        try {
+          const coordinates = await hybridGeocodingService.processClientLocation(locationData, req.headers);
+          results.set(locationData.location, {
+            success: Boolean(coordinates),
+            location: locationData.location,
+            coordinates,
+            source: locationData.source || 'unknown'
+          });
+        } catch (error) {
+          logger.error('[HybridLocations] Error processing location', {
+            errorClass: error instanceof Error ? error.name : 'UnknownError',
+          });
+          results.set(locationData.location, {
+            success: false,
+            location: locationData.location,
+            error: 'Processing failed'
+          });
+        }
+      }));
       }
-    });
-
-    await Promise.all(promises);
 
     res.json({
       success: true,

@@ -219,6 +219,28 @@ export class FirebaseStorageService {
     }
   }
 
+  async deleteOwnedMediaForUser(userId: number, firebaseUid?: string | null): Promise<void> {
+    if (!this.bucket) return;
+    // Uploads created by this service are namespaced by database user ID.
+    // Never enumerate an entire shared bucket during an erasure request.
+    const prefixes = [
+      `profile-pictures/user-${userId}-`,
+      `resumes/user-${userId}-`,
+      `resume-previews/resumes/user-${userId}-`,
+    ];
+    const listed = await Promise.all(prefixes.map((prefix) => this.bucket!.getFiles({ prefix })));
+    const filesToCheck = listed.flatMap(([files]) => files);
+    for (const file of filesToCheck) {
+      const [metadata] = await file.getMetadata();
+      const ownerId = metadata.metadata?.userId;
+      const ownerUid = metadata.metadata?.firebaseUid;
+      if (ownerId === String(userId) || (firebaseUid && ownerUid === firebaseUid)) {
+        await file.delete();
+      }
+    }
+    logger.info('[Firebase Storage] Deleted owned media for account-erasure job');
+  }
+
   // Extract filename from Firebase Storage URL for deletion
   extractFileName(url: string): string | null {
     try {

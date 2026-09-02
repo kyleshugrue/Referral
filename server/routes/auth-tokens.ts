@@ -5,8 +5,7 @@ import {
   generateRefreshToken, 
   hashRefreshToken,
   getRefreshTokenExpiry,
-  createDeviceInfo,
-  isRefreshTokenExpired
+  createDeviceInfo
 } from '../lib/jwt-service';
 import { requireAuthJWT } from '../auth';
 import { logger } from '../lib/logger';
@@ -62,116 +61,8 @@ router.post('/refresh', async (req, res) => {
     // Hash the incoming refresh token
     const hashedToken = hashRefreshToken(normalizedRefreshToken);
 
-    // Get token from database
-    const tokenRecord = await storage.getRefreshTokenByHash(hashedToken);
-
-    // Check if token exists
-    if (!tokenRecord) {
-      logSecurityEvent('error', 'Token Refresh - Token Not Found', {
-        action: 'possible_reuse',
-        userId: 'unknown',
-        deviceId: normalizedDeviceId,
-        ...extractRequestMetadata(req)
-      });
-      
-      // Log potential token reuse (security event)
-      try {
-        await storage.logRefreshTokenReuse({
-          userId: 0, // Unknown user since token doesn't exist
-          deviceId: normalizedDeviceId,
-          tokenHash: hashedToken,
-          detectedAt: new Date().toISOString(),
-          ipAddress: req.ip || 'unknown',
-          userAgent: req.headers['user-agent'] || 'unknown',
-          action: 'logged'
-        });
-      } catch (logError) {
-        logger.error('[Token Refresh] Failed to log token reuse', {
-          errorClass: logError instanceof Error ? logError.name : 'UnknownError',
-          operation: 'token_reuse_audit',
-        });
-      }
-
-      return res.status(401).json({ 
-        message: 'Invalid or expired refresh token' 
-      });
-    }
-
-    // Check if token is expired
-    if (isRefreshTokenExpired(tokenRecord.expiresAt)) {
-      logSecurityEvent('warn', 'Token Refresh - Token Expired', {
-        action: 'token_expired',
-        userId: tokenRecord.userId,
-        deviceId: normalizedDeviceId,
-        ...extractRequestMetadata(req),
-        details: { expiresAt: tokenRecord.expiresAt }
-      });
-
-      // Clean up expired token
-      await storage.deleteRefreshToken(hashedToken);
-
-      return res.status(401).json({ 
-        message: 'Refresh token has expired. Please log in again.' 
-      });
-    }
-
-    // Validate device ID matches
-    if (tokenRecord.deviceId !== normalizedDeviceId) {
-      logSecurityEvent('error', 'Token Refresh - Device Mismatch', {
-        action: 'device_mismatch',
-        userId: tokenRecord.userId,
-        deviceId: normalizedDeviceId,
-        ...extractRequestMetadata(req),
-        details: { expectedDevice: tokenRecord.deviceId, receivedDevice: normalizedDeviceId }
-      });
-
-      // Log suspicious activity
-      await storage.logRefreshTokenReuse({
-        userId: tokenRecord.userId,
-        deviceId: normalizedDeviceId,
-        tokenHash: hashedToken,
-        detectedAt: new Date().toISOString(),
-        ipAddress: req.ip || 'unknown',
-        userAgent: req.headers['user-agent'] || 'unknown',
-        action: 'logged'
-      });
-
-      return res.status(401).json({ 
-        message: 'Device ID mismatch' 
-      });
-    }
-
-    logger.debug('[Token Refresh] Token valid, getting user data');
-
-    // Get user from database
-    const user = await storage.getUser(tokenRecord.userId);
-
-    if (!user) {
-      logSecurityEvent('error', 'Token Refresh - User Not Found', {
-        action: 'user_not_found',
-        userId: tokenRecord.userId,
-        deviceId: normalizedDeviceId,
-        ...extractRequestMetadata(req)
-      });
-      await storage.deleteRefreshToken(hashedToken);
-      return res.status(401).json({ 
-        message: 'User not found' 
-      });
-    }
-
-    logger.debug('[Token Refresh] Rotating tokens for authenticated user');
-
-    // Delete the old refresh token (rotation step 1)
-    await storage.deleteRefreshToken(hashedToken);
-
-    // Generate new access token
-    const newAccessToken = generateAccessToken(user.id, user.email);
-
-    // Generate new refresh token (opaque)
     const newRefreshToken = generateRefreshToken();
     const newHashedToken = hashRefreshToken(newRefreshToken);
-
-    // Create device info
     const deviceInfo = createDeviceInfo(
       req.ip || 'unknown',
       req.headers['user-agent'],
@@ -179,30 +70,75 @@ router.post('/refresh', async (req, res) => {
       req.body.deviceModel,
       req.body.osVersion
     );
-
-    // Save new refresh token to database (rotation step 2)
-    // Database defaults will set createdAt and lastUsedAt to now()
-    await storage.createRefreshToken({
-      userId: user.id,
+    const rotation = await storage.rotateRefreshToken(hashedToken, normalizedDeviceId, {
+      userId: 0,
       tokenHash: newHashedToken,
       deviceId: normalizedDeviceId,
       deviceInfo,
-      expiresAt: getRefreshTokenExpiry()
+      expiresAt: getRefreshTokenExpiry(),
     });
 
-    // Update last used timestamp immediately after creation
-    await storage.updateRefreshTokenLastUsed(newHashedToken);
+    if (rotation.status === 'not_found') {
+      logSecurityEvent('error', 'Token Refresh - Token Not Found', {
+        action: 'possible_reuse',
+        userId: 'unknown',
+        deviceId: normalizedDeviceId,
+        ...extractRequestMetadata(req)
+      });
+      
+      return res.status(401).json({ 
+        message: 'Invalid or expired refresh token' 
+      });
+    }
+
+    if (rotation.status === 'expired') {
+      logSecurityEvent('warn', 'Token Refresh - Token Expired', {
+        action: 'token_expired',
+        userId: rotation.userId,
+        deviceId: normalizedDeviceId,
+        ...extractRequestMetadata(req),
+      });
+      return res.status(401).json({ 
+        message: 'Refresh token has expired. Please log in again.' 
+      });
+    }
+
+    if (rotation.status === 'device_mismatch') {
+      logSecurityEvent('error', 'Token Refresh - Device Mismatch', {
+        action: 'device_mismatch',
+        userId: rotation.userId,
+        deviceId: normalizedDeviceId,
+        ...extractRequestMetadata(req),
+      });
+      return res.status(401).json({ 
+        message: 'Device ID mismatch' 
+      });
+    }
+
+    if (rotation.status === 'user_missing') {
+      logSecurityEvent('error', 'Token Refresh - User Not Found', {
+        action: 'user_not_found',
+        userId: rotation.userId,
+        deviceId: normalizedDeviceId,
+        ...extractRequestMetadata(req)
+      });
+      return res.status(401).json({ 
+        message: 'User not found' 
+      });
+    }
+
+    const newAccessToken = generateAccessToken(rotation.user.id, rotation.user.email);
 
     logSecurityEvent('info', 'Token Refresh - Success', {
       action: 'token_rotated',
-      userId: user.id,
+       userId: rotation.user.id,
       deviceId: normalizedDeviceId,
       ...extractRequestMetadata(req)
     });
 
     // Return new tokens
     return res.status(200).json({
-      accessToken: newAccessToken,
+       accessToken: newAccessToken,
       refreshToken: newRefreshToken
     });
 

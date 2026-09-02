@@ -17,7 +17,6 @@ import { storage } from './storage';
 import { pool } from './db';
 import { registerRoutes } from './routes';
 import { setupAuth } from './auth';
-import { ensurePortIsFree } from './port-checker';
 import { setupWebSocketServer } from './websocket-handlers';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
@@ -39,6 +38,7 @@ import { beginHttpRequest, recordHttpResponse } from './lib/operational-metrics'
 import { queryDatabase } from './lib/database-client';
 import { createServerLifecycle } from './lib/server-lifecycle';
 import { copyProxyResponseHeaders } from './lib/proxy-headers';
+import { processAccountErasureJobs } from './services/account-erasure';
 
 // Function to serve static files in production
 function serveStaticFiles(app: ReturnType<typeof express>) {
@@ -92,13 +92,6 @@ async function main() {
     logger.info('[%s] Environment: %s, Using port: %d', 
       new Date().toISOString(), isReplitEnv ? 'Replit' : 'Local Mac', PORT_NUMBER);
     
-    // Check if port is available first
-    logger.debug('[%s] Checking port availability...', new Date().toISOString());
-    const portAvailable = await ensurePortIsFree(PORT_NUMBER);
-    if (!portAvailable) {
-      throw new Error(`Failed to free up port ${PORT_NUMBER} after multiple attempts`);
-    }
-
     // Fail fast in production when core secrets are missing.
     assertRequiredEnv(isProduction);
 
@@ -163,6 +156,20 @@ async function main() {
 
     logger.info('[%s] Initializing storage...', new Date().toISOString());
     await storage.initialize();
+    // Resume durable erasure work after a restart. Claims are row-locked so
+    // an optional Worker process can safely run the same sweep.
+    void processAccountErasureJobs(10).catch((error) => {
+      const message = error instanceof Error ? error.message : '';
+      if (message.includes('account_erasure_jobs') || message.includes('account_status')) {
+        logger.warn('[AccountErasure] Recovery sweep deferred until migration 0008_account_erasure is applied', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
+        });
+      } else {
+        logger.error('[AccountErasure] Recovery sweep failed', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
+        });
+      }
+    });
 
     // Initialize background job queue for match generation
     logger.info('[%s] Initializing background job queue...', new Date().toISOString());
@@ -363,11 +370,24 @@ async function main() {
     // Add error handler for the HTTP server
     httpServer.on('error', (error: NodeJS.ErrnoException) => {
       if (error.code === 'EADDRINUSE') {
-        logger.error('[%s] Port 5000 is already in use. Please free up the port and try again.', new Date().toISOString());
+        logger.error('[%s] Port %d is already in use; refusing to terminate the owning process.', new Date().toISOString(), PORT_NUMBER);
       } else {
         logger.error('[%s] Server error:', new Date().toISOString(), error);
       }
-      process.exit(1);
+      process.exitCode = 1;
+      void lifecycle.beginShutdown([
+        () => cleanupWebSocketServer(),
+        () => backgroundJobQueue.stop(),
+        () => callbackQueueProcessor.stop(),
+        () => clearInterval(pushQueueInterval),
+        () => clearInterval(queueRecoveryInterval),
+        () => clearInterval(staleTokenCleanupInterval),
+        () => pool.end(),
+      ]).catch((shutdownError) => {
+        logger.error('[Shutdown] Startup failure cleanup failed', {
+          errorClass: shutdownError instanceof Error ? shutdownError.name : 'UnknownError',
+        });
+      });
     });
 
     // Add health check endpoint for API checks only

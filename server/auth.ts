@@ -31,7 +31,7 @@ const configuredApps = new WeakSet<Express>();
 // This is kept for backward compatibility and routes that explicitly need session-only auth.
 // Eventually, most routes should migrate to requireAuthJWT.
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
-  if (req.isAuthenticated() && req.user) {
+  if (req.isAuthenticated() && (!req.user?.accountStatus || req.user.accountStatus === 'active')) {
     return requireTrustedOriginForSessionMutation(req, res, next);
   }
   res.status(401).json({ message: 'Authentication required' });
