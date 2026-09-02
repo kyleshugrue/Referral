@@ -56,7 +56,19 @@ declare module '*.mjs' {
   export const classifyChangedPath: any;
   export const evaluateToolchain: any;
   export const compareBaseline: any;
+  export const validateBaseline: any;
   export const collectSnapshot: any;
   export const findSnapshotIssues: any;
   export const parseStatus: any;
+  export const REQUIRED_TOOLS: any;
+  export const verifyToolchain: any;
+  export const categorizeDiagnosticLine: any;
+  export const summarizeServerLog: any;
+  export const readServerDiagnostics: any;
+  export const classifyGitState: any;
+  export const classifyProviderMessage: any;
+  export const safeRemoteIdentity: any;
+  export const selectionPolicyIdentity: any;
+  export const classifyWorkflowRuns: any;
+  export const classifyWorkflowRun: any;
 }

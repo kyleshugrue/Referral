@@ -409,8 +409,9 @@ export const insertUserSchema = createInsertSchema(users)
 
 // Fields a signed-in user may edit through profile endpoints. Keep this
 // allowlist separate from insertUserSchema: authentication, identity,
-// registration state, derived matching state, and server-maintained caches
-// must never be accepted from an HTTP profile update.
+// derived matching state, and server-maintained caches must never be accepted
+// from an HTTP profile update. Completion is a one-way, server-validated claim
+// used by the registration flow and is handled separately below.
 export const editableProfileSchema = insertUserSchema.pick({
   fullName: true,
   birthday: true,
@@ -434,7 +435,9 @@ export const editableProfileSchema = insertUserSchema.pick({
   profileVisible: true,
   emailNotifications: true,
   readReceipts: true,
-}).partial();
+}).partial().extend({
+  registrationCompleted: z.boolean().optional(),
+});
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type EditableProfile = z.infer<typeof editableProfileSchema>;

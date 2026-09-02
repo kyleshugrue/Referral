@@ -244,7 +244,11 @@ router.patch('/', requireAuthJWT, async (req, res) => {
     // SECURITY: Validate registrationCompleted=true requires hasMinimumMatchData
     // This prevents bypass by calling PATCH with registrationCompleted=true
     if (updateData.registrationCompleted === true) {
-      if (!existingUser.hasMinimumMatchData) {
+      const candidateUser = {
+        ...existingUser,
+        ...updateData,
+      } as User;
+      if (!hasRequiredFieldsForMatching(candidateUser)) {
         console.log(`[UserRoute] SECURITY: BLOCKING registrationCompleted=true for user ${userId} - hasMinimumMatchData is false`);
         console.log(`[UserRoute] SECURITY: User must complete minimum registration fields before marking complete`);
         delete updateData.registrationCompleted;

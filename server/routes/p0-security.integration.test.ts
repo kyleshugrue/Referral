@@ -315,7 +315,67 @@ describe("P0 HTTP security regressions", () => {
     });
   });
 
+  describe("registration state ordering", () => {
+    it("allows completion when the submitted profile satisfies required fields despite a stale readiness flag", async () => {
+      const owner = makeUser({
+        id: 1,
+        industry: "Finance",
+        registrationCompleted: false,
+        hasMinimumMatchData: false,
+      });
+      await startHarness([owner]);
+
+      const response = await requestJson(port, "/api/user", {
+        method: "PATCH",
+        headers: { authorization: `Bearer ${authToken(owner.id)}` },
+        body: JSON.stringify({ registrationCompleted: true }),
+      });
+
+      expect(response.status).toBe(200);
+      const update = state.updateCalls.find((call) => call.userId === owner.id)?.data;
+      expect(update).toMatchObject({ registrationCompleted: true });
+    });
+  });
+
   describe("administrative authorization and privacy", () => {
+    it("does not expose an unverified peer profile", async () => {
+      const viewer = makeUser({ id: 1, email: "viewer@example.invalid" });
+      const target = makeUser({
+        id: 2,
+        email: "target@example.invalid",
+        emailVerified: false,
+      });
+      await startHarness([viewer, target]);
+
+      const response = await requestJson(port, "/api/users/2", {
+        headers: { authorization: `Bearer ${authToken(viewer.id)}` },
+      });
+
+      expect(response.status).toBe(404);
+      expect(response.body).toEqual({ message: "User not found" });
+    });
+
+    it("reports incomplete match readiness instead of queuing or claiming no matches", async () => {
+      const incompleteMatchProfile = makeUser({
+        id: 1,
+        hasMinimumMatchData: false,
+      });
+      await startHarness([incompleteMatchProfile]);
+
+      const response = await requestJson(port, "/api/matches/synergy", {
+        headers: { authorization: `Bearer ${authToken(incompleteMatchProfile.id)}` },
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        matches: [],
+        apiConnectionIssue: false,
+        matchState: "profile_incomplete",
+        requiresAction: "complete_profile",
+        discoverabilityPolicyVersion: "1",
+      });
+    });
+
     it("keeps administrative authorization separate from ordinary authentication", async () => {
       const ordinaryUser = makeUser({ id: 1 });
       await startHarness([ordinaryUser]);
@@ -361,6 +421,39 @@ describe("P0 HTTP security regressions", () => {
       expect(response.body).not.toHaveProperty("email");
       expect(response.body).not.toHaveProperty("firebaseUid");
       expect(response.body).not.toHaveProperty("resumeUrl");
+    });
+
+    it("returns resume references to an accepted peer without exposing private identity fields", async () => {
+      const viewer = makeUser({ id: 1, email: "viewer@example.invalid" });
+      const target = makeUser({
+        id: 2,
+        email: "target@example.invalid",
+        firebaseUid: "target-firebase-uid",
+        resumeUrl: "/api/media/target-resume",
+        resumePreviewUrls: ["/api/media/target-preview"],
+      });
+      await startHarness([viewer, target]);
+      const storage = mocks.storage as Record<string, unknown>;
+      storage.isUserBlocked = async () => false;
+      storage.getConnectionBetweenUsers = async () => ({
+        id: 11,
+        user1Id: viewer.id,
+        user2Id: target.id,
+        createdAt: "2030-01-01T00:00:00.000Z",
+      });
+
+      const response = await requestJson(port, "/api/users/2", {
+        headers: { authorization: `Bearer ${authToken(viewer.id)}` },
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        id: target.id,
+        resumeUrl: target.resumeUrl,
+        resumePreviewUrls: target.resumePreviewUrls,
+      });
+      expect(response.body).not.toHaveProperty("email");
+      expect(response.body).not.toHaveProperty("firebaseUid");
     });
 
     it("hides a profile when either user has blocked the other", async () => {

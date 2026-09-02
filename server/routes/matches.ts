@@ -6,6 +6,11 @@ import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration';
 import { toMatchDto } from '../lib/privacy-dto';
 import { parseStrictPositiveInteger } from '../lib/request-validation';
+import {
+  DISCOVERABILITY_POLICY_VERSION,
+  getDiscoverabilityAction,
+  getMatchGenerationState,
+} from '../lib/discoverability-policy';
 
 const router = Router();
 
@@ -28,6 +33,24 @@ router.get("/synergy/:profileVersion?", async (req, res) => {
     const user = await storage.getUser(req.user.id);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
+    }
+
+    const matchGenerationState = getMatchGenerationState(user);
+    if (matchGenerationState !== 'eligible') {
+      return res
+        .status(matchGenerationState === 'email_unverified' ? 403 : 200)
+        .header('Cache-Control', 'private, no-store')
+        .json({
+          ...(matchGenerationState === 'email_unverified'
+            ? { error: 'Email verification required' }
+            : {
+                matches: [],
+                apiConnectionIssue: false,
+                matchState: 'profile_incomplete',
+              }),
+          requiresAction: getDiscoverabilityAction(matchGenerationState),
+          discoverabilityPolicyVersion: DISCOVERABILITY_POLICY_VERSION,
+        });
     }
     
     // Get current READY matches from storage (database already filters for current profile versions)
@@ -97,7 +120,9 @@ router.get("/synergy/:profileVersion?", async (req, res) => {
             console.log('[Matches Route] No potential matches found for first-time user - returning empty array');
             return res.json({
               matches: [],
-              apiConnectionIssue: false
+              apiConnectionIssue: false,
+              matchState: 'empty',
+              discoverabilityPolicyVersion: DISCOVERABILITY_POLICY_VERSION,
             });
           }
         } catch (error) {
@@ -125,7 +150,9 @@ router.get("/synergy/:profileVersion?", async (req, res) => {
         console.log('[Matches Route] User has completed match generation before but has 0 legitimate matches - returning empty array');
         return res.json({
           matches: [],
-          apiConnectionIssue: false
+            apiConnectionIssue: false,
+            matchState: 'empty',
+            discoverabilityPolicyVersion: DISCOVERABILITY_POLICY_VERSION,
         });
       }
     }
@@ -150,7 +177,9 @@ router.get("/synergy/:profileVersion?", async (req, res) => {
 
     return res.json({
       matches: cleanedMatches,
-      apiConnectionIssue: false
+      apiConnectionIssue: false,
+      matchState: 'ready',
+      discoverabilityPolicyVersion: DISCOVERABILITY_POLICY_VERSION,
     });
   } catch (error) {
     console.error("[Matches Route] Error getting synergy matches:", error);

@@ -44,6 +44,26 @@ const fail = (message) => {
   throw new Error(message);
 };
 
+const cleanRoomDatabaseUrl = () => {
+  const configured = process.env.CLEAN_ROOM_DATABASE_URL?.trim();
+  if (!configured) return CLEAN_ROOM_DATABASE_ENDPOINT.join("");
+
+  let parsed;
+  try {
+    parsed = new URL(configured);
+  } catch {
+    fail("CLEAN_ROOM_DATABASE_URL must be a disposable local PostgreSQL database.");
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  const databaseName = parsed.pathname.replace(/^\/+/, "").toLowerCase();
+  const localHost = ["localhost", "127.0.0.1", "::1", "[::1]", "helium"].includes(hostname);
+  const disposableName = /^(postgres|test|ci|disposable|tmp|scratch)([-_a-z0-9]*)$/.test(databaseName);
+  if (parsed.protocol !== "postgres:" || !localHost || !disposableName) {
+    fail("CLEAN_ROOM_DATABASE_URL must be a disposable local PostgreSQL database.");
+  }
+  return configured;
+};
+
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
 const normalizeRelativePath = (value) => {
@@ -198,6 +218,10 @@ export const buildCommandEnvironment = (root, phase) => {
     NPM_CONFIG_REGISTRY: "https://registry.npmjs.org/",
     NPM_CONFIG_PRODUCTION: "false",
     NPM_CONFIG_INCLUDE: "dev",
+    NPM_CONFIG_BIN_LINKS: "true",
+    NPM_CONFIG_INSTALL_LINKS: "true",
+    NPM_CONFIG_LEGACY_PEER_DEPS: "true",
+    NPM_CONFIG_PACKAGE_LOCK: "true",
     NPM_CONFIG_AUDIT: "false",
     NPM_CONFIG_FUND: "false",
     GIT_CONFIG_NOSYSTEM: "1",
@@ -205,7 +229,7 @@ export const buildCommandEnvironment = (root, phase) => {
     GIT_OPTIONAL_LOCKS: "0",
   };
   if (phase === "quality") {
-    const databaseUrl = CLEAN_ROOM_DATABASE_ENDPOINT.join("");
+    const databaseUrl = cleanRoomDatabaseUrl();
     env.DATABASE_URL = databaseUrl;
     env.RELATIONAL_TEST_DATABASE_URL = databaseUrl;
     env.MATCH_GENERATION_TEST_DATABASE_URL = databaseUrl;
@@ -343,6 +367,7 @@ export const buildIntegrityManifest = async ({ root, paths, commit, tree }) => {
     exportType: "public",
     source: { commit, tree, dirty: false },
     selectionManifest: null,
+    selectionPolicy: null,
     fileCount: files.length,
     totalBytes: files.reduce((total, entry) => total + entry.size, 0),
     files,
@@ -480,7 +505,17 @@ export const compareRuntimeOutputs = async ({ canonicalRoot, publicRoot }) => {
 
 export const CLEAN_ROOM_COMMANDS = Object.freeze([
   ["repo:hygiene", ["run", "repo:hygiene"]],
-  ["npm ci", ["ci", "--no-audit", "--no-fund"]],
+  ["npm ci", [
+    "ci",
+    "--include=dev",
+    "--legacy-peer-deps",
+    "--bin-links=true",
+    "--install-links=true",
+    "--package-lock=true",
+    "--no-audit",
+    "--no-fund",
+    "--registry=https://registry.npmjs.org/",
+  ]],
   ["workflow validation", ["run", "workflows:validate"]],
   ["db:verify", ["run", "db:verify"]],
   ["db:migrate:disposable", ["run", "db:migrate:disposable"]],

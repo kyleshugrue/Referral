@@ -26,7 +26,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { connectionRequestCache } from "@/hooks/use-profiles.tsx";
 import ReactMarkdown from 'react-markdown';
-import React, { useEffect } from "react";
+import React, { useEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useProfileDialog } from "@/hooks/use-profile-dialog";
 import { useState } from "react";
@@ -120,6 +120,36 @@ export default function ProfileDialog({
     enabled: open // Only fetch when dialog is open
   });
 
+  // Public network results intentionally omit private resume references.
+  // Fetch the target profile after opening so the server can add them only
+  // when this viewer is the owner or has an accepted connection.
+  const { data: authorizedProfile } = useQuery<User>({
+    queryKey: [`/api/users/${profile.id}`],
+    queryFn: async () => {
+      const response = await apiRequest("GET", `/api/users/${profile.id}`);
+      if (!response.ok) {
+        throw new Error(`Failed to load profile: ${response.status}`);
+      }
+      return response.json() as Promise<User>;
+    },
+    enabled: open,
+    retry: false,
+    // Authorization can change when a connection is accepted or removed, so
+    // never reuse a private-media projection as a fresh authorization result.
+    staleTime: 0,
+    refetchOnMount: true,
+  });
+
+  const authorizedResumeUrl = authorizedProfile?.id === profile.id
+    ? authorizedProfile.resumeUrl
+    : null;
+  const authorizedResumePreviewUrls = useMemo(
+    () => authorizedProfile?.id === profile.id
+      ? (authorizedProfile.resumePreviewUrls ?? [])
+      : [],
+    [authorizedProfile, profile.id],
+  );
+
   // Initialize request status when dialog opens 
   // This is critical to ensure connection requests persist across navigation
   useEffect(() => {
@@ -172,20 +202,17 @@ export default function ProfileDialog({
       }, 250);
 
       // Preload resume images when the dialog opens for faster viewing later
-      if (profile.resumePreviewUrls && profile.resumePreviewUrls.length > 0) {
+      if (authorizedResumePreviewUrls.length > 0) {
         // Start preloading after a short delay to prioritize rendering the dialog first
         setTimeout(() => {
-          const resumeUrls = profile.resumePreviewUrls;
-          if (resumeUrls) {
-            resumeUrls.forEach((url) => {
-              const img = new Image();
-              img.src = url;
-            });
-          }
+          authorizedResumePreviewUrls.forEach((url) => {
+            const img = new Image();
+            img.src = url;
+          });
         }, 500);
       }
     }
-  }, [open, profile.id, profile.resumePreviewUrls, requestPending]);
+  }, [open, profile.id, authorizedResumePreviewUrls, requestPending]);
 
   // Check both props, localStorage cache, and fetched data for request status
   useEffect(() => {
@@ -999,13 +1026,13 @@ export default function ProfileDialog({
               )}
 
               {/* Resume Section */}
-              {(profile.resumeUrl || (profile.resumePreviewUrls && profile.resumePreviewUrls.length > 0)) && (
+              {(authorizedResumeUrl || authorizedResumePreviewUrls.length > 0) && (
                 <div className="space-y-2">
                   <h3 className="text-base font-semibold">Resume</h3>
                   <div className="flex flex-col gap-4">
-                    {profile.resumePreviewUrls && profile.resumePreviewUrls.length > 0 && (
+                    {authorizedResumePreviewUrls.length > 0 && (
                       <div className="grid gap-4">
-                        {profile.resumePreviewUrls.map((previewUrl, index) => (
+                        {authorizedResumePreviewUrls.map((previewUrl, index) => (
                           <div 
                             key={index}
                             className="relative border rounded-lg overflow-hidden cursor-pointer mb-4"
@@ -1024,6 +1051,17 @@ export default function ProfileDialog({
                           </div>
                         ))}
                       </div>
+                    )}
+                    {authorizedResumeUrl && (
+                      <a
+                        href={authorizedResumeUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex w-fit items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium text-primary hover:bg-muted"
+                      >
+                        <FileText className="h-4 w-4" />
+                        Open full resume
+                      </a>
                     )}
                   </div>
                 </div>

@@ -48,6 +48,7 @@ import {
   toConnectionDto,
   toConnectionRequestDto,
   toConversationDto,
+  toAuthorizedPeerProfileDto,
   toPublicProfileDto,
   toSelfUserDto,
 } from "./lib/privacy-dto";
@@ -55,6 +56,10 @@ import guidesRouter from "./seo/guides-router";
 import { parseBoundedIntegerQuery, parseStrictPositiveInteger, boundedString } from "./lib/request-validation";
 import { parseServerEnvironment } from "./lib/env";
 import { queryDatabase } from "./lib/database-client";
+import {
+  DISCOVERABILITY_POLICY_VERSION,
+  getDiscoverabilityState,
+} from "./lib/discoverability-policy";
 
 const PRIVACY_LAST_MODIFIED = process.env.PRIVACY_LAST_MODIFIED?.trim() || null;
 const PRIVACY_LAST_MODIFIED_DISPLAY = PRIVACY_LAST_MODIFIED
@@ -511,10 +516,13 @@ export async function registerRoutes(app: Express): Promise<void> {
         Object.keys(searchParams).length > 0 ? searchParams : undefined
       );
       
-      res.json({
+      res
+        .header("Cache-Control", "private, no-store")
+        .json({
         ...potentialConnections,
         profiles: potentialConnections.profiles.map(toPublicProfileDto),
-      });
+        discoverabilityPolicyVersion: DISCOVERABILITY_POLICY_VERSION,
+        });
     } catch (error) {
       logger.error('Get potential connections error:', error);
       res.status(500).json({ message: "Failed to get potential connections" });
@@ -1174,15 +1182,24 @@ export async function registerRoutes(app: Express): Promise<void> {
       if (
         blockedByViewer ||
         blockedByTarget ||
-        !user.emailVerified ||
-        !user.registrationCompleted ||
-        (!user.profileVisible && !connection)
+        (
+          getDiscoverabilityState(user) !== 'eligible' &&
+          !(connection && getDiscoverabilityState(user) === 'profile_hidden')
+        )
       ) {
         return res.status(404).json({ message: "User not found" });
       }
 
-      // Peer profile responses intentionally use a narrow public projection.
-      return res.json(toPublicProfileDto(user));
+      // Peer profile responses use a narrow public projection by default.
+      // Resume references are included only for an accepted connection; the
+      // media route independently re-checks the same boundary before serving
+      // any private object.
+      const profileDto = connection
+        ? toAuthorizedPeerProfileDto(user)
+        : toPublicProfileDto(user);
+      return res
+        .header("Cache-Control", "private, no-store")
+        .json(profileDto);
     } catch (error) {
       logger.error('Get user error:', error);
       res.status(500).json({ message: "Failed to get user" });

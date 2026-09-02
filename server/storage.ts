@@ -18,6 +18,8 @@ import { broadcastMatchRefresh, broadcastMatchRefreshToUsers } from './websocket
 import { logger } from './lib/logger';
 import { parseServerEnvironment } from './lib/env';
 import { recordQueueEvent } from './lib/operational-metrics';
+import { discoverableUserCondition, matchableUserCondition } from './lib/discoverability-policy';
+import { hasRequiredFieldsForMatching } from './lib/profile-matching';
 
 const PostgresSessionStore = connectPg(session);
 type UserWrite = Partial<InsertUser> & Record<string, unknown>;
@@ -60,6 +62,7 @@ export interface IStorage {
   checkPendingMatchJob(userId: number): Promise<boolean>;
   hasCompletedMatchGeneration(userId: number): Promise<boolean>;
   findUsersMatchingWithUser(userId: number): Promise<number[]>;
+  findPotentialMatchUserIds(userId: number): Promise<number[]>;
   createMessage(message: { senderId: number; receiverId: number; content: string; }): Promise<Message & { sender: User, receiver: User }>;
   sessionStore: session.Store;
   getMessages(user1Id: number, user2Id: number): Promise<(Message & { sender: User, receiver: User })[]>;
@@ -629,7 +632,15 @@ export class DatabaseStorage implements IStorage {
         ...(finalUserData.emailNotifications !== undefined && { emailNotifications: finalUserData.emailNotifications }),
         ...(finalUserData.readReceipts !== undefined && { readReceipts: finalUserData.readReceipts }),
         ...(finalUserData.educationLevel !== undefined && { educationLevel: finalUserData.educationLevel }),
-        ...(finalUserData.timezone !== undefined && { timezone: finalUserData.timezone })
+        ...(finalUserData.timezone !== undefined && { timezone: finalUserData.timezone }),
+        // Minimum-match readiness is derived from the validated profile,
+        // never accepted from caller-controlled state.
+        hasMinimumMatchData: hasRequiredFieldsForMatching({
+          ...finalUserData,
+          fullName: finalUserData.fullName || '',
+          desiredCompanies: finalUserData.desiredCompanies ?? [],
+          desiredLocations: finalUserData.desiredLocations ?? [],
+        } as User),
       };
       
       const [user] = await db.insert(users).values([insertData as unknown as InsertUser]).returning();
@@ -643,7 +654,7 @@ export class DatabaseStorage implements IStorage {
                                 user.fullName && user.fullName.trim().length > 0 &&
                                 user.currentCompany && user.currentCompany.trim().length > 0 &&
                                 user.currentLocation && user.currentLocation.trim().length > 0;
-      if (hasMinimumFields) {
+      if (hasMinimumFields && user.emailVerified && user.registrationCompleted) {
         console.log(`[createUser] User ${user.id} has minimum required fields, triggering background match generation`);
         
         try {
@@ -774,6 +785,27 @@ export class DatabaseStorage implements IStorage {
         }
       }
     });
+
+    // Recompute readiness synchronously from the post-update profile before
+    // persisting it. Completion and queue decisions must never observe the
+    // stale flag from before this update, and callers cannot supply this flag.
+    const candidateUser = {
+      ...existingUserForComparison,
+      ...processedData,
+    } as User;
+    const computedHasMinimumMatchData = hasRequiredFieldsForMatching(candidateUser);
+    processedData.hasMinimumMatchData = computedHasMinimumMatchData;
+
+    // A new completion claim is valid only when the same validated profile
+    // already satisfies the minimum requirements. Existing completed users
+    // retain completion even if they later edit match preferences down.
+    if (
+      processedData.registrationCompleted === true &&
+      !computedHasMinimumMatchData &&
+      existingUserForComparison?.registrationCompleted !== true
+    ) {
+      processedData.registrationCompleted = false;
+    }
     
     // Ensure arrays are correctly formatted for PostgreSQL
     const finalData = { ...processedData };
@@ -852,32 +884,6 @@ export class DatabaseStorage implements IStorage {
                 logger.error(`[updateUser] Background: Location caching failed for user ${id}:`, error);
               });
               logger.debug(`[updateUser] Background: Location caching completed for user ${id}`);
-            }
-            
-            // === BACKGROUND TASK 2: Check and set hasMinimumMatchData ===
-            const matchMinimumFields = ['fullName', 'currentCompany', 'currentLocation', 'industry', 'desiredCompanies', 'desiredLocations'];
-            const hasUpdatedMatchFields = matchMinimumFields.some(field => finalData[field] !== undefined);
-            
-            if (hasUpdatedMatchFields) {
-              logger.debug(`[updateUser] Background: Checking if minimum match data is complete for user ${id}`);
-              const updatedProfile = { ...user, ...finalData };
-              
-              const hasFullName = updatedProfile.fullName && updatedProfile.fullName.trim() !== '';
-              const hasCompany = updatedProfile.currentCompany && updatedProfile.currentCompany.trim() !== '';
-              const hasLocation = updatedProfile.currentLocation && updatedProfile.currentLocation.trim() !== '';
-              const hasIndustry = updatedProfile.industry && updatedProfile.industry.trim() !== '';
-              const hasDesiredCompanies = Array.isArray(updatedProfile.desiredCompanies) && updatedProfile.desiredCompanies.length > 0;
-              const hasDesiredLocations = Array.isArray(updatedProfile.desiredLocations) && updatedProfile.desiredLocations.length > 0;
-              
-              if (hasFullName && hasCompany && hasLocation && hasIndustry && hasDesiredCompanies && hasDesiredLocations) {
-                try {
-                  logger.debug(`[updateUser] Background: Minimum match data complete, setting hasMinimumMatchData=true for user ${id}`);
-                  await db.update(users).set({ hasMinimumMatchData: true }).where(eq(users.id, id));
-                  logger.debug(`[updateUser] Background: Successfully set hasMinimumMatchData=true for user ${id}`);
-                } catch (bgError) {
-                  logger.error(`[updateUser] Background: Failed to set hasMinimumMatchData for user ${id}:`, bgError);
-                }
-              }
             }
             
             // === BACKGROUND TASK 3: Match refresh ===
@@ -1675,9 +1681,7 @@ export class DatabaseStorage implements IStorage {
       
       // Base condition - exclude users who are already connected and blocked users
       conditions.push(not(inArray(users.id, excludeUserIds)));
-      conditions.push(eq(users.profileVisible, true));
-      conditions.push(eq(users.registrationCompleted, true));
-      conditions.push(eq(users.emailVerified, true));
+      conditions.push(discoverableUserCondition());
       
       // Add name search if provided
       if (searchParams?.fullName && searchParams.fullName.trim() !== '') {
@@ -1801,9 +1805,7 @@ export class DatabaseStorage implements IStorage {
           and(
             not(eq(users.id, userId)),
             excludeUserIds.length > 0 ? not(inArray(users.id, excludeUserIds)) : sql`1=1`,
-            eq(users.profileVisible, true),
-            eq(users.registrationCompleted, true),
-            eq(users.emailVerified, true),
+            matchableUserCondition(),
             // Filter out users with the same current employer (case-insensitive comparison)
             currentUser.currentCompany ? 
               sql`LOWER(${users.currentCompany}) != LOWER(${currentUser.currentCompany})` : 
@@ -2006,9 +2008,7 @@ export class DatabaseStorage implements IStorage {
             sql`${synergyMatches.description} IS NOT NULL`,
             eq(synergyMatches.userProfileVersion, currentUserProfileVersion),
             eq(synergyMatches.matchedUserProfileVersion, users.profileVersion),
-            eq(users.profileVisible, true),
-            eq(users.registrationCompleted, true),
-            eq(users.emailVerified, true),
+            matchableUserCondition(),
             // If we have users to exclude, exclude them from matches
             excludeUserIds.length > 0 
               ? not(inArray(synergyMatches.matchedUserId, excludeUserIds)) 
@@ -2338,6 +2338,58 @@ export class DatabaseStorage implements IStorage {
       return userIds;
     } catch (error) {
       logger.error('[findUsersMatchingWithUser] Error finding matching users:', error);
+      return [];
+    }
+  }
+
+  async findPotentialMatchUserIds(userId: number): Promise<number[]> {
+    try {
+      const viewingUser = await this.getUser(userId);
+      if (
+        !viewingUser ||
+        !viewingUser.emailVerified ||
+        !viewingUser.registrationCompleted ||
+        !viewingUser.hasMinimumMatchData
+      ) {
+        return [];
+      }
+
+      const existingConnections = await db
+        .select()
+        .from(connections)
+        .where(or(eq(connections.user1Id, userId), eq(connections.user2Id, userId)));
+      const blockedByUser = await db
+        .select()
+        .from(userBlocks)
+        .where(eq(userBlocks.userId, userId));
+      const blockedByOthers = await db
+        .select()
+        .from(userBlocks)
+        .where(eq(userBlocks.blockedUserId, userId));
+      const excludedUserIds = Array.from(new Set([
+        userId,
+        ...existingConnections.flatMap((connection) => [connection.user1Id, connection.user2Id]),
+        ...blockedByUser.map((block) => block.blockedUserId),
+        ...blockedByOthers.map((block) => block.userId),
+      ]));
+
+      const conditions = [
+        matchableUserCondition(),
+        not(inArray(users.id, excludedUserIds)),
+      ];
+      if (viewingUser.currentCompany) {
+        conditions.push(sql`LOWER(${users.currentCompany}) != LOWER(${viewingUser.currentCompany})`);
+      }
+
+      const potentialUsers = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(...conditions))
+        .orderBy(asc(users.id));
+
+      return potentialUsers.map(({ id }) => id);
+    } catch (error) {
+      logger.error('[findPotentialMatchUserIds] Error finding eligible match candidates:', error);
       return [];
     }
   }
