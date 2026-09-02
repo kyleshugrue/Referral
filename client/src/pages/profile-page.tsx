@@ -95,7 +95,7 @@ export default function ProfilePage() {
   });
   
   // Professional-grade profile save hook with debouncing, retry, and optimistic updates
-  const { flushPendingSave, saveStatus, cancelPendingSave, getCachedUser, hasUnsavedChanges: hookHasUnsavedChanges, uploadPhoto, deletePhoto, uploadResume, lastSaveTimestamp, saveOperationVersion, shouldBlockFormReset } = useProfileSave();
+  const { flushPendingSave, saveStatus, cancelPendingSave, getCachedUser, hasUnsavedChanges: hookHasUnsavedChanges, uploadPhoto, deletePhoto, uploadResume, deleteResume, lastSaveTimestamp, saveOperationVersion, shouldBlockFormReset } = useProfileSave();
 
   // Derived boolean to disable form inputs during save operations
   const isSaving = saveStatus === 'saving' || saveStatus === 'retrying';
@@ -918,7 +918,7 @@ export default function ProfilePage() {
                       className="ml-auto hover:bg-destructive hover:text-destructive-foreground"
                       disabled={isSaving}
                       onClick={async () => {
-                        const result = await flushPendingSave({ resumeUrl: '', resumePreviewUrls: [] });
+                        const result = await deleteResume();
                         if (result.success) {
                           form.setValue('resumeUrl', '');
                           form.setValue('resumePreviewUrls', []);

@@ -112,6 +112,8 @@ interface UseProfileSaveResult {
   deletePhoto: () => Promise<{ success: boolean; savedData: User | null }>;
   /** Upload and save resume - handles file upload then saves URL to profile */
   uploadResume: (file: File) => Promise<{ success: boolean; savedData: User | null }>;
+  /** Delete resume and its preview references through the dedicated media route */
+  deleteResume: () => Promise<{ success: boolean; savedData: User | null }>;
   /** Current save status for UI feedback */
   saveStatus: SaveStatus;
   /** Current retry attempt count */
@@ -1020,10 +1022,14 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
         throw new Error('Failed to upload photo');
       }
 
-      const { url } = await uploadRes.json();
-
-      // Save the URL to profile using unified save flow
-      return await flushPendingSave({ photo: url });
+      const data = await uploadRes.json() as { user?: User };
+      if (!data.user) {
+        throw new Error('Photo upload did not return a saved profile');
+      }
+      queryClient.setQueryData(["/api/user"], data.user);
+      updateLastSavedData(data.user);
+      updateSaveStatus('saved');
+      return { success: true, savedData: data.user };
 
     } catch (error) {
       updateSaveStatus('error');
@@ -1034,14 +1040,46 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
       });
       return { success: false, savedData: null };
     }
-  }, [toast, flushPendingSave, updateSaveStatus]);
+  }, [toast, updateSaveStatus, updateLastSavedData]);
 
   /**
    * Delete photo from profile - unified flow
    */
   const deletePhoto = useCallback(async (): Promise<{ success: boolean; savedData: User | null }> => {
-    return await flushPendingSave({ photo: '' });
-  }, [flushPendingSave]);
+    updateSaveStatus('saving');
+    try {
+      const headers = await buildIOSNativeHeaders({});
+      let response = await fetch(getAbsoluteUrl('/api/media/photo'), {
+        method: 'DELETE',
+        headers,
+        credentials: 'include',
+      });
+      if (response.status === 401 && isNativeiOS()) {
+        const refreshedHeaders = await handleIOSNative401(headers);
+        if (refreshedHeaders) {
+          response = await fetch(getAbsoluteUrl('/api/media/photo'), {
+            method: 'DELETE',
+            headers: refreshedHeaders,
+            credentials: 'include',
+          });
+        }
+      }
+      if (!response.ok) throw new Error('Failed to remove photo');
+      const user = await response.json() as User;
+      queryClient.setQueryData(["/api/user"], user);
+      updateLastSavedData(user);
+      updateSaveStatus('saved');
+      return { success: true, savedData: user };
+    } catch (error) {
+      updateSaveStatus('error');
+      toast({
+        title: 'Remove failed',
+        description: error instanceof Error ? error.message : 'Failed to remove photo',
+        variant: 'destructive',
+      });
+      return { success: false, savedData: null };
+    }
+  }, [toast, updateSaveStatus, updateLastSavedData]);
 
   /**
    * Upload resume and save to profile - unified flow
@@ -1096,13 +1134,14 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
         throw new Error('Failed to upload resume');
       }
 
-      const data = await uploadRes.json();
-
-      // Save both resumeUrl and resumePreviewUrls using unified save flow
-      return await flushPendingSave({
-        resumeUrl: data.url,
-        resumePreviewUrls: data.previewUrls || []
-      });
+      const data = await uploadRes.json() as { user?: User };
+      if (!data.user) {
+        throw new Error('Resume upload did not return a saved profile');
+      }
+      queryClient.setQueryData(["/api/user"], data.user);
+      updateLastSavedData(data.user);
+      updateSaveStatus('saved');
+      return { success: true, savedData: data.user };
 
     } catch (error) {
       updateSaveStatus('error');
@@ -1113,7 +1152,43 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
       });
       return { success: false, savedData: null };
     }
-  }, [toast, flushPendingSave, updateSaveStatus]);
+  }, [toast, updateSaveStatus, updateLastSavedData]);
+
+  const deleteResume = useCallback(async (): Promise<{ success: boolean; savedData: User | null }> => {
+    updateSaveStatus('saving');
+    try {
+      const headers = await buildIOSNativeHeaders({});
+      let response = await fetch(getAbsoluteUrl('/api/media/resume'), {
+        method: 'DELETE',
+        headers,
+        credentials: 'include',
+      });
+      if (response.status === 401 && isNativeiOS()) {
+        const refreshedHeaders = await handleIOSNative401(headers);
+        if (refreshedHeaders) {
+          response = await fetch(getAbsoluteUrl('/api/media/resume'), {
+            method: 'DELETE',
+            headers: refreshedHeaders,
+            credentials: 'include',
+          });
+        }
+      }
+      if (!response.ok) throw new Error('Failed to remove resume');
+      const user = await response.json() as User;
+      queryClient.setQueryData(["/api/user"], user);
+      updateLastSavedData(user);
+      updateSaveStatus('saved');
+      return { success: true, savedData: user };
+    } catch (error) {
+      updateSaveStatus('error');
+      toast({
+        title: 'Remove failed',
+        description: error instanceof Error ? error.message : 'Failed to remove resume',
+        variant: 'destructive',
+      });
+      return { success: false, savedData: null };
+    }
+  }, [toast, updateSaveStatus, updateLastSavedData]);
 
   /**
    * Cancel pending saves and rollback optimistic updates
@@ -1148,6 +1223,7 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
     uploadPhoto,
     deletePhoto,
     uploadResume,
+    deleteResume,
     saveStatus,
     retryCount,
     cancelPendingSave,

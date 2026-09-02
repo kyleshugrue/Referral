@@ -4,7 +4,13 @@ import { storage } from "./storage";
 import { pool } from "./db";
 import { User } from "@shared/schema";
 import { editableProfileSchema } from "@shared/schema";
-import { uploadResume, uploadPhoto, processResumeUpload, verifyUploadedFile } from "./upload";
+import {
+  uploadResume,
+  uploadPhoto,
+  processResumeUpload,
+  verifyUploadedFile,
+  cleanupTemporaryUpload,
+} from "./upload";
 import locationRouter from "./routes/locations";
 import messagesRouter from "./routes/messages";
 import matchesRouter from "./routes/matches";
@@ -1403,6 +1409,75 @@ export async function registerRoutes(app: Express): Promise<void> {
     }
   });
 
+  // Media is intentionally changed through dedicated endpoints. Generic
+  // profile PATCH routes must not be able to attach an arbitrary URL to a
+  // user's profile.
+  app.delete('/api/media/photo', requireAuthJWT, async (req, res) => {
+    if (!req.user) return res.sendStatus(401);
+    try {
+      const currentUser = await storage.getUser(req.user.id);
+      if (!currentUser) return res.status(404).json({ message: 'User not found' });
+
+      const previousReference = currentUser.photo;
+      const updatedUser = await storage.updateUser(req.user.id, { photo: '' });
+
+      if (previousReference) {
+        const { firebaseStorageService } = await import('./services/firebase-storage');
+        if (previousReference.startsWith('/api/media/')) {
+          await firebaseStorageService.deleteMediaReference(previousReference).catch((error) => {
+            logger.warn('[Media] Photo object cleanup deferred', {
+              errorClass: error instanceof Error ? error.name : 'UnknownError',
+            });
+          });
+        } else if (previousReference.startsWith('/uploads/')) {
+          const localPath = path.resolve(process.cwd(), 'uploads', previousReference.slice('/uploads/'.length));
+          await cleanupTemporaryUpload(localPath);
+        }
+      }
+
+      return res.json(toSelfUserDto(updatedUser));
+    } catch (error) {
+      logger.error('[Media] Failed to clear profile photo', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+      return res.status(500).json({ message: 'Failed to remove profile photo' });
+    }
+  });
+
+  app.delete('/api/media/resume', requireAuthJWT, async (req, res) => {
+    if (!req.user) return res.sendStatus(401);
+    try {
+      const currentUser = await storage.getUser(req.user.id);
+      if (!currentUser) return res.status(404).json({ message: 'User not found' });
+
+      const previousReferences = [
+        currentUser.resumeUrl,
+        ...(currentUser.resumePreviewUrls ?? []),
+      ].filter((reference): reference is string => Boolean(reference));
+      const updatedUser = await storage.updateUser(req.user.id, {
+        resumeUrl: '',
+        resumePreviewUrls: [],
+      });
+
+      const { firebaseStorageService } = await import('./services/firebase-storage');
+      await Promise.allSettled(previousReferences.map(async (reference) => {
+        if (reference.startsWith('/api/media/')) {
+          await firebaseStorageService.deleteMediaReference(reference);
+        } else if (reference.startsWith('/uploads/')) {
+          const localPath = path.resolve(process.cwd(), 'uploads', reference.slice('/uploads/'.length));
+          await cleanupTemporaryUpload(localPath);
+        }
+      }));
+
+      return res.json(toSelfUserDto(updatedUser));
+    } catch (error) {
+      logger.error('[Media] Failed to clear resume', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+      return res.status(500).json({ message: 'Failed to remove resume' });
+    }
+  });
+
   // NOTE: This route was commented out to avoid conflicts with the messagesRouter
   /*
   app.get("/api/messages/:recipientId", async (req, res) => {
@@ -1473,10 +1548,15 @@ export async function registerRoutes(app: Express): Promise<void> {
   };
 
   app.post('/api/upload/resume', uploadLimiter, authenticateUploadPrincipal, requireTrustedOriginForSessionMutation, requireUploadPrincipal, uploadResume.single('resume'), async (req, res) => {
+    let temporaryPath: string | undefined;
+    let preserveLocalFallback = false;
+    let savedUser: User | null = null;
+    const remoteReferences: string[] = [];
     try {
       if (!req.file) {
         return res.status(400).json({ message: 'No file uploaded' });
       }
+      temporaryPath = req.file.path;
 
        const userId = (req as express.Request & { authMethod?: string }).authMethod
          ? req.user?.id
@@ -1524,23 +1604,14 @@ export async function registerRoutes(app: Express): Promise<void> {
           url: firebaseResult.url,
           previewUrls: firebaseResult.previewUrls || []
         };
+        remoteReferences.push(firebaseResult.url, ...result.previewUrls);
         
          logger.debug('[Resume Upload] Firebase upload successful');
 
-        // Clean up local temp file if it exists
-        if (req.file.path) {
-          try {
-            fs.unlinkSync(req.file.path);
-            logger.debug('[Resume Upload] Cleaned up local temp file');
-          } catch (error) {
-             logger.debug('[Resume Upload] Could not clean up temp file', {
-               errorClass: error instanceof Error ? error.name : 'UnknownError',
-             });
-          }
-        }
        } else if (!userId) {
          return res.status(503).json({ message: 'Managed media storage is unavailable' });
        } else {
+         preserveLocalFallback = true;
         logger.debug('[Resume Upload] Firebase Storage not available, using local processing');
         // Fallback to local processing
         result = await processResumeUpload(req.file);
@@ -1559,7 +1630,7 @@ export async function registerRoutes(app: Express): Promise<void> {
           }
           
           // Only update the resume fields, preserving all other fields
-          await storage.updateUser(userId, {
+           savedUser = await storage.updateUser(userId, {
             resumeUrl: result.url,
             resumePreviewUrls: result.previewUrls
           });
@@ -1569,13 +1640,21 @@ export async function registerRoutes(app: Express): Promise<void> {
            logger.error('[Resume Upload] Error updating user resume', {
              errorClass: updateError instanceof Error ? updateError.name : 'UnknownError',
            });
-          // We continue even if update fails - just log the error
+           // A successful upload without a durable profile link is an orphan.
+           // Remove the exact managed objects so clients never receive a
+           // reference that the database does not own.
+           if (firebaseStorageService.isAvailable()) {
+             await Promise.allSettled(remoteReferences.map((reference) =>
+               firebaseStorageService.deleteMediaReference(reference)
+             ));
+           }
+           return res.status(503).json({ message: 'Resume uploaded but could not be linked to the profile' });
         }
       } else {
         logger.debug('[Resume Upload] No authenticated user, returning URL only - will be saved during account creation');
       }
       
-      res.json(result);
+       res.json({ ...result, ...(savedUser ? { user: toSelfUserDto(savedUser) } : {}) });
     } catch (error) {
        logger.error('[Resume Upload] Error', {
          errorClass: error instanceof Error ? error.name : 'UnknownError',
@@ -1583,6 +1662,10 @@ export async function registerRoutes(app: Express): Promise<void> {
       res.status(500).json({ 
          message: 'Failed to upload resume',
       });
+    } finally {
+      if (!preserveLocalFallback) {
+        await cleanupTemporaryUpload(temporaryPath);
+      }
     }
   });
 
@@ -1590,20 +1673,27 @@ export async function registerRoutes(app: Express): Promise<void> {
   app.post(['/api/upload/photo', '/api/upload/profile-photo'], uploadLimiter, authenticateUploadPrincipal, requireTrustedOriginForSessionMutation, requireUploadPrincipal, uploadPhoto.single('photo'), async (req, res) => {
     // Accept photos even if not authenticated (for registration process)
      // Keep only bounded authentication metadata in logs.
-     const userId = (req as express.Request & { authMethod?: string }).authMethod
-       ? req.user?.id
-       : undefined;
-    const firebaseUid = !userId ? getRegistrant(req).uid : undefined;
-     logger.debug('[Photo Upload] Processing upload', {
-       authenticated: Boolean(userId),
-       hasFirebaseRegistrant: Boolean(firebaseUid),
-     });
-
+    let temporaryPath: string | undefined;
+    let preserveLocalFallback = false;
+    let userId: number | undefined;
+    let firebaseUid: string | undefined;
+    let savedUser: User | null = null;
+    const remoteReferences: string[] = [];
     try {
+      userId = (req as express.Request & { authMethod?: string }).authMethod
+        ? req.user?.id
+        : undefined;
+      firebaseUid = !userId ? getRegistrant(req).uid : undefined;
+      logger.debug('[Photo Upload] Processing upload', {
+        authenticated: Boolean(userId),
+        hasFirebaseRegistrant: Boolean(firebaseUid),
+      });
+
       if (!req.file) {
         logger.debug('[Photo Upload] No file in request');
         return res.status(400).json({ message: 'No file uploaded' });
       }
+      temporaryPath = req.file.path;
 
       logger.debug(`[Photo Upload] File received (${req.file.mimetype}, ${req.file.size} bytes)`);
 
@@ -1639,22 +1729,13 @@ export async function registerRoutes(app: Express): Promise<void> {
         );
 
         fileUrl = result.url;
+        remoteReferences.push(fileUrl);
          logger.debug('[Photo Upload] Firebase upload successful');
 
-        // Clean up local temp file if it exists
-        if (req.file.path) {
-          try {
-            fs.unlinkSync(req.file.path);
-            logger.debug('[Photo Upload] Cleaned up local temp file');
-          } catch (error) {
-             logger.debug('[Photo Upload] Could not clean up temp file', {
-               errorClass: error instanceof Error ? error.name : 'UnknownError',
-             });
-          }
-        }
        } else if (!userId) {
          return res.status(503).json({ message: 'Managed media storage is unavailable' });
        } else {
+          preserveLocalFallback = true;
          logger.debug('[Photo Upload] Firebase Storage not available, using local storage');
         // Fallback to local storage
         fileUrl = `/uploads/${path.basename(req.file.path)}`.replace(/\\/g, '/');
@@ -1673,7 +1754,7 @@ export async function registerRoutes(app: Express): Promise<void> {
           }
           
           // Only update the photo field, preserving all other fields
-          await storage.updateUser(userId, {
+           savedUser = await storage.updateUser(userId, {
             photo: fileUrl
           });
           
@@ -1682,14 +1763,19 @@ export async function registerRoutes(app: Express): Promise<void> {
            logger.error('[Photo Upload] Error updating user photo', {
              errorClass: updateError instanceof Error ? updateError.name : 'UnknownError',
            });
-          // We continue even if update fails - just log the error
+           if (firebaseStorageService.isAvailable()) {
+             await Promise.allSettled(remoteReferences.map((reference) =>
+               firebaseStorageService.deleteMediaReference(reference)
+             ));
+           }
+           return res.status(503).json({ message: 'Photo uploaded but could not be linked to the profile' });
         }
       } else {
         logger.debug('[Photo Upload] No authenticated user, returning URL only');
       }
       
       // Return the URL to the uploaded file
-      res.json({ url: fileUrl });
+       res.json({ url: fileUrl, ...(savedUser ? { user: toSelfUserDto(savedUser) } : {}) });
     } catch (error) {
        logger.error('[Photo Upload] Error', {
          errorClass: error instanceof Error ? error.name : 'UnknownError',
@@ -1697,6 +1783,10 @@ export async function registerRoutes(app: Express): Promise<void> {
       res.status(500).json({ 
          message: 'Failed to upload photo',
       });
+    } finally {
+      if (!preserveLocalFallback) {
+        await cleanupTemporaryUpload(temporaryPath);
+      }
     }
   });
 

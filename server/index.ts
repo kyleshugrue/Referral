@@ -203,9 +203,36 @@ async function main() {
 
     // Lease recovery is periodic, not startup-only. A process can die after
     // claiming work and before writing its terminal state.
+    let deliveryObligationsUnavailable = false;
     const runQueueRecovery = async (): Promise<void> => {
+      let dispatched = 0;
+      const deliveryReadiness = await checkDatabaseReadiness({
+        query: (text, values) => queryDatabase(pool, text, values),
+      }, ['delivery_obligations']);
+
+      if (!deliveryReadiness.ready) {
+        if (!deliveryObligationsUnavailable) {
+          logger.warn('[Queue Recovery] Delivery obligation recovery deferred until the schema is ready', {
+            reason: deliveryReadiness.reason,
+            missingTables: deliveryReadiness.missingTables,
+          });
+        }
+        deliveryObligationsUnavailable = true;
+      } else {
+        try {
+          dispatched = await storage.dispatchPendingDeliveryObligations(100);
+          if (deliveryObligationsUnavailable) {
+            logger.info('[Queue Recovery] Delivery obligation recovery is available again');
+          }
+          deliveryObligationsUnavailable = false;
+        } catch (error) {
+          logger.error('[Queue Recovery] Delivery obligation recovery failed', {
+            errorClass: error instanceof Error ? error.name : 'UnknownError',
+          });
+        }
+      }
+
       try {
-        const dispatched = await storage.dispatchPendingDeliveryObligations(100);
         const recovered = await storage.recoverStaleQueueWork(
           new Date(Date.now() - 5 * 60_000).toISOString(),
         );
@@ -213,7 +240,7 @@ async function main() {
           logger.info('[Queue Recovery] Reconciled delivery work', { dispatched, ...recovered });
         }
       } catch (error) {
-        logger.error('[Queue Recovery] Scheduled recovery failed', {
+        logger.error('[Queue Recovery] Scheduled legacy queue recovery failed', {
           errorClass: error instanceof Error ? error.name : 'UnknownError',
         });
       }

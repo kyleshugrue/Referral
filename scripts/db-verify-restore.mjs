@@ -7,7 +7,7 @@ import { verifyMigrationIntegrity } from './migration-integrity.mjs';
 const { Pool } = pg;
 const connectionString = process.env.RESTORE_DATABASE_URL;
 const acknowledged = process.argv.includes('--ack-isolated') || process.env.RESTORE_DATABASE_ISOLATED === 'true';
-const verifierVersion = '1';
+const verifierVersion = '2';
 
 function fail(message) {
   console.error(`db:verify-restore failed: ${message}`);
@@ -160,6 +160,19 @@ async function verifyRestore(url) {
             LEFT JOIN user_profile_snapshots s ON s.id = j.target_user_snapshot_id
             WHERE j.target_user_snapshot_id IS NOT NULL AND s.id IS NULL)
         )::int AS violations`,
+      invalidMediaReferences: `
+        SELECT COUNT(*)::int AS violations
+        FROM (
+          SELECT photo AS reference FROM users WHERE photo IS NOT NULL AND photo <> ''
+          UNION ALL
+          SELECT resume_url AS reference FROM users WHERE resume_url IS NOT NULL AND resume_url <> ''
+          UNION ALL
+          SELECT unnest(COALESCE(resume_preview_urls, ARRAY[]::text[])) AS reference
+          FROM users
+        ) media
+        WHERE reference <> '/placeholder.jpg'
+          AND reference NOT LIKE '/uploads/%'
+          AND reference NOT LIKE '/api/media/%'`,
     };
     const checks = {};
     for (const [name, query] of Object.entries(invariantChecks)) {

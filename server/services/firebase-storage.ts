@@ -105,6 +105,26 @@ export class FirebaseStorageService {
     return this.getSignedReadUrl(this.fromMediaId(mediaId));
   }
 
+  /**
+   * Delete one object previously returned by this service. This is used when
+   * a remote upload succeeds but the database link cannot be committed.
+   * The reference is decoded and prefix-checked before deletion.
+   */
+  async deleteMediaReference(reference: string): Promise<void> {
+    if (!this.bucket) {
+      throw new Error('Firebase Storage not initialized');
+    }
+
+    const fileName = reference.startsWith('/api/media/')
+      ? this.fromMediaId(reference.slice('/api/media/'.length))
+      : this.extractFileName(reference);
+    if (!fileName || !this.isAllowedObjectKey(fileName)) {
+      throw new Error('Invalid managed media reference');
+    }
+
+    await this.bucket.file(fileName).delete();
+  }
+
   normalizeMediaReference(reference: string | null | undefined): string | null | undefined {
     if (!reference || reference.startsWith('/api/media/')) {
       return reference;
@@ -176,8 +196,8 @@ export class FirebaseStorageService {
           contentType: 'image/jpeg',
           cacheControl: 'private, max-age=3600',
           metadata: {
-            originalName,
             uploadedAt: new Date().toISOString(),
+             purpose: 'photo',
              userId: userId?.toString() || 'unknown',
              ...(firebaseUid ? { firebaseUid } : {}),
           }
@@ -290,8 +310,8 @@ export class FirebaseStorageService {
           contentType,
           cacheControl: 'private, max-age=3600',
           metadata: {
-            originalName,
             uploadedAt: new Date().toISOString(),
+             purpose: 'resume',
              userId: userId?.toString() || 'unknown',
              ...(firebaseUid ? { firebaseUid } : {}),
           }
@@ -330,7 +350,9 @@ export class FirebaseStorageService {
   private async generatePdfPreviewsFromBuffer(pdfBuffer: Buffer, fileName: string, userId?: number, firebaseUid?: string): Promise<string[]> {
     const tempDir = '/tmp';
     const tempPdfPath = path.join(tempDir, `temp-${Date.now()}.pdf`);
+    let previewDir: string | undefined;
     const previewUrls: string[] = [];
+    const uploadedPreviewFileNames: string[] = [];
 
     try {
       // Write PDF buffer to temporary file
@@ -338,7 +360,7 @@ export class FirebaseStorageService {
 
       // Create temporary directory for previews
       const previewDirName = `preview-${Date.now()}`;
-      const previewDir = path.join(tempDir, previewDirName);
+      previewDir = path.join(tempDir, previewDirName);
       await fs.promises.mkdir(previewDir, { recursive: true });
 
       // Generate JPEG previews
@@ -395,13 +417,15 @@ export class FirebaseStorageService {
             contentType: 'image/jpeg',
             cacheControl: 'private, max-age=3600',
             metadata: {
-              originalPdf: fileName,
+             originalPdf: fileName,
+             purpose: 'resume-preview',
               uploadedAt: new Date().toISOString(),
                userId: userId?.toString() || 'unknown',
                ...(firebaseUid ? { firebaseUid } : {}),
             }
           }
         });
+         uploadedPreviewFileNames.push(previewFileName);
 
          const previewUrl = await this.responseUrl(previewFileName, userId, firebaseUid);
         previewUrls.push(previewUrl);
@@ -411,23 +435,23 @@ export class FirebaseStorageService {
         count: previewUrls.length,
       });
 
-      // Cleanup temporary files
-      await fs.promises.unlink(tempPdfPath);
-      await fs.promises.rm(previewDir, { recursive: true });
-
       return previewUrls;
     } catch (error) {
-      // Cleanup temporary files in case of error
-      try {
-        await fs.promises.unlink(tempPdfPath);
-       } catch {
-         // The temporary file may already be absent; continue cleanup and rethrow the original error.
-       }
-      
+      await Promise.allSettled(
+        uploadedPreviewFileNames.map((previewFileName) => this.bucket!.file(previewFileName).delete()),
+      );
       logger.error('[Firebase Storage] Error generating PDF previews', {
         errorClass: error instanceof Error ? error.name : 'UnknownError',
       });
       throw error;
+    } finally {
+      // Both success and failure paths remove the local PDF and preview
+      // directory. Remote objects are addressed separately by their managed
+      // references and are never implicitly enumerated here.
+      await fs.promises.unlink(tempPdfPath).catch(() => {});
+      if (previewDir) {
+        await fs.promises.rm(previewDir, { recursive: true, force: true }).catch(() => {});
+      }
     }
   }
 

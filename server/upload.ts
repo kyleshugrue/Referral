@@ -45,6 +45,40 @@ if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
+/**
+ * Remove a multer temporary file without ever following a path outside the
+ * application upload directory. Callers should use this in a finally block;
+ * local fallback files are intentionally retained by the route that adopts
+ * them as the user's media reference.
+ */
+export async function cleanupTemporaryUpload(filePath: string | undefined): Promise<void> {
+  if (!filePath) return;
+
+  const resolvedPath = path.resolve(filePath);
+  const relativeToUploadRoot = path.relative(path.resolve(uploadDir), resolvedPath);
+  if (
+    !relativeToUploadRoot ||
+    relativeToUploadRoot.startsWith('..') ||
+    path.isAbsolute(relativeToUploadRoot)
+  ) {
+    logger.warn('[Upload] Refusing to clean a path outside the upload directory');
+    return;
+  }
+
+  try {
+    await fs.promises.unlink(resolvedPath);
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error
+      ? (error as { code?: string }).code
+      : undefined;
+    if (code !== 'ENOENT') {
+      logger.warn('[Upload] Failed to remove temporary upload', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+    }
+  }
+}
+
 // Configure storage.
 // Stored filenames are generated server-side (timestamp + random hex) and are
 // completely independent of user-supplied names, which prevents path
@@ -87,6 +121,8 @@ const resumeFileFilter: NonNullable<multer.Options['fileFilter']> = (req, file, 
 };
 
 async function generatePdfPreviews(pdfPath: string): Promise<string[]> {
+  let previewDir: string | undefined;
+  let keepPreviewDir = false;
   try {
     logger.debug('[PDF Processing] Starting PDF preview generation');
 
@@ -100,7 +136,7 @@ async function generatePdfPreviews(pdfPath: string): Promise<string[]> {
     // Create a unique directory for this PDF's previews
     const timestamp = Date.now();
     const previewDirName = `preview-${timestamp}`;
-    const previewDir = path.join(uploadDir, previewDirName);
+    previewDir = path.join(uploadDir, previewDirName);
     await fs.promises.mkdir(previewDir, { recursive: true });
 
     // Use the preview directory for output
@@ -157,11 +193,18 @@ async function generatePdfPreviews(pdfPath: string): Promise<string[]> {
     });
 
     logger.debug(`[PDF Processing] Generated ${previewUrls.length} preview URL(s)`);
+    // Local fallback references these files, so retain the directory only
+    // after the complete generation step succeeds.
+    keepPreviewDir = true;
     return previewUrls;
   } catch (error) {
     logger.error('[PDF Processing] Error generating PDF previews:', error);
     // Return empty array instead of throwing to allow graceful fallback
     return [];
+  } finally {
+    if (previewDir && !keepPreviewDir) {
+      await fs.promises.rm(previewDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
 
@@ -173,16 +216,22 @@ async function generatePdfPreviews(pdfPath: string): Promise<string[]> {
 export async function verifyUploadedFile(filePath: string): Promise<void> {
   const ext = path.extname(filePath).toLowerCase();
   const header = Buffer.alloc(16);
-  const fileHandle = await fs.promises.open(filePath, 'r');
   try {
-    await fileHandle.read(header, 0, 16, 0);
-  } finally {
-    await fileHandle.close();
-  }
+    const fileHandle = await fs.promises.open(filePath, 'r');
+    try {
+      await fileHandle.read(header, 0, 16, 0);
+    } finally {
+      await fileHandle.close();
+    }
 
-  if (!matchesMagicBytes(header, ext)) {
-    await fs.promises.unlink(filePath).catch(() => {});
-    throw new Error('File contents do not match the file type.');
+    if (!matchesMagicBytes(header, ext)) {
+      throw new Error('File contents do not match the file type.');
+    }
+  } catch (error) {
+    // Validation and filesystem failures must not leave an untrusted upload
+    // behind for a later request to discover or serve.
+    await cleanupTemporaryUpload(filePath);
+    throw error;
   }
 }
 
