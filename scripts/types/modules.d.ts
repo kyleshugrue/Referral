@@ -71,6 +71,10 @@ declare module '*.mjs' {
   export const selectionPolicyIdentity: any;
   export const classifyWorkflowRuns: any;
   export const classifyWorkflowRun: any;
+  export const classifyQueue: any;
+  export const publishedSourceShas: any;
+  export const selectNextSource: any;
+  export const successfulSourceRuns: any;
   export const REPLIT_LOCKFILE_PREFIX: any;
   export const PUBLIC_REGISTRY_PREFIX: any;
   export const normalizeLockfileText: any;
