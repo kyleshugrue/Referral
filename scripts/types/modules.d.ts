@@ -72,6 +72,7 @@ declare module '*.mjs' {
   export const classifyWorkflowRuns: any;
   export const classifyWorkflowRun: any;
   export const classifyQueue: any;
+  export const discover: any;
   export const publishedSourceShas: any;
   export const selectNextSource: any;
   export const successfulSourceRuns: any;
