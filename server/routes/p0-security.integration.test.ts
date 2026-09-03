@@ -267,6 +267,26 @@ describe("P0 HTTP security regressions", () => {
   });
 
   describe("CSRF and bearer behavior", () => {
+    it("restores a real Passport session before serving a protected profile", async () => {
+      const owner = makeUser({ id: 1, fullName: "Session Owner" });
+      await startHarness([owner]);
+
+      const sessionResponse = await requestJson(port, "/__p0/session/1");
+      const cookie = sessionResponse.headers.get("set-cookie");
+      expect(sessionResponse.status).toBe(204);
+      expect(cookie).toBeTruthy();
+
+      const profileResponse = await requestJson(port, "/api/user", {
+        headers: { cookie: cookie as string },
+      });
+
+      expect(profileResponse.status).toBe(200);
+      expect(profileResponse.body).toMatchObject({
+        id: owner.id,
+        fullName: owner.fullName,
+      });
+    });
+
     it("rejects cookie-authenticated state changes without an allowed Origin", async () => {
       const owner = makeUser({ id: 1 });
       await startHarness([owner]);

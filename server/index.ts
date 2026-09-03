@@ -32,11 +32,16 @@ import { isOriginAllowed, securityHeaders } from './lib/http-security';
 import { assertRequiredEnv } from './lib/startup-checks';
 import {
   checkDatabaseReadiness,
+  requiredSchemaColumnsForTables,
+  requiredSchemaConstraintsForTables,
+  requiredSchemaIndexesForTables,
   requiredSchemaTablesForMode,
+  type DatabaseReadinessResult,
 } from './lib/database-readiness';
 import { beginHttpRequest, recordHttpResponse } from './lib/operational-metrics';
 import { queryDatabase } from './lib/database-client';
 import { createServerLifecycle } from './lib/server-lifecycle';
+import { createSchemaReadinessGate } from './lib/schema-readiness-gate';
 import { copyProxyResponseHeaders } from './lib/proxy-headers';
 import { processAccountErasureJobs } from './services/account-erasure';
 
@@ -156,50 +161,130 @@ async function main() {
 
     logger.info('[%s] Initializing storage...', new Date().toISOString());
     await storage.initialize();
-    // Resume durable erasure work after a restart. Claims are row-locked so
-    // an optional Worker process can safely run the same sweep.
-    void processAccountErasureJobs(10).catch((error) => {
-      const message = error instanceof Error ? error.message : '';
-      if (message.includes('account_erasure_jobs') || message.includes('account_status')) {
-        logger.warn('[AccountErasure] Recovery sweep deferred until migration 0008_account_erasure is applied', {
+
+    // Check the complete schema contract before session/passport middleware
+    // or any recovery sweep can query a partially migrated database.
+    let schemaReadiness: DatabaseReadinessResult = await checkDatabaseReadiness({
+      query: (text, values) => queryDatabase(pool, text, values),
+    }, requiredSchemaTablesForMode());
+    let schemaReadinessRefresh: Promise<DatabaseReadinessResult> | undefined;
+    const refreshSchemaReadiness = async (): Promise<DatabaseReadinessResult> => {
+      if (schemaReadinessRefresh) {
+        return schemaReadinessRefresh;
+      }
+      schemaReadinessRefresh = checkDatabaseReadiness({
+        query: (text, values) => queryDatabase(pool, text, values),
+      }, requiredSchemaTablesForMode()).then((nextReadiness) => {
+        const wasReady = schemaReadiness.ready;
+        schemaReadiness = nextReadiness;
+        if (wasReady !== nextReadiness.ready) {
+          logger.info('[Readiness] Database schema contract state changed', {
+            ready: nextReadiness.ready,
+            reason: nextReadiness.reason,
+            missingTables: nextReadiness.missingTables,
+            missingColumns: nextReadiness.missingColumns,
+            invalidColumns: nextReadiness.invalidColumns,
+            missingIndexes: nextReadiness.missingIndexes,
+            missingConstraints: nextReadiness.missingConstraints,
+          });
+        }
+        if (!wasReady && nextReadiness.ready) {
+          void processAccountErasureJobs(10).catch((error) => {
+            logger.error('[AccountErasure] Recovery sweep after readiness restoration failed', {
+              errorClass: error instanceof Error ? error.name : 'UnknownError',
+            });
+          });
+        }
+        return nextReadiness;
+      }).finally(() => {
+        schemaReadinessRefresh = undefined;
+      });
+      return schemaReadinessRefresh;
+    };
+
+    if (!schemaReadiness.ready) {
+      logger.warn('[Readiness] Database schema contract is incomplete; authenticated traffic is gated', {
+        reason: schemaReadiness.reason,
+        missingTables: schemaReadiness.missingTables,
+        missingColumns: schemaReadiness.missingColumns,
+        invalidColumns: schemaReadiness.invalidColumns,
+        missingIndexes: schemaReadiness.missingIndexes,
+        missingConstraints: schemaReadiness.missingConstraints,
+      });
+    }
+
+    const schemaReadinessInterval = setInterval(() => {
+      void refreshSchemaReadiness().catch((error) => {
+        logger.error('[Readiness] Periodic schema contract check failed', {
           errorClass: error instanceof Error ? error.name : 'UnknownError',
         });
-      } else {
-        logger.error('[AccountErasure] Recovery sweep failed', {
+      });
+    }, 30_000);
+    schemaReadinessInterval.unref?.();
+
+    // This is deliberately before setupAuth(), which installs
+    // express-session and passport.session(). Health and readiness stay
+    // available, while all other requests receive a bounded maintenance
+    // response until the complete schema is observed.
+    app.use(createSchemaReadinessGate(() => schemaReadiness));
+
+    // Register diagnostics before setupAuth() so a request carrying a stale
+    // session cookie cannot trigger Passport deserialization while the
+    // database contract is incomplete.
+    app.get('/api/health', (_req, res) => {
+      res.status(200).send('OK');
+    });
+
+    app.get('/api/ready', async (_req, res) => {
+      if (!lifecycle.isReady()) {
+        return res.status(503).json({
+          status: 'not_ready',
+          reason: lifecycle.getState() === 'draining' ? 'draining' : 'starting',
+        });
+      }
+
+      const readiness = await refreshSchemaReadiness();
+      if (!readiness.ready) {
+        return res.status(503).json({
+          status: 'not_ready',
+          reason: readiness.reason,
+          missingTables: readiness.reason === 'schema-incomplete' ? readiness.missingTables : undefined,
+          missingColumns: readiness.reason === 'schema-incomplete' ? readiness.missingColumns : undefined,
+          invalidColumns: readiness.reason === 'schema-incomplete' ? readiness.invalidColumns : undefined,
+          missingIndexes: readiness.reason === 'schema-incomplete' ? readiness.missingIndexes : undefined,
+          missingConstraints: readiness.reason === 'schema-incomplete' ? readiness.missingConstraints : undefined,
+        });
+      }
+      try {
+        const [push, callbacks] = await Promise.all([
+          storage.getQueuedNotificationStats(),
+          storage.getCallbackNotificationStats(),
+        ]);
+        return res.status(200).json({
+          status: 'ready',
+          queues: {
+            push: { pending: push.pending, processing: push.processing, failed: push.failed },
+            callbacks: { pending: callbacks.pending, processing: callbacks.processing, failed: callbacks.failed },
+          },
+        });
+      } catch (error) {
+        logger.error('[Readiness] Queue health check failed', {
           errorClass: error instanceof Error ? error.name : 'UnknownError',
         });
+        return res.status(503).json({ status: 'not_ready', reason: 'queue-unavailable' });
       }
     });
 
-    // Initialize background job queue for match generation
-    logger.info('[%s] Initializing background job queue...', new Date().toISOString());
-    const { backgroundJobQueue } = await import('./services/background-job-queue');
-    await backgroundJobQueue.start();
-    logger.info('[%s] Background job queue started', new Date().toISOString());
-
-    // Initialize callback queue processor for handling pending notifications
-    logger.info('[%s] Initializing callback queue processor...', new Date().toISOString());
-    const { callbackQueueProcessor } = await import('./services/callback-queue-processor');
-    callbackQueueProcessor.start();
-    logger.info('[%s] Callback queue processor started (polling every 5s)', new Date().toISOString());
-
-    // Push fallback delivery is durable work and must have an owner in the
-    // main app as well as the optional Worker VM. Atomic claims make this
-    // safe when both runtimes are enabled.
-    const { processQueuedPushNotifications } = await import('./services/push-notifications');
-    const runPushQueue = async (): Promise<void> => {
-      try {
-        await processQueuedPushNotifications();
-      } catch (error) {
-        logger.error('[Push Queue] Scheduled processing failed', {
+    // Resume durable erasure work only when its full schema is present.
+    if (schemaReadiness.ready) {
+      void processAccountErasureJobs(10).catch((error) => {
+        logger.error('[AccountErasure] Recovery sweep failed', {
           errorClass: error instanceof Error ? error.name : 'UnknownError',
         });
-      }
-    };
-    void runPushQueue();
-    const pushQueueInterval = setInterval(runPushQueue, 30_000);
-    pushQueueInterval.unref?.();
-    logger.info('[%s] Push queue processor started (polling every 30s)', new Date().toISOString());
+      });
+    } else {
+      logger.warn('[AccountErasure] Recovery sweep deferred until the schema contract is ready');
+    }
 
     // Lease recovery is periodic, not startup-only. A process can die after
     // claiming work and before writing its terminal state.
@@ -208,13 +293,18 @@ async function main() {
       let dispatched = 0;
       const deliveryReadiness = await checkDatabaseReadiness({
         query: (text, values) => queryDatabase(pool, text, values),
-      }, ['delivery_obligations']);
+      }, ['delivery_obligations'], requiredSchemaColumnsForTables(['delivery_obligations']),
+      requiredSchemaIndexesForTables(['delivery_obligations']),
+      requiredSchemaConstraintsForTables(['delivery_obligations']));
 
       if (!deliveryReadiness.ready) {
         if (!deliveryObligationsUnavailable) {
           logger.warn('[Queue Recovery] Delivery obligation recovery deferred until the schema is ready', {
             reason: deliveryReadiness.reason,
             missingTables: deliveryReadiness.missingTables,
+            missingColumns: deliveryReadiness.missingColumns,
+            missingIndexes: deliveryReadiness.missingIndexes,
+            missingConstraints: deliveryReadiness.missingConstraints,
           });
         }
         deliveryObligationsUnavailable = true;
@@ -249,24 +339,61 @@ async function main() {
     queueRecoveryInterval.unref?.();
     void runQueueRecovery();
 
-    // Start stale token cleanup job (runs every 24 hours, deletes tokens older than 90 days)
-    const STALE_TOKEN_DAYS = 90;
-    const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
-    
-    // Run cleanup immediately on startup, then every 24 hours
-    const runTokenCleanup = async () => {
-      try {
-        logger.debug(`[%s] Running stale token cleanup (${STALE_TOKEN_DAYS} days)...`, new Date().toISOString());
-        const deletedCount = await storage.deleteStaleTokens(STALE_TOKEN_DAYS);
-        logger.info(`[%s] Stale token cleanup complete: ${deletedCount} token(s) removed`, new Date().toISOString());
-      } catch (error) {
-        logger.error('[Token Cleanup] Error in periodic cleanup:', error);
-      }
-    };
-    
-    runTokenCleanup(); // Run immediately on startup
-    const staleTokenCleanupInterval = setInterval(runTokenCleanup, CLEANUP_INTERVAL_MS); // Then every 24 hours
-    logger.info('[%s] Stale token cleanup job started (runs every 24h)', new Date().toISOString());
+    type BackgroundJobQueue = typeof import('./services/background-job-queue').backgroundJobQueue;
+    type CallbackQueueProcessor = typeof import('./services/callback-queue-processor').callbackQueueProcessor;
+    let backgroundJobQueue: BackgroundJobQueue | undefined;
+    let callbackQueueProcessor: CallbackQueueProcessor | undefined;
+    let pushQueueInterval: NodeJS.Timeout | undefined;
+    let staleTokenCleanupInterval: NodeJS.Timeout | undefined;
+
+    if (schemaReadiness.ready) {
+      // Initialize schema-dependent processors only after the full contract is
+      // present. A restart after migration activates these services.
+      logger.info('[%s] Initializing background job queue...', new Date().toISOString());
+      ({ backgroundJobQueue } = await import('./services/background-job-queue'));
+      await backgroundJobQueue.start();
+      logger.info('[%s] Background job queue started', new Date().toISOString());
+
+      logger.info('[%s] Initializing callback queue processor...', new Date().toISOString());
+      ({ callbackQueueProcessor } = await import('./services/callback-queue-processor'));
+      callbackQueueProcessor.start();
+      logger.info('[%s] Callback queue processor started (polling every 5s)', new Date().toISOString());
+
+      // Push fallback delivery is durable work and must have an owner in the
+      // main app as well as the optional Worker VM. Atomic claims make this
+      // safe when both runtimes are enabled.
+      const { processQueuedPushNotifications } = await import('./services/push-notifications');
+      const runPushQueue = async (): Promise<void> => {
+        try {
+          await processQueuedPushNotifications();
+        } catch (error) {
+          logger.error('[Push Queue] Scheduled processing failed', {
+            errorClass: error instanceof Error ? error.name : 'UnknownError',
+          });
+        }
+      };
+      void runPushQueue();
+      pushQueueInterval = setInterval(runPushQueue, 30_000);
+      pushQueueInterval.unref?.();
+      logger.info('[%s] Push queue processor started (polling every 30s)', new Date().toISOString());
+
+      const STALE_TOKEN_DAYS = 90;
+      const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+      const runTokenCleanup = async () => {
+        try {
+          logger.debug(`[%s] Running stale token cleanup (${STALE_TOKEN_DAYS} days)...`, new Date().toISOString());
+          const deletedCount = await storage.deleteStaleTokens(STALE_TOKEN_DAYS);
+          logger.info(`[%s] Stale token cleanup complete: ${deletedCount} token(s) removed`, new Date().toISOString());
+        } catch (error) {
+          logger.error('[Token Cleanup] Error in periodic cleanup:', error);
+        }
+      };
+      void runTokenCleanup();
+      staleTokenCleanupInterval = setInterval(runTokenCleanup, CLEANUP_INTERVAL_MS);
+      logger.info('[%s] Stale token cleanup job started (runs every 24h)', new Date().toISOString());
+    } else {
+      logger.warn('[Processors] Schema-dependent processors deferred until a restart after schema repair');
+    }
 
     // Reset stale active match generation jobs to 'PENDING' on startup
     // (crash recovery). The queue marks active jobs as 'PROCESSING';
@@ -404,60 +531,22 @@ async function main() {
       process.exitCode = 1;
       void lifecycle.beginShutdown([
         () => cleanupWebSocketServer(),
-        () => backgroundJobQueue.stop(),
-        () => callbackQueueProcessor.stop(),
-        () => clearInterval(pushQueueInterval),
+        () => backgroundJobQueue?.stop(),
+        () => callbackQueueProcessor?.stop(),
+        () => {
+          if (pushQueueInterval) clearInterval(pushQueueInterval);
+        },
         () => clearInterval(queueRecoveryInterval),
-        () => clearInterval(staleTokenCleanupInterval),
+        () => clearInterval(schemaReadinessInterval),
+        () => {
+          if (staleTokenCleanupInterval) clearInterval(staleTokenCleanupInterval);
+        },
         () => pool.end(),
       ]).catch((shutdownError) => {
         logger.error('[Shutdown] Startup failure cleanup failed', {
           errorClass: shutdownError instanceof Error ? shutdownError.name : 'UnknownError',
         });
       });
-    });
-
-    // Add health check endpoint for API checks only
-    app.get('/api/health', (req, res) => {
-      res.status(200).send('OK');
-    });
-
-    app.get('/api/ready', async (_req, res) => {
-      if (!lifecycle.isReady()) {
-        return res.status(503).json({
-          status: 'not_ready',
-          reason: lifecycle.getState() === 'draining' ? 'draining' : 'starting',
-        });
-      }
-
-      const readiness = await checkDatabaseReadiness({
-        query: (text, values) => queryDatabase(pool, text, values),
-      }, requiredSchemaTablesForMode());
-      if (!readiness.ready) {
-        return res.status(503).json({
-          status: 'not_ready',
-          reason: readiness.reason,
-          missingTables: readiness.reason === 'schema-incomplete' ? readiness.missingTables : undefined,
-        });
-      }
-      try {
-        const [push, callbacks] = await Promise.all([
-          storage.getQueuedNotificationStats(),
-          storage.getCallbackNotificationStats(),
-        ]);
-        return res.status(200).json({
-          status: 'ready',
-          queues: {
-            push: { pending: push.pending, processing: push.processing, failed: push.failed },
-            callbacks: { pending: callbacks.pending, processing: callbacks.processing, failed: callbacks.failed },
-          },
-        });
-      } catch (error) {
-        logger.error('[Readiness] Queue health check failed', {
-          errorClass: error instanceof Error ? error.name : 'UnknownError',
-        });
-        return res.status(503).json({ status: 'not_ready', reason: 'queue-unavailable' });
-      }
     });
 
     const closeHttpServer = (): Promise<void> => new Promise((resolve, reject) => {
@@ -490,11 +579,16 @@ async function main() {
         stopAcceptingHttp,
         () => cleanupWebSocketServer(),
         awaitHttpDrain,
-        () => backgroundJobQueue.stop(),
-        () => callbackQueueProcessor.stop(),
-         () => clearInterval(pushQueueInterval),
-         () => clearInterval(queueRecoveryInterval),
-        () => clearInterval(staleTokenCleanupInterval),
+        () => backgroundJobQueue?.stop(),
+        () => callbackQueueProcessor?.stop(),
+        () => {
+          if (pushQueueInterval) clearInterval(pushQueueInterval);
+        },
+        () => clearInterval(queueRecoveryInterval),
+        () => clearInterval(schemaReadinessInterval),
+        () => {
+          if (staleTokenCleanupInterval) clearInterval(staleTokenCleanupInterval);
+        },
         () => pool.end(),
       ]).then(() => {
         logger.info('[Shutdown] Graceful shutdown complete');

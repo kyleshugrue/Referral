@@ -159,7 +159,13 @@ export function setupAuth(app: Express) {
       }
       done(null, user);
     } catch (error) {
-      done(error);
+      logger.error('[Auth] Session deserialization failed', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+      // Do not pass the database error through to Express. The early schema
+      // gate normally prevents this path during a migration, but this keeps
+      // alternate/test bootstrap paths from exposing SQL or user identifiers.
+      done(new Error('Authentication service unavailable'));
     }
   });
 

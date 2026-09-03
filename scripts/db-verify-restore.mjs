@@ -7,7 +7,7 @@ import { verifyMigrationIntegrity } from './migration-integrity.mjs';
 const { Pool } = pg;
 const connectionString = process.env.RESTORE_DATABASE_URL;
 const acknowledged = process.argv.includes('--ack-isolated') || process.env.RESTORE_DATABASE_ISOLATED === 'true';
-const verifierVersion = '2';
+const verifierVersion = '3';
 
 function fail(message) {
   console.error(`db:verify-restore failed: ${message}`);
@@ -89,6 +89,56 @@ async function verifyRestore(url) {
     const presentTables = new Set(tables.rows.map((row) => row.table_name));
     const missingTables = expectedTables.filter((table) => !presentTables.has(table));
     if (missingTables.length) throw new Error(`schema contract missing ${missingTables.length} required table(s)`);
+
+    const expectedColumns = [
+      ['users', 'account_status', 'text', 'NO', true],
+      ['users', 'deletion_requested_at', 'timestamp with time zone', 'YES', false],
+      ['users', 'deletion_completed_at', 'timestamp with time zone', 'YES', false],
+      ['callback_notification_queue', 'dedupe_key', 'text', 'YES', false],
+      ['delivery_obligations', 'id', 'integer', 'NO', true],
+      ['delivery_obligations', 'user_id', 'integer', 'NO', false],
+      ['delivery_obligations', 'event_type', 'text', 'NO', false],
+      ['delivery_obligations', 'payload', 'text', 'NO', false],
+      ['delivery_obligations', 'dedupe_key', 'text', 'NO', false],
+      ['delivery_obligations', 'expires_at', 'timestamp with time zone', 'NO', false],
+      ['delivery_obligations', 'status', 'text', 'NO', true],
+      ['delivery_obligations', 'created_at', 'timestamp with time zone', 'NO', true],
+      ['delivery_obligations', 'completed_at', 'timestamp with time zone', 'YES', false],
+      ['account_erasure_jobs', 'id', 'integer', 'NO', true],
+      ['account_erasure_jobs', 'user_id', 'integer', 'NO', false],
+      ['account_erasure_jobs', 'status', 'text', 'NO', true],
+      ['account_erasure_jobs', 'attempt_count', 'integer', 'NO', true],
+      ['account_erasure_jobs', 'next_attempt_at', 'timestamp with time zone', 'NO', true],
+      ['account_erasure_jobs', 'last_error_code', 'text', 'YES', false],
+      ['account_erasure_jobs', 'requested_at', 'timestamp with time zone', 'NO', true],
+      ['account_erasure_jobs', 'started_at', 'timestamp with time zone', 'YES', false],
+      ['account_erasure_jobs', 'completed_at', 'timestamp with time zone', 'YES', false],
+    ];
+    const columns = await client.query(
+      `SELECT table_name, column_name, data_type, is_nullable, column_default
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = ANY($1::text[])
+          AND column_name = ANY($2::text[])`,
+      [
+        [...new Set(expectedColumns.map(([table]) => table))],
+        [...new Set(expectedColumns.map(([, column]) => column))],
+      ],
+    );
+    const presentColumns = new Map(
+      columns.rows.map((row) => [`${row.table_name}.${row.column_name}`, row]),
+    );
+    for (const [table, column, dataType, nullable, requiresDefault] of expectedColumns) {
+      const key = `${table}.${column}`;
+      const metadata = presentColumns.get(key);
+      if (!metadata) throw new Error(`schema contract missing required column: ${key}`);
+      if (metadata.data_type !== dataType || metadata.is_nullable !== nullable) {
+        throw new Error(`schema contract has incompatible column: ${key}`);
+      }
+      if (requiresDefault && !metadata.column_default) {
+        throw new Error(`schema contract missing required default: ${key}`);
+      }
+    }
 
     const constraints = await client.query(
       `SELECT conname FROM pg_constraint WHERE connamespace = 'public'::regnamespace`,

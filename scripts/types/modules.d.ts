@@ -71,4 +71,10 @@ declare module '*.mjs' {
   export const selectionPolicyIdentity: any;
   export const classifyWorkflowRuns: any;
   export const classifyWorkflowRun: any;
+  export const REPLIT_LOCKFILE_PREFIX: any;
+  export const PUBLIC_REGISTRY_PREFIX: any;
+  export const normalizeLockfileText: any;
+  export const buildNpmEnvironment: any;
+  export const parseCiInstallArgs: any;
+  export const installCiDependencies: any;
 }
