@@ -500,6 +500,9 @@ export class DatabaseStorage implements IStorage {
 
       const existing = byUid ?? byEmail;
       if (!existing) return undefined;
+      if (existing.accountStatus !== 'active') {
+        throw new FirebaseIdentityConflictError('Account is not active');
+      }
 
       if (byUid) {
         if (!emailVerified || existing.emailVerified) return existing;

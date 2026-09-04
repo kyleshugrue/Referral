@@ -53,6 +53,11 @@ export interface JobResult {
   processingTime?: number;
 }
 
+interface NotificationWaiter {
+  resolve: () => void;
+  timeout?: ReturnType<typeof setTimeout>;
+}
+
 export class BackgroundJobQueue {
   private storage: IStorage;
   private isProcessing = false;
@@ -61,7 +66,7 @@ export class BackgroundJobQueue {
   // Event-driven architecture members
   private listenPool: DatabasePool | null = null;
   private listenClient: DatabaseClient | null = null;
-  private jobAvailableResolvers: Array<() => void> = [];
+  private jobAvailableResolvers: NotificationWaiter[] = [];
   private reconnectAttempts = 0;
   private isReconnecting = false;
   private isStopping = false;
@@ -160,8 +165,8 @@ export class BackgroundJobQueue {
       
       // Resolve all pending promises
       while (this.jobAvailableResolvers.length > 0) {
-        const resolve = this.jobAvailableResolvers.shift();
-        if (resolve) resolve();
+        const waiter = this.jobAvailableResolvers.shift();
+        waiter?.resolve();
       }
     }
   }
@@ -174,13 +179,20 @@ export class BackgroundJobQueue {
    */
   private waitForJobNotification(): Promise<void> {
     return new Promise((resolve) => {
-      // Add resolver to the list
-      this.jobAvailableResolvers.push(resolve);
-      
-      // Set up fallback timeout
-      const timeout = setTimeout(() => {
-        // Remove this resolver from the list
-        const index = this.jobAvailableResolvers.indexOf(resolve);
+      let settled = false;
+      const waiter: NotificationWaiter = {
+        resolve: () => {
+          if (settled) return;
+          settled = true;
+          if (waiter.timeout) clearTimeout(waiter.timeout);
+          resolve();
+        },
+      };
+
+      waiter.timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const index = this.jobAvailableResolvers.indexOf(waiter);
         if (index !== -1) {
           this.jobAvailableResolvers.splice(index, 1);
         }
@@ -193,19 +205,8 @@ export class BackgroundJobQueue {
         
         resolve();
       }, this.FALLBACK_POLL_INTERVAL);
-      
-      // Clean up timeout if resolved early
-      const originalResolve = resolve;
-      const wrappedResolve = () => {
-        clearTimeout(timeout);
-        originalResolve();
-      };
-      
-      // Replace the resolver with the wrapped version
-      const index = this.jobAvailableResolvers.indexOf(resolve);
-      if (index !== -1) {
-        this.jobAvailableResolvers[index] = wrappedResolve;
-      }
+
+      this.jobAvailableResolvers.push(waiter);
     });
   }
 
