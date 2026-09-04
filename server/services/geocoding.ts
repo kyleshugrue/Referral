@@ -5,6 +5,10 @@
  */
 
 import { zipCodeGeocoder } from './zip-code-geocoder';
+import {
+  readBoundedResponseBody,
+  validateAllowedOutboundUrl,
+} from '../lib/outbound-network';
 
 interface Coordinates {
   lat: number;
@@ -75,15 +79,16 @@ class GeocodingService {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.providerTimeoutMs);
     try {
-      const encodedLocation = encodeURIComponent(location);
-      const response = await fetch(
-        `https://maps.googleapis.com/maps/api/geocode/json?address=${encodedLocation}&key=${apiKey}`,
-        { signal: controller.signal },
-      );
-      const contentLength = Number(response.headers.get('content-length') ?? 0);
-      if (contentLength > 64 * 1024) throw new Error('Geocoder response too large');
-      const body = await response.text();
-      if (body.length > 64 * 1024) throw new Error('Geocoder response too large');
+      const requestUrl = new URL('https://maps.googleapis.com/maps/api/geocode/json');
+      requestUrl.searchParams.set('address', location);
+      requestUrl.searchParams.set('key', apiKey);
+      validateAllowedOutboundUrl(requestUrl.toString(), ['https://maps.googleapis.com']);
+
+      const response = await fetch(requestUrl, {
+        signal: controller.signal,
+        redirect: 'error',
+      });
+      const body = await readBoundedResponseBody(response, 64 * 1024);
       const data = JSON.parse(body) as {
         status?: string;
         results?: Array<{ geometry?: { location?: { lat?: number; lng?: number } } }>;
