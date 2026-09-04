@@ -271,7 +271,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   app.use('/api/user', userRouter);
   
   // Register API proxy router (requires authentication for security)
-  app.use('/api/proxy', publicLookupLimiter, apiProxyRouter);
+  app.use('/api/proxy', publicLookupLimiter, requireAuthJWT, requireCompleteRegistration, apiProxyRouter);
   
   // Register cost analysis router (requires authentication)
   app.use('/api/cost-analysis', publicLookupLimiter, costAnalysisRouter);
@@ -554,9 +554,20 @@ export async function registerRoutes(app: Express): Promise<void> {
       const allConnections = await storage.getAllPotentialConnections(req.user.id, 1, 1000);
       const allUsers = allConnections.profiles || [];
 
-      // Import geocoding service
+      // Import geocoding service. Persisted coordinates are the primary source;
+      // provider lookups below are only a bounded repair path for legacy rows.
       const { GeocodingService } = await import('./services/geocoding');
       const geocoding = new GeocodingService();
+      type Coordinates = { lat: number; lng: number };
+      const parseCoordinates = (lat: string | null | undefined, lng: string | null | undefined): Coordinates | null => {
+        const parsedLat = Number(lat);
+        const parsedLng = Number(lng);
+        return Number.isFinite(parsedLat) && Number.isFinite(parsedLng) &&
+          parsedLat >= -90 && parsedLat <= 90 &&
+          parsedLng >= -180 && parsedLng <= 180
+          ? { lat: parsedLat, lng: parsedLng }
+          : null;
+      };
 
       // First filter users by shared interests (fast, synchronous operation)
       const usersWithSharedInterests = allUsers.filter(user => {
@@ -578,31 +589,63 @@ export async function registerRoutes(app: Express): Promise<void> {
                (sharedProfessionalInterests && sharedProfessionalInterests.length > 0);
       });
 
-      // Parallelize geocoding checks for all users with shared interests
-      // This prevents N+1 query pattern - all geocoding happens concurrently
-      const radiusChecks = usersWithSharedInterests.map(async (user) => {
-        // Check distance if both users have locations
-        if (currentUser.currentLocation && user.currentLocation) {
-          try {
-            const isWithinRadius = await geocoding.isWithinRadius(
-              currentUser.currentLocation,
-              user.currentLocation,
-              radiusInMiles
-            );
-            return { user, isWithin: isWithinRadius };
-          } catch (error) {
-            logger.error(`[SharedInterests] Error calculating distance between ${currentUser.currentLocation} and ${user.currentLocation}:`, error);
-            // Fall back to exact location match if distance calculation fails
-            const exactMatch = currentUser.currentLocation.toLowerCase().trim() === user.currentLocation.toLowerCase().trim();
-            return { user, isWithin: exactMatch };
-          }
-        }
-        // If either user has no location, exclude them
-        return { user, isWithin: false };
-      });
+      const currentCoordinates = parseCoordinates(
+        currentUser.currentLocationLat,
+        currentUser.currentLocationLng,
+      );
 
-      // Execute all geocoding checks in parallel
-      const radiusResults = await Promise.all(radiusChecks);
+      // Only legacy users without persisted coordinates need provider fallback.
+      // Deduplicate locations, cap total provider work per request, and keep
+      // concurrency fixed so a large candidate page cannot amplify paid calls.
+      const missingLocationUsers = usersWithSharedInterests.filter((user) =>
+        !parseCoordinates(user.currentLocationLat, user.currentLocationLng) &&
+        Boolean(user.currentLocation),
+      );
+      const fallbackLocations = [...new Set([
+        ...(!currentCoordinates && currentUser.currentLocation ? [currentUser.currentLocation.trim()] : []),
+        ...missingLocationUsers.map((user) => user.currentLocation!.trim()),
+      ])]
+        .slice(0, 20);
+      const fallbackCoordinates = new Map<string, Coordinates | null>();
+      const fallbackConcurrency = 4;
+      for (let offset = 0; offset < fallbackLocations.length; offset += fallbackConcurrency) {
+        const batch = fallbackLocations.slice(offset, offset + fallbackConcurrency);
+        const results = await Promise.all(batch.map(async (location) => {
+          try {
+            return [location, await geocoding.geocodeLocation(location)] as const;
+          } catch (error) {
+            logger.warn(`[SharedInterests] Bounded geocoding fallback failed`, {
+              errorClass: error instanceof Error ? error.name : 'UnknownError',
+            });
+            return [location, null] as const;
+          }
+        }));
+        for (const [location, coordinates] of results) {
+          fallbackCoordinates.set(location, coordinates);
+        }
+      }
+
+      const resolvedCurrentCoordinates = currentCoordinates ??
+        (currentUser.currentLocation
+          ? fallbackCoordinates.get(currentUser.currentLocation.trim()) ?? null
+          : null);
+      const radiusResults = usersWithSharedInterests.map((user) => {
+        if (!currentUser.currentLocation || !user.currentLocation) {
+          return { user, isWithin: false };
+        }
+        const candidateCoordinates = parseCoordinates(user.currentLocationLat, user.currentLocationLng) ??
+          fallbackCoordinates.get(user.currentLocation.trim()) ?? null;
+        if (resolvedCurrentCoordinates && candidateCoordinates) {
+          return {
+            user,
+            isWithin: geocoding.calculateDistance(resolvedCurrentCoordinates, candidateCoordinates) <= radiusInMiles,
+          };
+        }
+        return {
+          user,
+          isWithin: currentUser.currentLocation.toLowerCase().trim() === user.currentLocation.toLowerCase().trim(),
+        };
+      });
       
       // Filter to only users within radius
       const filteredUsers = radiusResults

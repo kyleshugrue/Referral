@@ -110,7 +110,6 @@
     "express-session": "^1.18.1",
     "firebase": "^11.7.1",
     "firebase-admin": "^13.10.0",
-    "firebase-functions": "^6.4.0",
     "framer-motion": "^11.13.1",
     "input-otp": "^1.2.4",
     "jsdom": "^29.1.1",
@@ -166,7 +165,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.11.0",
     "postcss": "^8.4.47",
-    "tailwindcss": "^3.4.14",
+    "tailwindcss": "^3.4.19",
     "tsx": "^4.19.1",
     "typescript": "5.6.3",
     "typescript-eslint": "^8.68.0",
@@ -176,6 +175,9 @@
     "bufferutil": "^4.0.8"
   },
   "overrides": {
+    "@xmldom/xmldom": "^0.9.12",
+    "browserslist": "^4.28.9",
+    "qs": "^6.16.0",
     "firebase-tools": {
       "uuid": ">=11.1.1"
     },

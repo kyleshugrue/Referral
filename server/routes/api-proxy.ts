@@ -50,24 +50,10 @@ router.get('/geocode', geocodeLimiter, async (req, res) => {
 
 // API status check endpoint
 router.get('/status', async (req, res) => {
-  const status = {
-    geocoding: {
-      available: !!process.env.GOOGLE_MAPS_API_KEY,
-      service: 'Google Maps API'
-    },
-    ai_matching: {
-      available: true,
-      service: 'Worker VM (Background Processing)'
-    },
-    firebase: {
-      available: !!(process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY),
-      service: 'Firebase Admin'
-    }
-  };
-
+  // Keep this endpoint useful as a liveness check without exposing provider
+  // configuration, credential presence, or internal service topology.
   res.json({
     api_proxy: 'operational',
-    services: status,
     timestamp: new Date().toISOString()
   });
 });

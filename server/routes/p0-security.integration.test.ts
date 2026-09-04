@@ -562,5 +562,25 @@ describe("P0 HTTP security regressions", () => {
       expect(response.status).toBe(401);
       expect(response.body).toMatchObject({ error: expect.any(String) });
     });
+
+    it("does not expose paid geocoding to anonymous callers", async () => {
+      await startHarness([makeUser({ id: 1 })]);
+
+      const response = await requestJson(port, "/api/proxy/geocode?address=New%20York");
+
+      expect(response.status).toBe(401);
+    });
+
+    it("keeps the authenticated proxy status response generic", async () => {
+      await startHarness([makeUser({ id: 1 })]);
+
+      const response = await requestJson(port, "/api/proxy/status", {
+        headers: { authorization: `Bearer ${authToken(1)}` },
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ api_proxy: "operational" });
+      expect(response.body).not.toHaveProperty("services");
+    });
   });
 });

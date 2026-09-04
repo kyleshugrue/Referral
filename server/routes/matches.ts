@@ -334,24 +334,22 @@ router.post("/synergy/regenerate", async (req, res) => {
     }
     
     console.log(`[Matches Route] Regenerating synergy matches for user ${req.user.id}`);
-    
-    // Clear existing matches first
-    await storage.clearSynergyMatchesForUser(req.user.id);
-    console.log(`[Matches Route] Cleared existing synergy matches for user ${req.user.id}`);
-    
-    // Get the current user 
+
+    // Validate the user and enqueue first. Existing READY matches remain
+    // available while replacement work is being generated.
     const user = await storage.getUser(req.user.id);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
     console.log(`[Matches Route] Found user ${req.user.id}, forcing regeneration of matches`);
     
-    // Queue a job to regenerate matches in background
+    const regenerationEpoch = Date.now();
     await backgroundJobQueue.queueJob(req.user.id, 'MATCH_DESCRIPTION', {
       userId: req.user.id,
       profileUpdated: true,
+      forceRegeneration: true,
       userProfileVersion: user.profileVersion,
-      regenerationEpoch: Date.now(),
+      regenerationEpoch,
       priority: 1
     }, 1);
     console.log('[Matches Route] Queued match regeneration job for user');

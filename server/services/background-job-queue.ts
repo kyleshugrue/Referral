@@ -44,6 +44,7 @@ export interface JobMetadata {
   idempotencyKey?: string;
   score?: number;
   scoreEvidence?: string;
+  forceRegeneration?: boolean;
 }
 
 export interface JobResult {
