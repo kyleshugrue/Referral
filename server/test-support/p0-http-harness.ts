@@ -52,11 +52,19 @@ export interface HarnessState {
     receiverId: number;
     status: string;
   }>;
+  notifications: Array<{
+    id: number;
+    userId: number;
+    type: string;
+    relatedId: number;
+    read: boolean;
+  }>;
   updateCalls: Array<{ userId: number; data: Record<string, unknown> }>;
   acceptCalls: number[];
   refreshTokens: Array<Record<string, unknown>>;
   nextUserId: number;
   nextConnectionRequestId: number;
+  nextNotificationId: number;
 }
 
 function createSessionStore() {
@@ -148,10 +156,38 @@ function makeStorage(state: HarnessState) {
         status: "requested",
       };
       state.connectionRequests.set(request.id, request);
+      state.notifications.push({
+        id: state.nextNotificationId++,
+        userId: receiverId,
+        type: "connection_request",
+        relatedId: request.id,
+        read: false,
+      });
       return request;
     },
-    getNotificationsForRelatedId: async () => [],
+    getNotificationsForRelatedId: async (userId: number, relatedId: number, type: string) =>
+      state.notifications.filter(
+        (notification) =>
+          notification.userId === userId &&
+          notification.relatedId === relatedId &&
+          notification.type === type &&
+          !notification.read,
+      ),
     markNotificationAsRead: async () => undefined,
+    getUnreadNotificationCounts: async (userId: number) => {
+      const unread = state.notifications.filter(
+        (notification) => notification.userId === userId && !notification.read,
+      );
+      return {
+        messages: unread.filter((notification) => notification.type === "message").length,
+        connectionRequests: unread.filter((notification) => notification.type === "connection_request").length,
+        newConnections: unread.filter((notification) => notification.type === "new_connection").length,
+      };
+    },
+    getUnreadNotifications: async (userId: number) =>
+      state.notifications.filter(
+        (notification) => notification.userId === userId && !notification.read,
+      ),
     getConnectionRequestById: async (id: number) => state.connectionRequests.get(id),
     acceptConnectionRequest: async (id: number) => {
       const request = state.connectionRequests.get(id);
@@ -164,10 +200,23 @@ function makeStorage(state: HarnessState) {
         user2Id: request.receiverId,
       };
     },
-    rejectConnectionRequest: async (id: number) => {
+    rejectConnectionRequest: async (id: number, receiverId?: number) => {
       const request = state.connectionRequests.get(id);
-      if (!request || request.status !== "requested") return false;
+      if (
+        !request ||
+        request.status !== "requested" ||
+        (receiverId !== undefined && request.receiverId !== receiverId)
+      ) return false;
       request.status = "rejected";
+      for (const notification of state.notifications) {
+        if (
+          notification.userId === request.receiverId &&
+          notification.type === "connection_request" &&
+          notification.relatedId === request.id
+        ) {
+          notification.read = true;
+        }
+      }
       return true;
     },
   };
@@ -244,11 +293,13 @@ export async function createP0HttpHarness(
     usersByEmail: new Map(identityUsers.map((user) => [user.email, user])),
     accessTokens: new Map(),
     connectionRequests: new Map(),
+    notifications: [],
     updateCalls: [],
     acceptCalls: [],
     refreshTokens: [],
     nextUserId: Math.max(0, ...identityUsers.map((user) => user.id)) + 1,
     nextConnectionRequestId: 1000,
+    nextNotificationId: 2000,
   };
 
   const storage = makeStorage(state);

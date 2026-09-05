@@ -996,22 +996,12 @@ export async function registerRoutes(app: Express): Promise<void> {
         return res.status(404).json({ message: "Connection request not found" });
       }
       
-      // Mark any connection request notifications as read for both users
-      try {
-        // For the sender (current user)
-        await storage.markAllNotificationsAsRead(senderId, "connection_request");
-        
-        // For the receiver of the request
-        await storage.markAllNotificationsAsRead(receiverId, "connection_request");
-        
-        logger.debug(`[Routes] Marked connection request notifications as read for users ${senderId} and ${receiverId}`);
-      } catch (markError) {
-        logger.error('[Routes] Error marking connection request notifications as read:', markError);
-        // Don't fail the main request if this fails
+      // Resolve and cancel the exact server-selected relationship. The storage
+      // transaction also marks only this request's receiver notification read.
+      const cancelled = await storage.rejectConnectionRequest(requestToCancel.id, receiverId);
+      if (!cancelled) {
+        return res.status(404).json({ message: "Connection request not found" });
       }
-      
-      // Use the rejectConnectionRequest method to cancel the request
-      await storage.rejectConnectionRequest(requestToCancel.id);
       res.sendStatus(200);
     } catch (error) {
       logger.error('Cancel connection request error:', error);

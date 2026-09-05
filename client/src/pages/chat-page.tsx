@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { type User, type Conversation } from "@shared/schema";
-import { SendHorizontal, ChevronLeft } from "lucide-react";
+import { SendHorizontal } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useAuth } from "@/hooks/use-auth";
 import { ChatProfileDialog } from "@/components/chat-profile-dialog";
@@ -19,46 +19,7 @@ import { Capacitor } from "@capacitor/core";
 import { logger } from "@/lib/logger";
 import { waitForTokensReady, onAccessTokenChange } from "@/lib/token-manager";
 import { openAuthenticatedWebSocket } from "@/lib/websocket-ticket";
-
-// Create an optimized standalone chat back button component
-// This uses a fixed element that's always visible and unaffected by dialog state
-const AlwaysVisibleBackButton = () => {
-  const [, navigate] = useLocation();
-  
-  // Fast navigation using React Router instead of full page reload
-  const goToConnections = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    
-    // Ensure we're using a function to update the location
-    // This helps ensure the change is processed correctly
-    setTimeout(() => {
-      navigate("/connections");
-    }, 0);
-  };
-
-  return (
-    <button
-      onClick={goToConnections}
-      className="flex items-center justify-center"
-      style={{
-        background: 'transparent',
-        border: 'none',
-        color: 'hsl(215,25%,27%)',
-        cursor: 'pointer',
-        padding: 0,
-        width: '36px',
-        height: '36px',
-      }}
-    >
-      <ChevronLeft 
-        width={30} 
-        height={30} 
-        strokeWidth={3}
-      />
-    </button>
-  );
-}
+import { AlwaysVisibleBackButton } from "@/components/chat-back-button";
 
 export default function ChatPage() {
   const [location, navigate] = useLocation();

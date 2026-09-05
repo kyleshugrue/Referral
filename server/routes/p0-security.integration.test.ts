@@ -204,6 +204,57 @@ describe("P0 HTTP security regressions", () => {
       expect(responses.some((response) => [404, 409].includes(response.status))).toBe(true);
       expect(state.acceptCalls).toHaveLength(1);
     });
+
+    it("cancels one outgoing request without clearing unrelated receiver notifications", async () => {
+      const sender = makeUser({ id: 1, email: "sender@example.invalid" });
+      const receiver = makeUser({ id: 2, email: "receiver@example.invalid" });
+      const otherSender = makeUser({ id: 3, email: "other-sender@example.invalid" });
+      await startHarness([sender, receiver, otherSender]);
+      state.connectionRequests.set(91, {
+        id: 91,
+        senderId: sender.id,
+        receiverId: receiver.id,
+        status: "requested",
+      });
+      state.connectionRequests.set(92, {
+        id: 92,
+        senderId: otherSender.id,
+        receiverId: receiver.id,
+        status: "requested",
+      });
+      state.notifications.push(
+        { id: 201, userId: receiver.id, type: "connection_request", relatedId: 91, read: false },
+        { id: 202, userId: receiver.id, type: "connection_request", relatedId: 92, read: false },
+      );
+      const token = authToken(sender.id);
+
+      const before = await requestJson(port, "/api/notifications/counts", {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(before.status).toBe(200);
+
+      const response = await requestJson(port, "/api/connections/request/2", {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      expect(response.status).toBe(200);
+      expect(state.connectionRequests.get(91)?.status).toBe("rejected");
+      expect(state.connectionRequests.get(92)?.status).toBe("requested");
+      expect(state.notifications.find((notification) => notification.relatedId === 91)?.read).toBe(true);
+      expect(state.notifications.find((notification) => notification.relatedId === 92)?.read).toBe(false);
+
+      const receiverToken = authToken(receiver.id);
+      const after = await requestJson(port, "/api/notifications/counts", {
+        headers: { authorization: `Bearer ${receiverToken}` },
+      });
+      expect(after.status).toBe(200);
+      expect(after.body).toMatchObject({
+        messages: 0,
+        connectionRequests: 1,
+        newConnections: 0,
+      });
+    });
   });
 
   describe("profile mass assignment", () => {
