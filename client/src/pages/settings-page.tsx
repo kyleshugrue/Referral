@@ -436,7 +436,11 @@ export default function SettingsPage() {
                       <FormItem>
                         <FormLabel className="text-primary">Full Name</FormLabel>
                         <FormControl>
-                          <Input {...field} className="bg-white dark:bg-slate-900" onFocus={handleInputFocus} />
+                          <Input
+                            {...field}
+                            className="bg-white dark:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-primary/40 focus:ring-offset-0"
+                            onFocus={handleInputFocus}
+                          />
                         </FormControl>
                         <FormMessage />
                       </FormItem>

@@ -991,7 +991,7 @@ export default function ProfilePage() {
                 role="button"
                 tabIndex={0}
                 aria-label="Change profile photo"
-                className="relative w-24 h-24 mx-auto mb-3 group cursor-pointer"
+                className="relative w-24 h-24 mx-auto mb-3 group cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary/40 focus:ring-offset-2"
                 onClick={() => setShowPhotoButtons(!showPhotoButtons)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {

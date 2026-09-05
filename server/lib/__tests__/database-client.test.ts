@@ -1,5 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { QueryResult, QueryResultRow } from 'pg';
+import { neonConfig } from '@neondatabase/serverless';
+import ws from 'ws';
 import { describe, expect, it, vi } from 'vitest';
 import {
   connectDatabase,
@@ -80,6 +82,10 @@ describe('usesNativePostgres', () => {
   it('does not select native PostgreSQL when the URL is missing or malformed', () => {
     expect(usesNativePostgres('')).toBe(false);
     expect(usesNativePostgres('not-a-database-url')).toBe(false);
+  });
+
+  it('keeps default certificate verification for hosted Neon WebSockets', () => {
+    expect(neonConfig.webSocketConstructor).toBe(ws);
   });
 });
 

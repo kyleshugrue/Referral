@@ -169,10 +169,12 @@ test.describe('primary journey smoke test', () => {
 
     for (const route of [
       '/auth/register',
+      '/auth/login',
       '/profile',
       '/network',
       '/network/search',
       '/connections',
+      '/chat/999999',
       '/settings',
     ]) {
       await page.goto(route);
@@ -217,6 +219,20 @@ test.describe('primary journey smoke test', () => {
             failures.push(`${element.tagName.toLowerCase()} missing label`);
           }
         });
+
+        const focusable = Array.from(document.querySelectorAll<HTMLElement>(
+          'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        )).filter((element) => visible(element) && !element.matches(':disabled'));
+        for (const element of focusable) {
+          element.focus();
+          if (document.activeElement !== element) continue;
+          const style = window.getComputedStyle(element);
+          const outline = style.outlineStyle !== 'none' && style.outlineWidth !== '0px';
+          const focusRing = style.boxShadow !== 'none';
+          if (!outline && !focusRing && !element.matches(':focus-visible')) {
+            failures.push(`${element.tagName.toLowerCase()} has no visible focus indicator`);
+          }
+        }
         return failures;
       });
       expect(violations, `Accessibility violations on ${route}`).toEqual([]);

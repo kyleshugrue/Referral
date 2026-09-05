@@ -9,15 +9,9 @@ import ws from 'ws';
 // Neon uses a WebSocket transport, while GitHub Actions' disposable
 // PostgreSQL service exposes the standard PostgreSQL TCP protocol. Keep the
 // hosted Neon path unchanged and use node-postgres for native local/CI URLs.
-class CustomWebSocket extends ws {
-  constructor(address: string, protocols?: string | string[]) {
-    super(address, protocols, {
-      rejectUnauthorized: false,
-    });
-  }
-}
-
-neonConfig.webSocketConstructor = CustomWebSocket as unknown as typeof WebSocket;
+// Passing the standard ws constructor preserves its default certificate
+// verification behavior. Never replace it with an accept-all TLS client.
+neonConfig.webSocketConstructor = ws as unknown as typeof WebSocket;
 
 export type DatabasePool = NeonPool | PostgresPool;
 export interface DatabaseNotification {
