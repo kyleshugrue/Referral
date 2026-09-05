@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import sharp from 'sharp';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { promisify } from 'util';
 import { execFile } from 'child_process';
 import { logger } from '../lib/logger';
@@ -348,9 +349,9 @@ export class FirebaseStorageService {
   }
 
   private async generatePdfPreviewsFromBuffer(pdfBuffer: Buffer, fileName: string, userId?: number, firebaseUid?: string): Promise<string[]> {
-    const tempDir = '/tmp';
-    const tempPdfPath = path.join(tempDir, `temp-${Date.now()}.pdf`);
-    let previewDir: string | undefined;
+    const requestDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'referral-pdf-'));
+    const tempPdfPath = path.join(requestDir, 'source.pdf');
+    const previewDir = path.join(requestDir, 'previews');
     const previewUrls: string[] = [];
     const uploadedPreviewFileNames: string[] = [];
 
@@ -359,9 +360,7 @@ export class FirebaseStorageService {
       await fs.promises.writeFile(tempPdfPath, pdfBuffer);
 
       // Create temporary directory for previews
-      const previewDirName = `preview-${Date.now()}`;
-      previewDir = path.join(tempDir, previewDirName);
-      await fs.promises.mkdir(previewDir, { recursive: true });
+      await fs.promises.mkdir(previewDir);
 
       // Generate JPEG previews
       const outputPrefix = path.join(previewDir, 'page');
@@ -449,9 +448,7 @@ export class FirebaseStorageService {
       // directory. Remote objects are addressed separately by their managed
       // references and are never implicitly enumerated here.
       await fs.promises.unlink(tempPdfPath).catch(() => {});
-      if (previewDir) {
-        await fs.promises.rm(previewDir, { recursive: true, force: true }).catch(() => {});
-      }
+       await fs.promises.rm(requestDir, { recursive: true, force: true }).catch(() => {});
     }
   }
 

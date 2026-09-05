@@ -31,6 +31,10 @@ export interface JobMetadata {
   // Profile version tracking for staleness detection
   userProfileVersion?: number;
   targetUserProfileVersion?: number;
+  userSnapshotId?: number;
+  targetUserSnapshotId?: number;
+  userSnapshotHash?: string;
+  targetUserSnapshotHash?: string;
   // Match justification snapshot at job creation
   matchReasons?: string[];
   expectedJustification?: string;
@@ -282,6 +286,8 @@ export class BackgroundJobQueue {
     let targetUserProfileVersion: number | undefined;
     let userSnapshotId: number | undefined;
     let targetUserSnapshotId: number | undefined;
+    let userSnapshotHash: string | undefined;
+    let targetUserSnapshotHash: string | undefined;
     
     // Get or create snapshot for the main user
     try {
@@ -298,17 +304,20 @@ export class BackgroundJobQueue {
           const existingSnapshot = await snapshotService.getSnapshot(user.currentSnapshotId, userId);
           if (existingSnapshot) {
             userSnapshotId = existingSnapshot.id;
+            userSnapshotHash = existingSnapshot.contentHash;
             console.log(`[BackgroundJobQueue] Using existing snapshot ${userSnapshotId} for user ${userId}`);
           } else {
             // Snapshot ID exists but snapshot not found, create new one
             const newSnapshot = await snapshotService.createSnapshot(userId, extractProfileData(user));
             userSnapshotId = newSnapshot.id;
+            userSnapshotHash = newSnapshot.contentHash;
             console.log(`[BackgroundJobQueue] Created new snapshot ${userSnapshotId} for user ${userId} (old snapshot not found)`);
           }
         } else {
           // No current snapshot, create new one
           const newSnapshot = await snapshotService.createSnapshot(userId, extractProfileData(user));
           userSnapshotId = newSnapshot.id;
+          userSnapshotHash = newSnapshot.contentHash;
           console.log(`[BackgroundJobQueue] Created new snapshot ${userSnapshotId} for user ${userId}`);
         }
       } else {
@@ -316,7 +325,7 @@ export class BackgroundJobQueue {
       }
     } catch (error) {
       console.error(`[BackgroundJobQueue] Error creating snapshot for user ${userId}:`, error);
-      // Don't fail job creation, continue without snapshot
+      throw error;
     }
 
     if (userProfileVersion == null) {
@@ -339,17 +348,20 @@ export class BackgroundJobQueue {
             const existingSnapshot = await snapshotService.getSnapshot(targetUser.currentSnapshotId, metadata.targetUserId);
             if (existingSnapshot) {
               targetUserSnapshotId = existingSnapshot.id;
+              targetUserSnapshotHash = existingSnapshot.contentHash;
               console.log(`[BackgroundJobQueue] Using existing snapshot ${targetUserSnapshotId} for target user ${metadata.targetUserId}`);
             } else {
               // Snapshot ID exists but snapshot not found, create new one
               const newSnapshot = await snapshotService.createSnapshot(metadata.targetUserId, extractProfileData(targetUser));
               targetUserSnapshotId = newSnapshot.id;
+              targetUserSnapshotHash = newSnapshot.contentHash;
               console.log(`[BackgroundJobQueue] Created new snapshot ${targetUserSnapshotId} for target user ${metadata.targetUserId} (old snapshot not found)`);
             }
           } else {
             // No current snapshot, create new one
             const newSnapshot = await snapshotService.createSnapshot(metadata.targetUserId, extractProfileData(targetUser));
             targetUserSnapshotId = newSnapshot.id;
+            targetUserSnapshotHash = newSnapshot.contentHash;
             console.log(`[BackgroundJobQueue] Created new snapshot ${targetUserSnapshotId} for target user ${metadata.targetUserId}`);
           }
         } else {
@@ -357,7 +369,7 @@ export class BackgroundJobQueue {
         }
       } catch (error) {
         console.error(`[BackgroundJobQueue] Error creating snapshot for target user ${metadata.targetUserId}:`, error);
-        // Don't fail job creation, continue without snapshot
+        throw error;
       }
     }
 
@@ -367,6 +379,12 @@ export class BackgroundJobQueue {
     
     const generationScope = getMatchGenerationScope(jobType, metadata.targetUserId, metadata.mode);
     metadata.generationScope = generationScope;
+    metadata.userSnapshotId = userSnapshotId;
+    metadata.userSnapshotHash = userSnapshotHash;
+    if (targetUserSnapshotId !== undefined) {
+      metadata.targetUserSnapshotId = targetUserSnapshotId;
+      metadata.targetUserSnapshotHash = targetUserSnapshotHash;
+    }
     const idempotencyKey = buildMatchGenerationIdempotencyKey({
       jobType,
       userId,

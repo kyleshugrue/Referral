@@ -5,7 +5,7 @@ import { simpleMatchJobHelper } from '../services/simple-match-job-helper';
 import { requireVerifiedFirebaseUser, getRegistrant } from '../lib/register-auth';
 import { firebaseStorageService } from '../services/firebase-storage';
 import { toSelfUserDto } from '../lib/privacy-dto';
-import { parseRegistrationInput, type RegistrationInput } from '../lib/registration-input';
+import { normalizeStringArray, parseRegistrationInput, type RegistrationInput } from '../lib/registration-input';
 import { ZodError } from 'zod';
 
 const router = Router();
@@ -16,10 +16,6 @@ type RegistrationArray = RegistrationInput[keyof Pick<
 >];
 type RegistrationSuccessResponder = (user: User, status: 200 | 201) => Promise<unknown> | unknown;
 type RegistrationResponse = Response & { registrationSuccessResponder?: RegistrationSuccessResponder };
-
-function normalizeStringArray(value: RegistrationArray): string[] {
-  return Array.isArray(value) ? value : value ? [value] : [];
-}
 
 function hasRegistrationValues(value: RegistrationArray): boolean {
   return Array.isArray(value) ? value.length > 0 : Boolean(value);

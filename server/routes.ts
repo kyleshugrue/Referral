@@ -67,7 +67,7 @@ import {
   getDiscoverabilityState,
 } from "./lib/discoverability-policy";
 
-const PRIVACY_LAST_MODIFIED = process.env.PRIVACY_LAST_MODIFIED?.trim() || null;
+const PRIVACY_LAST_MODIFIED = process.env.PRIVACY_LAST_MODIFIED?.trim() || "2026-09-05";
 const PRIVACY_LAST_MODIFIED_DISPLAY = PRIVACY_LAST_MODIFIED
   ? new Date(`${PRIVACY_LAST_MODIFIED}T00:00:00Z`).toLocaleDateString("en-US", {
       year: "numeric",
@@ -189,6 +189,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         <li><strong>Legal Requirements:</strong> When required by law or to protect our rights and users' safety</li>
         <li><strong>Business Transfers:</strong> In case of merger, acquisition, or sale of our business</li>
     </ul>
+    <p><strong>Service-provider access:</strong> Our hosting, database, authentication, storage, monitoring, geocoding, push-notification, and AI providers process data only as needed to provide Referral's services and under contractual confidentiality and security obligations. We do not permit providers to use your profile, message, or resume data for their own advertising.</p>
 
     <h2>6. Data Security</h2>
     <p>We implement appropriate technical and organizational measures to protect your personal information against unauthorized access, alteration, disclosure, or destruction. This includes:</p>
@@ -208,10 +209,14 @@ export async function registerRoutes(app: Express): Promise<void> {
         <li>Control your privacy settings and visibility preferences</li>
         <li>Opt out of non-essential communications</li>
         <li>Request a copy of your data</li>
+        <li>Object to or restrict certain processing where applicable</li>
+        <li>Withdraw consent where processing is based on consent</li>
     </ul>
+    <p>To exercise a right, use the support or contact channel available in the Referral app and include enough information for us to identify the account involved. We may verify the request before responding. We aim to respond within the time required by applicable law and will explain any lawful reason we cannot complete a request.</p>
 
     <h2>8. Data Retention</h2>
-    <p>We retain your personal information for as long as your account is active or as needed to provide you services. We will delete or anonymize your personal information when you delete your account, subject to legal retention requirements.</p>
+    <p>We retain your personal information for as long as your account is active or as needed to provide you services. Profile data, resumes, and private media are deleted or anonymized when you delete your account, subject to legal retention requirements and secure-backup expiry. Messages and connection records may be retained for a limited period after account deletion when needed to prevent abuse, resolve disputes, or comply with law. Security, audit, and rate-limit records are retained only as long as reasonably necessary for those purposes.</p>
+    <p>We periodically review retained information and delete, aggregate, or anonymize data that is no longer needed. Retention periods may be extended when required to establish, exercise, or defend legal claims.</p>
 
     <h2>9. International Data Transfers</h2>
     <p>Your information may be transferred to and processed in countries other than your own. We ensure appropriate safeguards are in place to protect your privacy and rights when such transfers occur.</p>
@@ -219,14 +224,16 @@ export async function registerRoutes(app: Express): Promise<void> {
     <h2>10. Children's Privacy</h2>
     <p>Our service is intended for professional use by individuals 18 years of age or older. We do not knowingly collect personal information from children under 18. If we become aware that we have collected personal information from a child under 18, we will delete such information promptly.</p>
 
-    <h2>11. Changes to This Privacy Policy</h2>
+    <h2>11. Security Incidents</h2>
+    <p>Despite our safeguards, no service can guarantee absolute security. If we determine that an incident creates a risk requiring notice, we will notify affected users and regulators as required by applicable law. Notifications may be sent through the app, to the email associated with your account, or by another legally permitted channel. We will provide the known impact, steps we have taken, and actions you can take when that information is available.</p>
+
+    <h2>12. Changes to This Privacy Policy</h2>
     <p>We may update this privacy policy from time to time. We will notify you of any material changes by posting the new privacy policy on this page and updating the "Last updated" date. Your continued use of our service after any changes constitutes acceptance of the updated policy.</p>
 
-    <h2>12. Contact Us</h2>
+    <h2>13. Contact Us</h2>
     <div class="contact-info">
         <p>If you have any questions about this privacy policy or our privacy practices, please contact us:</p>
-        <p>Please use the support or contact channel available in the Referral app.</p>
-        <p>A dedicated privacy contact address has not been published.</p>
+            <p>Please use the support or contact channel available in the Referral app. That channel is monitored for privacy requests and security reports.</p>
     </div>
 
     <p class="policy-effective-date">

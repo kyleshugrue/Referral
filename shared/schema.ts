@@ -25,6 +25,36 @@ export const educationLevels = [
   "Other"
 ] as const;
 
+export const PROFILE_INPUT_LIMITS = {
+  aggregateBytes: 24_000,
+  stringChars: 200,
+  bioChars: 4_000,
+  urlChars: 2_048,
+  arrayItemChars: 160,
+  arrayItems: 50,
+} as const;
+
+const boundedProfileString = (max: number = PROFILE_INPUT_LIMITS.stringChars) =>
+  z.string().trim().max(max);
+
+const boundedProfileArray = () =>
+  z.array(boundedProfileString(PROFILE_INPUT_LIMITS.arrayItemChars))
+    .max(PROFILE_INPUT_LIMITS.arrayItems);
+
+function enforceProfileAggregateLimit<T extends z.ZodTypeAny>(schema: T): T {
+  return schema.superRefine((value, ctx) => {
+    if (JSON.stringify(value).length > PROFILE_INPUT_LIMITS.aggregateBytes) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.too_big,
+        type: 'string',
+        maximum: PROFILE_INPUT_LIMITS.aggregateBytes,
+        inclusive: true,
+        message: 'Profile payload is too large',
+      });
+    }
+  }) as unknown as T;
+}
+
 // Connection requests table for pending connections
 export const connectionRequests = pgTable("connection_requests", {
   id: serial("id").primaryKey(),
@@ -402,29 +432,32 @@ export const notificationsRelations = relations(notifications, ({ one }) => ({
 export const insertUserSchema = createInsertSchema(users)
   .omit({ id: true })
   .extend({
-    email: z.string().email("Please enter a valid email address"),
-    fullName: z.string().min(1, "Full name is required"),
-    birthday: z.string().optional(),
-    title: z.string().optional(),
-    currentLocation: z.string().optional(),
-    desiredLocations: z.array(z.string()).optional(),
-    industry: z.string().optional(),
-    currentCompany: z.string().optional(),
+    email: boundedProfileString(320).email("Please enter a valid email address"),
+    fullName: boundedProfileString().min(1, "Full name is required"),
+    birthday: boundedProfileString().optional(),
+    title: boundedProfileString().optional(),
+    currentLocation: boundedProfileString().optional(),
+    desiredLocations: boundedProfileArray().optional(),
+    industry: boundedProfileString().optional(),
+    currentCompany: boundedProfileString().optional(),
     desiredCompanies: z.array(z.string()).optional(),
     matchingRadius: z.coerce.number().int().min(0).max(100).default(0),
     yearsOfExperience: z.coerce.number().int().min(0, "Years of experience must be a non-negative number"),
-    bio: z.string().optional(),
-    photo: z.string().optional(),
-    resumeUrl: z.string().optional(),
-    resumePreviewUrls: z.array(z.string()).optional(),
-    interests: z.array(z.string()).default([]),
-    professionalInterests: z.array(z.string()).default([]),
-    languages: z.array(z.string()).default([]),
+    bio: boundedProfileString(PROFILE_INPUT_LIMITS.bioChars).optional(),
+    photo: boundedProfileString(PROFILE_INPUT_LIMITS.urlChars).optional(),
+    resumeUrl: boundedProfileString(PROFILE_INPUT_LIMITS.urlChars).optional(),
+    resumePreviewUrls: boundedProfileArray().optional(),
+    interests: boundedProfileArray().default([]),
+    professionalInterests: boundedProfileArray().default([]),
+    languages: boundedProfileArray().default([]),
     educationLevel: z.enum(educationLevels).optional(),
-    institution: z.string().optional(),
+    institution: boundedProfileString().optional(),
     profileVisible: z.boolean().default(true),
     emailNotifications: z.boolean().default(true),
     readReceipts: z.boolean().default(true),
+  })
+  .extend({
+    desiredCompanies: boundedProfileArray().optional(),
   });
 
 // Fields a signed-in user may edit through profile endpoints. Keep this
@@ -432,7 +465,7 @@ export const insertUserSchema = createInsertSchema(users)
 // derived matching state, and server-maintained caches must never be accepted
 // from an HTTP profile update. Completion is a one-way, server-validated claim
 // used by the registration flow and is handled separately below.
-export const editableProfileSchema = insertUserSchema.pick({
+export const editableProfileSchema = enforceProfileAggregateLimit(insertUserSchema.pick({
   fullName: true,
   birthday: true,
   title: true,
@@ -454,7 +487,7 @@ export const editableProfileSchema = insertUserSchema.pick({
   readReceipts: true,
 }).partial().extend({
   registrationCompleted: z.boolean().optional(),
-});
+}));
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type EditableProfile = z.infer<typeof editableProfileSchema>;

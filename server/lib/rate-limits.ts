@@ -104,6 +104,21 @@ export const expensiveRequestLimiter = rateLimit({
   message: jsonMessage('Too many requests.'),
 });
 
+/** Authenticated profile mutations: shared per-user budget before any DB/geocode/job work. */
+export const profileMutationLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  ...standardLimiterOptions,
+  keyGenerator: (req) => pseudonymousRateLimitKey(
+    'profile-mutation',
+    req.user?.id !== undefined
+      ? `user:${req.user.id}`
+      : `ip:${ipKeyGenerator(req.ip || 'unknown')}`,
+  ),
+  ...sharedStore('profile-mutation'),
+  message: jsonMessage('Too many profile updates. Please try again shortly.'),
+});
+
 /** Device registration is authenticated, but still bounded to prevent token churn. */
 export const pushRegistrationLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,

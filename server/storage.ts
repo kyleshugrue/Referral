@@ -26,6 +26,10 @@ import { DEFAULT_MESSAGE_PAGE_SIZE, MAX_MESSAGE_PAGE_SIZE, type MessageCursor } 
 const PostgresSessionStore = connectPg(session);
 type UserWrite = Partial<InsertUser> & Record<string, unknown>;
 
+export interface UpdateUserOptions {
+  expectedProfileVersion?: number;
+}
+
 export interface IStorage {
   initialize(): Promise<void>;
   getUser(id: number): Promise<User | undefined>;
@@ -35,7 +39,7 @@ export interface IStorage {
   getUsersByFirebaseUid(firebaseUid: string): Promise<User[]>;
   resolveUserForFirebaseIdentity(firebaseUid: string, email: string | null, emailVerified: boolean): Promise<User | undefined>;
   createUser(user: UserWrite): Promise<User>;
-  updateUser(id: number, user: UserWrite): Promise<User>;
+  updateUser(id: number, user: UserWrite, options?: UpdateUserOptions): Promise<User>;
   updateUserEmail(id: number, newEmail: string): Promise<User>;
   linkUserToFirebaseUid(id: number, firebaseUid: string, emailVerified: boolean): Promise<User>;
   deleteUser(id: number): Promise<void>;
@@ -61,7 +65,12 @@ export interface IStorage {
   getSynergyMatchById(id: number): Promise<SynergyMatch | null>;
   saveSynergyMatch(match: InsertSynergyMatch): Promise<SynergyMatch>;
   claimSynergyMatchGeneration(match: InsertSynergyMatch & { generationJobKey: string }): Promise<SynergyMatch | undefined>;
-  updateSynergyMatchForJob(id: number, generationJobKey: string, updates: Partial<Omit<SynergyMatch, 'id' | 'userId' | 'matchedUserId' | 'createdAt'>>): Promise<boolean>;
+  updateSynergyMatchForJob(
+    id: number,
+    generationJobKey: string,
+    updates: Partial<Omit<SynergyMatch, 'id' | 'userId' | 'matchedUserId' | 'createdAt'>>,
+    expectedVersions?: { userProfileVersion?: number; targetUserProfileVersion?: number },
+  ): Promise<boolean>;
   updateSynergyMatchById(id: number, updates: Partial<Omit<SynergyMatch, 'id' | 'userId' | 'matchedUserId' | 'createdAt'>>): Promise<void>;
   clearSynergyMatchesForUser(userId: number): Promise<void>;
   markMatchesAsGenerating(userId: number): Promise<number>;
@@ -182,6 +191,18 @@ export class FirebaseIdentityConflictError extends Error {
   constructor(message = 'Firebase identity conflicts with an existing account') {
     super(message);
     this.name = 'FirebaseIdentityConflictError';
+  }
+}
+
+export class ProfileVersionConflictError extends Error {
+  readonly expectedProfileVersion: number;
+  readonly actualProfileVersion?: number;
+
+  constructor(expectedProfileVersion: number, actualProfileVersion?: number) {
+    super('Profile changed since this edit was started');
+    this.name = 'ProfileVersionConflictError';
+    this.expectedProfileVersion = expectedProfileVersion;
+    this.actualProfileVersion = actualProfileVersion;
   }
 }
 
@@ -716,7 +737,7 @@ export class DatabaseStorage implements IStorage {
   
 
 
-  async updateUser(id: number, updateData: UserWrite): Promise<User> {
+  async updateUser(id: number, updateData: UserWrite, options: UpdateUserOptions = {}): Promise<User> {
     // Fetch existing user FIRST for value comparison in background tasks
     // This is needed to detect ACTUAL changes vs repopulated existing values
     const existingUserForComparison = await this.getUserById(id);
@@ -870,13 +891,27 @@ export class DatabaseStorage implements IStorage {
     });
     
     try {
+      const predicates = [eq(users.id, id)];
+      if (options.expectedProfileVersion !== undefined) {
+        predicates.push(eq(users.profileVersion, options.expectedProfileVersion));
+      }
+
       const [user] = await db
         .update(users)
         .set(finalData)
-        .where(eq(users.id, id))
+        .where(and(...predicates))
         .returning();
       
       if (!user) {
+        if (options.expectedProfileVersion !== undefined) {
+          const currentUser = await this.getUserById(id);
+          if (currentUser) {
+            throw new ProfileVersionConflictError(
+              options.expectedProfileVersion,
+              currentUser.profileVersion,
+            );
+          }
+        }
         logger.error(`[updateUser] User ${id} not found`);
         throw new Error("User not found");
       }
@@ -2332,18 +2367,26 @@ export class DatabaseStorage implements IStorage {
   async updateSynergyMatchForJob(
     id: number,
     generationJobKey: string,
-    updates: Partial<Omit<SynergyMatch, 'id' | 'userId' | 'matchedUserId' | 'createdAt'>>
+    updates: Partial<Omit<SynergyMatch, 'id' | 'userId' | 'matchedUserId' | 'createdAt'>>,
+    expectedVersions?: { userProfileVersion?: number; targetUserProfileVersion?: number },
   ): Promise<boolean> {
+    const predicates = [
+      eq(synergyMatches.id, id),
+      eq(synergyMatches.generationJobKey, generationJobKey),
+    ];
+    if (expectedVersions?.userProfileVersion !== undefined) {
+      predicates.push(eq(synergyMatches.userProfileVersion, expectedVersions.userProfileVersion));
+    }
+    if (expectedVersions?.targetUserProfileVersion !== undefined) {
+      predicates.push(eq(synergyMatches.matchedUserProfileVersion, expectedVersions.targetUserProfileVersion));
+    }
     const updated = await db
       .update(synergyMatches)
       .set({
         ...updates,
         updatedAt: new Date().toISOString()
       })
-      .where(and(
-        eq(synergyMatches.id, id),
-        eq(synergyMatches.generationJobKey, generationJobKey)
-      ))
+      .where(and(...predicates))
       .returning({ id: synergyMatches.id });
 
     return updated.length > 0;

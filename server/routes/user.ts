@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { storage } from '../storage';
+import { ProfileVersionConflictError, storage } from '../storage';
 import { locationCacheService } from '../services/location-cache';
 import { db } from '../db';
 import { users, editableProfileSchema } from '@shared/schema';
@@ -15,8 +15,51 @@ import { requireAdmin } from '../middleware/require-admin';
 import { logger } from '../lib/logger';
 import { hasRequiredFieldsForMatching, shouldQueueInitialMatchJobs } from '../lib/profile-matching';
 import { toSelfUserDto } from '../lib/privacy-dto';
+import { profileMutationLimiter } from '../lib/rate-limits';
+import { normalizeStringArray } from '../lib/registration-input';
 
 const router = Router();
+
+function parseExpectedProfileVersion(req: { headers: Record<string, unknown>; body?: unknown }): number | undefined {
+  const header = req.headers['if-match'];
+  const bodyVersion = req.body && typeof req.body === 'object'
+    ? (req.body as Record<string, unknown>).profileVersion
+    : undefined;
+  const rawValue = header ?? bodyVersion;
+  if (Array.isArray(rawValue)) return undefined;
+  const raw = typeof rawValue === 'string'
+    ? rawValue.replace(/^W\/"?|"?$/g, '')
+    : rawValue;
+  const version = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isInteger(version) && version > 0 ? version : undefined;
+}
+
+async function createCurrentProfileSnapshot(user: User): Promise<{ id: number; contentHash: string }> {
+  const profileData: ProfileData = {
+    bio: user.bio,
+    title: user.title,
+    currentLocation: user.currentLocation,
+    currentLocationLat: user.currentLocationLat,
+    currentLocationLng: user.currentLocationLng,
+    industry: user.industry,
+    currentCompany: user.currentCompany,
+    desiredLocations: user.desiredLocations,
+    desiredCompanies: user.desiredCompanies,
+    interests: user.interests,
+    professionalInterests: user.professionalInterests,
+    languages: user.languages,
+    matchingRadius: user.matchingRadius,
+    yearsOfExperience: user.yearsOfExperience,
+    educationLevel: user.educationLevel,
+    institution: user.institution,
+  };
+  const snapshot = await snapshotService.createSnapshot(user.id, profileData);
+  await db.update(users)
+    .set({ currentSnapshotId: snapshot.id })
+    .where(eq(users.id, user.id));
+  return snapshot;
+}
+
 // Keep legacy diagnostics on the bounded logger boundary. These call sites
 // historically passed profile fields and Error objects to console directly;
 // the route now emits only fixed operational markers from those calls.
@@ -84,7 +127,7 @@ router.get('/', requireAuthJWT, async (req, res) => {
 });
 
 // Update current user
-router.patch('/', requireAuthJWT, async (req, res) => {
+router.patch('/', requireAuthJWT, profileMutationLimiter, async (req, res) => {
   // PRODUCTION-GRADE: Extract operation ID from client for end-to-end tracing
   const operationId = req.headers['x-operation-id'] as string || `server_${Date.now()}`;
   const startTime = Date.now();
@@ -230,6 +273,9 @@ router.patch('/', requireAuthJWT, async (req, res) => {
             deleteField(updateData, field);
           }
         }
+        if (Array.isArray(getFieldValue(updateData, field))) {
+          setFieldValue(updateData, field, normalizeStringArray(getFieldValue(updateData, field)));
+        }
         
         console.log(`[UserRoute] Final ${field} value:`, getFieldValue(updateData, field));
       }
@@ -258,103 +304,10 @@ router.patch('/', requireAuthJWT, async (req, res) => {
       }
     }
     
-    // Preserve existing critical fields when empty values are sent from other registration steps
-    const finalUpdateData = {
-      ...updateData
-    };
-    
-    // Preserve scalar fields ONLY if they were NOT explicitly sent in the request
-    // If a field was explicitly sent (even as empty string), allow clearing it
-    if (!explicitlySentFields.has('fullName') && existingUser.fullName) {
-      logger.debug(`[UserRoute] Preserving existing fullName for user ${userId}`);
-      finalUpdateData.fullName = existingUser.fullName;
-    } else if (explicitlySentFields.has('fullName') && (updateData.fullName === '' || updateData.fullName === undefined)) {
-      console.log(`[UserRoute] Intentionally clearing fullName (explicitly sent as empty)`);
-    }
-    
-    if (!explicitlySentFields.has('birthday') && existingUser.birthday) {
-      console.log(`[UserRoute] Preserving existing birthday: "${existingUser.birthday}" (field not sent in request)`);
-      finalUpdateData.birthday = existingUser.birthday;
-    } else if (explicitlySentFields.has('birthday') && (updateData.birthday === '' || updateData.birthday === undefined)) {
-      console.log(`[UserRoute] Intentionally clearing birthday (explicitly sent as empty)`);
-    }
-    
-    if (!explicitlySentFields.has('title') && existingUser.title) {
-      console.log(`[UserRoute] Preserving existing title (field not sent in request)`);
-      finalUpdateData.title = existingUser.title;
-    } else if (explicitlySentFields.has('title') && (updateData.title === '' || updateData.title === undefined)) {
-      console.log(`[UserRoute] Intentionally clearing title (explicitly sent as empty)`);
-    }
-    
-    if (!explicitlySentFields.has('currentLocation') && existingUser.currentLocation) {
-      logger.debug(`[UserRoute] Preserving existing currentLocation for user ${userId}`);
-      finalUpdateData.currentLocation = existingUser.currentLocation;
-    } else if (explicitlySentFields.has('currentLocation') && (updateData.currentLocation === '' || updateData.currentLocation === undefined)) {
-      console.log(`[UserRoute] Intentionally clearing currentLocation (explicitly sent as empty)`);
-    }
-    
-    if (!explicitlySentFields.has('industry') && existingUser.industry) {
-      console.log(`[UserRoute] Preserving existing industry (field not sent in request)`);
-      finalUpdateData.industry = existingUser.industry;
-    } else if (explicitlySentFields.has('industry') && (updateData.industry === '' || updateData.industry === undefined)) {
-      console.log(`[UserRoute] Intentionally clearing industry (explicitly sent as empty)`);
-    }
-    
-    if (!explicitlySentFields.has('currentCompany') && existingUser.currentCompany) {
-      console.log(`[UserRoute] Preserving existing currentCompany (field not sent in request)`);
-      finalUpdateData.currentCompany = existingUser.currentCompany;
-    } else if (explicitlySentFields.has('currentCompany') && (updateData.currentCompany === '' || updateData.currentCompany === undefined)) {
-      console.log(`[UserRoute] Intentionally clearing currentCompany (explicitly sent as empty)`);
-    }
-    
-    // CRITICAL: Always preserve registrationCompleted unless explicitly being updated
-    // This prevents users from losing access when updating other profile fields like photo
-    if (updateData.registrationCompleted === undefined && existingUser.registrationCompleted !== undefined) {
-      console.log(`[UserRoute] Preserving existing registrationCompleted: ${existingUser.registrationCompleted}`);
-      finalUpdateData.registrationCompleted = existingUser.registrationCompleted;
-    }
-    
-    // Preserve array fields ONLY if they were NOT explicitly sent in the request
-    // If a field was explicitly sent (even as empty array), allow clearing it
-    if (!explicitlySentFields.has('desiredLocations') && existingUser.desiredLocations && existingUser.desiredLocations.length > 0) {
-      logger.debug(`[UserRoute] Preserving existing desiredLocations for user ${userId}`);
-      finalUpdateData.desiredLocations = existingUser.desiredLocations;
-    } else if (explicitlySentFields.has('desiredLocations') && Array.isArray(updateData.desiredLocations) && updateData.desiredLocations.length === 0) {
-      console.log(`[UserRoute] Intentionally clearing desiredLocations (explicitly sent as empty array)`);
-    }
-    
-    if (!explicitlySentFields.has('desiredCompanies') && existingUser.desiredCompanies && existingUser.desiredCompanies.length > 0) {
-      console.log(`[UserRoute] Preserving existing desiredCompanies (field not sent in request)`);
-      finalUpdateData.desiredCompanies = existingUser.desiredCompanies;
-    } else if (explicitlySentFields.has('desiredCompanies') && Array.isArray(updateData.desiredCompanies) && updateData.desiredCompanies.length === 0) {
-      console.log(`[UserRoute] Intentionally clearing desiredCompanies (explicitly sent as empty array)`);
-    }
-    
-    if (!explicitlySentFields.has('interests') && existingUser.interests && existingUser.interests.length > 0) {
-      console.log(`[UserRoute] Preserving existing interests (field not sent in request)`);
-      finalUpdateData.interests = existingUser.interests;
-    } else if (explicitlySentFields.has('interests') && Array.isArray(updateData.interests) && updateData.interests.length === 0) {
-      console.log(`[UserRoute] Intentionally clearing interests (explicitly sent as empty array)`);
-    }
-    
-    if (!explicitlySentFields.has('professionalInterests') && existingUser.professionalInterests && existingUser.professionalInterests.length > 0) {
-      console.log(`[UserRoute] Preserving existing professionalInterests (field not sent in request)`);
-      finalUpdateData.professionalInterests = existingUser.professionalInterests;
-    } else if (explicitlySentFields.has('professionalInterests') && Array.isArray(updateData.professionalInterests) && updateData.professionalInterests.length === 0) {
-      console.log(`[UserRoute] Intentionally clearing professionalInterests (explicitly sent as empty array)`);
-    }
-    
-    if (!explicitlySentFields.has('languages') && existingUser.languages && existingUser.languages.length > 0) {
-      console.log(`[UserRoute] Preserving existing languages (field not sent in request)`);
-      finalUpdateData.languages = existingUser.languages;
-    } else if (explicitlySentFields.has('languages') && Array.isArray(updateData.languages) && updateData.languages.length === 0) {
-      console.log(`[UserRoute] Intentionally clearing languages (explicitly sent as empty array)`);
-    }
-    
-    console.log(`[UserRoute] Preserving AI matching preferences:`, {
-      desiredLocations: finalUpdateData.desiredLocations,
-      desiredCompanies: finalUpdateData.desiredCompanies
-    });
+    // A PATCH is a true explicit-field update. Never copy values from the
+    // preflight read into the write set: doing so would overwrite a concurrent
+    // edit to a field that this request did not send.
+    const finalUpdateData = { ...updateData };
 
     // Check if location fields are being updated to trigger automatic geocoding
     const isCurrentLocationUpdated = finalUpdateData.currentLocation && 
@@ -408,8 +361,18 @@ router.patch('/', requireAuthJWT, async (req, res) => {
     }
 
     // Update user in database first
-    const updatedUser = await storage.updateUser(userId, finalUpdateData);
+    const updatedUser = await storage.updateUser(userId, finalUpdateData, {
+      expectedProfileVersion: parseExpectedProfileVersion(req) ?? existingUser.profileVersion,
+    });
     console.log(`[UserRoute] User ${userId} updated successfully`);
+    let profileSnapshotCreated = false;
+
+    const ensureCurrentProfileSnapshot = async (): Promise<void> => {
+      if (profileSnapshotCreated) return;
+      const snapshot = await createCurrentProfileSnapshot(updatedUser);
+      profileSnapshotCreated = true;
+      logger.debug(`[UserRoute] Created snapshot ${snapshot.id} for user ${userId}`);
+    };
 
     // ═══════════════════════════════════════════════════════════════════════════
     // IMMEDIATE MATCH JOB QUEUEING: Queue jobs as soon as required fields are present
@@ -467,6 +430,8 @@ router.patch('/', requireAuthJWT, async (req, res) => {
             console.log(`[UserRoute] 🔄 Refreshed user data after geocoding`);
           }
         }
+
+          await ensureCurrentProfileSnapshot();
         
         // STEP 3: Queue prioritized AI match jobs
         console.log(`[UserRoute] 🚀 Queueing prioritized AI match jobs for user ${userId}...`);
@@ -573,6 +538,8 @@ router.patch('/', requireAuthJWT, async (req, res) => {
               Object.assign(updatedUser, refreshedUser);
             }
           }
+
+          await ensureCurrentProfileSnapshot();
           
           // Queue jobs
           const matchJobResult = await simpleMatchJobHelper.queuePrioritizedMatchJobs(userId);
@@ -618,39 +585,12 @@ router.patch('/', requireAuthJWT, async (req, res) => {
       }
     }
 
-    // CRITICAL: Create immutable snapshot after profile update
-    if (hasMatchRelevantChanges) {
+    // Ensure incremental match jobs use an immutable profile snapshot.
+    if (hasMatchRelevantChanges && !profileSnapshotCreated) {
       try {
-        const profileData: ProfileData = {
-          bio: updatedUser.bio,
-          title: updatedUser.title,
-          currentLocation: updatedUser.currentLocation,
-          currentLocationLat: updatedUser.currentLocationLat,
-          currentLocationLng: updatedUser.currentLocationLng,
-          industry: updatedUser.industry,
-          currentCompany: updatedUser.currentCompany,
-          desiredLocations: updatedUser.desiredLocations,
-          desiredCompanies: updatedUser.desiredCompanies,
-          interests: updatedUser.interests,
-          professionalInterests: updatedUser.professionalInterests,
-          languages: updatedUser.languages,
-          matchingRadius: updatedUser.matchingRadius,
-          yearsOfExperience: updatedUser.yearsOfExperience,
-          educationLevel: updatedUser.educationLevel,
-          institution: updatedUser.institution,
-        };
-
-        const snapshot = await snapshotService.createSnapshot(userId, profileData);
-        
-        // Update user's current snapshot pointer
-        await db.update(users)
-          .set({ currentSnapshotId: snapshot.id })
-          .where(eq(users.id, userId));
-        
-        logger.debug(`[UserRoute] Created snapshot ${snapshot.id} for user ${userId} after profile update`);
+        await ensureCurrentProfileSnapshot();
       } catch (error) {
         console.error(`[UserRoute] Error creating snapshot for user ${userId}:`, error);
-        // Don't fail the update, just log the error
       }
     }
 
@@ -732,6 +672,13 @@ router.patch('/', requireAuthJWT, async (req, res) => {
       queuedJobId
     });
   } catch (error) {
+    if (error instanceof ProfileVersionConflictError) {
+      return res.status(409).json({
+        message: 'Profile changed before this update was saved. Refresh and retry with the latest profile.',
+        code: 'PROFILE_VERSION_CONFLICT',
+        profileVersion: error.actualProfileVersion,
+      });
+    }
     console.error(`[UserRoute][${operationId}] ❌ Error updating user:`, error);
     return res.status(500).json({ message: "Failed to update user" });
   }

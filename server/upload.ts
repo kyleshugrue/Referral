@@ -133,11 +133,10 @@ async function generatePdfPreviews(pdfPath: string): Promise<string[]> {
       return [];
     }
 
-    // Create a unique directory for this PDF's previews
-    const timestamp = Date.now();
-    const previewDirName = `preview-${timestamp}`;
-    previewDir = path.join(uploadDir, previewDirName);
-    await fs.promises.mkdir(previewDir, { recursive: true });
+    // Create an exclusive request-scoped directory. Clock-only names can
+    // collide when concurrent uploads share the same millisecond.
+    previewDir = await fs.promises.mkdtemp(path.join(uploadDir, 'preview-'));
+    const previewDirName = path.basename(previewDir);
 
     // Use the preview directory for output
     const outputPrefix = path.join(previewDir, 'page');

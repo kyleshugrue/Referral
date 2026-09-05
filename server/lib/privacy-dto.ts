@@ -45,6 +45,7 @@ export type SelfUserDto = PublicProfileDto & {
   emailVerified: boolean;
   registrationCompleted: boolean;
   hasMinimumMatchData: boolean;
+  profileVersion: number;
 };
 
 export type MiniProfileDto = Pick<PublicProfileDto, "id" | "fullName" | "photo">;
@@ -146,6 +147,7 @@ export function toSelfUserDto(user: User): SelfUserDto {
     emailVerified: user.emailVerified,
     registrationCompleted: user.registrationCompleted,
     hasMinimumMatchData: user.hasMinimumMatchData,
+    profileVersion: user.profileVersion,
   };
 }
 
