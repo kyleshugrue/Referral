@@ -19,6 +19,7 @@ import { registerFirebaseUser } from './routes/register';
 import { toSelfUserDto } from './lib/privacy-dto';
 import { requireTrustedOriginForSessionMutation } from './lib/http-security';
 import { parseServerEnvironment } from './lib/env';
+import { isActiveAccount } from './lib/account-status';
 
 // Export session middleware for WebSocket authentication
 export let sessionMiddleware: ReturnType<typeof session>;
@@ -30,9 +31,19 @@ const configuredApps = new WeakSet<Express>();
 // For dual-mode authentication (JWT + session), use requireAuthJWT instead.
 // This is kept for backward compatibility and routes that explicitly need session-only auth.
 // Eventually, most routes should migrate to requireAuthJWT.
-export function requireAuth(req: Request, res: Response, next: NextFunction) {
-  if (req.isAuthenticated() && (!req.user?.accountStatus || req.user.accountStatus === 'active')) {
-    return requireTrustedOriginForSessionMutation(req, res, next);
+export async function requireAuth(req: Request, res: Response, next: NextFunction) {
+  if (req.isAuthenticated() && req.user) {
+    try {
+      const currentUser = await storage.getUser(req.user.id);
+      if (currentUser && isActiveAccount(currentUser)) {
+        req.user = currentUser;
+        return requireTrustedOriginForSessionMutation(req, res, next);
+      }
+    } catch (error) {
+      logger.warn('[Auth] Current account status lookup failed', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+    }
   }
   res.status(401).json({ message: 'Authentication required' });
 }
@@ -154,7 +165,7 @@ export function setupAuth(app: Express) {
   passport.deserializeUser(async (id: number, done) => {
     try {
       const user = await storage.getUser(id);
-      if (!user) {
+      if (!isActiveAccount(user)) {
         return done(null, false);
       }
       done(null, user);

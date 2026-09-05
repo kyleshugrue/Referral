@@ -17,6 +17,7 @@ import {
   MAX_WEBSOCKET_PAYLOAD_BYTES,
 } from './lib/websocket-security';
 import { getTrustedClientIp, isOriginAllowed } from './lib/http-security';
+import { isActiveAccount } from './lib/account-status';
 import { decodeMessageCursor, DEFAULT_MESSAGE_PAGE_SIZE } from './lib/message-pagination';
 import { toMessageDto } from './lib/privacy-dto';
 
@@ -171,14 +172,7 @@ export function setupWebSocketServer(server: HTTPServer) {
           clearTimeout(verificationTimeout!);
         }
         const verificationDecision = decideWebSocketVerification(user, verificationError);
-        if (
-          verificationDecision.allowed &&
-          typeof user === 'object' &&
-          user !== null &&
-          'accountStatus' in user &&
-          (user as { accountStatus?: string }).accountStatus &&
-          (user as { accountStatus: string }).accountStatus !== 'active'
-        ) {
+        if (verificationDecision.allowed && !isActiveAccount(user as { accountStatus?: string } | null)) {
           callback(false, 403, 'Account is not active');
           return;
         }

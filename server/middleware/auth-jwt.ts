@@ -26,6 +26,7 @@ import { storage } from '../storage';
 import { logger } from '../lib/logger';
 import { logSecurityEvent, extractRequestMetadata } from '../lib/security-logger';
 import { requireTrustedOriginForSessionMutation } from '../lib/http-security';
+import { isActiveAccount } from '../lib/account-status';
 
 type AuthRequest = Request & {
   id?: string;
@@ -53,7 +54,7 @@ export async function authenticateUploadPrincipal(
       const payload = verifyAccessToken(authHeader!.substring(7));
       if (payload?.userId) {
         const user = await storage.getUser(payload.userId);
-        if (user) {
+        if (isActiveAccount(user)) {
           req.user = user;
           authRequest.authMethod = 'jwt';
           next();
@@ -71,7 +72,17 @@ export async function authenticateUploadPrincipal(
   }
 
   if (req.isAuthenticated?.() && req.user) {
-    authRequest.authMethod = 'session';
+    try {
+      const currentUser = await storage.getUser(req.user.id);
+      if (currentUser && isActiveAccount(currentUser)) {
+        req.user = currentUser;
+        authRequest.authMethod = 'session';
+      }
+    } catch (error) {
+      logger.warn('[Upload Auth] Current account status lookup failed', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+    }
   }
   next();
 }
@@ -201,17 +212,28 @@ export async function requireAuthJWT(
   );
   
   if (isAuthenticated && req.user) {
-    // SUCCESS: Session authentication successful
-    // Set explicit flag for downstream middleware to verify session auth occurred
-    authRequest.authMethod = 'session';
-    
-    logger.debug(
-      `[Auth:JWT] [ReqID: ${requestId}] ✅ Session authentication successful ` +
-      `for user ${req.user.id} accessing ${requestMethod} ${requestPath}`
-    );
-    
-     requireTrustedOriginForSessionMutation(req, res, next);
-     return;
+    try {
+      const currentUser = await storage.getUser(req.user.id);
+      if (currentUser && isActiveAccount(currentUser)) {
+        // SUCCESS: Session authentication successful
+        // Set explicit flag for downstream middleware to verify session auth occurred
+        req.user = currentUser;
+        authRequest.authMethod = 'session';
+
+        logger.debug(
+          `[Auth:JWT] [ReqID: ${requestId}] ✅ Session authentication successful ` +
+          `for user ${currentUser.id} accessing ${requestMethod} ${requestPath}`
+        );
+
+        requireTrustedOriginForSessionMutation(req, res, next);
+        return;
+      }
+      logger.warn(`[Auth:JWT] Account is not active for session user ${req.user.id}`);
+    } catch (error) {
+      logger.error(`[Auth:JWT] [ReqID: ${requestId}] Database error fetching session user`, {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+    }
   }
 
   // AUTHENTICATION FAILED: Neither JWT nor session authentication succeeded

@@ -127,6 +127,18 @@ router.post('/refresh', async (req, res) => {
       });
     }
 
+    if (rotation.status === 'account_inactive') {
+      logSecurityEvent('warn', 'Token Refresh - Account Inactive', {
+        action: 'account_inactive',
+        userId: rotation.userId,
+        deviceId: normalizedDeviceId,
+        ...extractRequestMetadata(req),
+      });
+      return res.status(401).json({
+        message: 'Account is not active',
+      });
+    }
+
     const newAccessToken = generateAccessToken(rotation.user.id, rotation.user.email);
 
     logSecurityEvent('info', 'Token Refresh - Success', {

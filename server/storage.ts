@@ -17,6 +17,7 @@ import { locationCacheService } from './services/location-cache';
 import { broadcastMatchRefresh, broadcastMatchRefreshToUsers } from './websocket-utils';
 import { logger } from './lib/logger';
 import { parseServerEnvironment } from './lib/env';
+import { isActiveAccount } from './lib/account-status';
 import { recordQueueEvent } from './lib/operational-metrics';
 import { discoverableUserCondition, matchableUserCondition } from './lib/discoverability-policy';
 import { hasRequiredFieldsForMatching } from './lib/profile-matching';
@@ -39,6 +40,7 @@ export interface IStorage {
   linkUserToFirebaseUid(id: number, firebaseUid: string, emailVerified: boolean): Promise<User>;
   deleteUser(id: number): Promise<void>;
   requestAccountErasure(id: number): Promise<AccountErasureJob>;
+  destroyUserSessions(userId: number): Promise<void>;
   claimNextAccountErasureJob(): Promise<AccountErasureJob | undefined>;
   completeAccountErasureJob(jobId: number, userId: number): Promise<void>;
   failAccountErasureJob(jobId: number, errorCode: string, manualReview: boolean): Promise<void>;
@@ -162,6 +164,8 @@ export interface IStorage {
     | { status: 'expired'; userId: number }
     | { status: 'device_mismatch'; userId: number; expectedDeviceId: string }
     | { status: 'user_missing'; userId: number }
+    | { status: 'account_inactive'; userId: number }
+    | { status: 'account_inactive'; userId: number }
   >;
   getRefreshTokenByHash(tokenHash: string): Promise<RefreshToken | null>;
   getRefreshTokenByUserAndDevice(userId: number, deviceId: string): Promise<RefreshToken | null>;
@@ -1037,7 +1041,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async requestAccountErasure(id: number): Promise<AccountErasureJob> {
-    return db.transaction(async (tx) => {
+    const job = await db.transaction(async (tx) => {
       const [user] = await tx.select().from(users).where(eq(users.id, id)).for('update');
       if (!user) throw new Error('User not found');
       const now = new Date().toISOString();
@@ -1065,6 +1069,33 @@ export class DatabaseStorage implements IStorage {
       if (!job) throw new Error('Unable to create account-erasure job');
       logger.info('[Storage] Account-erasure job requested', { jobId: job.id });
       return job;
+    });
+
+    try {
+      await this.destroyUserSessions(id);
+    } catch (error) {
+      // Database account status is the authorization boundary. Session
+      // cleanup is best-effort so a store outage cannot undo the fail-closed
+      // deletion transition or make the request look like it succeeded safely.
+      logger.warn('[Storage] Server-session cleanup deferred after account erasure request', {
+        userId: id,
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+    }
+
+    return job;
+  }
+
+  async destroyUserSessions(userId: number): Promise<void> {
+    const result = await queryDatabase(
+      pool,
+      `DELETE FROM "session"
+       WHERE COALESCE(sess->'passport'->>'user', sess->>'userId') = $1`,
+      [String(userId)],
+    );
+    logger.info('[Storage] Destroyed server sessions for account erasure', {
+      userId,
+      deletedSessions: result.rowCount ?? 0,
     });
   }
 
@@ -4631,6 +4662,15 @@ export class DatabaseStorage implements IStorage {
   // Refresh token management methods for JWT authentication
   async createRefreshToken(refreshTokenData: InsertRefreshToken): Promise<RefreshToken> {
     logger.debug('[Storage] Creating refresh token for user:', refreshTokenData.userId, 'device:', refreshTokenData.deviceId);
+
+    const [user] = await db
+      .select({ accountStatus: users.accountStatus })
+      .from(users)
+      .where(eq(users.id, refreshTokenData.userId))
+      .limit(1);
+    if (!isActiveAccount(user)) {
+      throw new Error('Account is not active');
+    }
     
     const [token] = await db
       .insert(refreshTokens)
@@ -4651,6 +4691,7 @@ export class DatabaseStorage implements IStorage {
     | { status: 'expired'; userId: number }
     | { status: 'device_mismatch'; userId: number; expectedDeviceId: string }
     | { status: 'user_missing'; userId: number }
+    | { status: 'account_inactive'; userId: number }
   > {
     return db.transaction(async (tx) => {
       const [token] = await tx
@@ -4677,6 +4718,9 @@ export class DatabaseStorage implements IStorage {
         .where(eq(users.id, token.userId))
         .limit(1);
       if (!user) return { status: 'user_missing' as const, userId: token.userId };
+      if (!isActiveAccount(user)) {
+        return { status: 'account_inactive' as const, userId: token.userId };
+      }
 
       const [consumed] = await tx
         .delete(refreshTokens)

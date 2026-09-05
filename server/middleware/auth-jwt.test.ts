@@ -54,6 +54,7 @@ describe("requireAuthJWT authentication precedence", () => {
 
   test("uses the session when no bearer credential is supplied", async () => {
     mocks.next.mockReset();
+    mocks.getUser.mockResolvedValue({ id: 2, accountStatus: "active" });
     const request = makeRequest();
     const response = makeResponse();
 

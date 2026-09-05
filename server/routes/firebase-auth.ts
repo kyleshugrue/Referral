@@ -13,6 +13,7 @@ import { User } from '@shared/schema';
 import { logger } from '../lib/logger';
 import { extractBearerToken } from '../lib/register-auth';
 import { toSelfUserDto } from '../lib/privacy-dto';
+import { isActiveAccount } from '../lib/account-status';
 
 const router = Router();
 const errorClass = (error: unknown) => error instanceof Error ? error.name : 'UnknownError';
@@ -25,6 +26,19 @@ async function completeAuthResponse(
   user: User,
   originalSessionId: string | undefined
 ): Promise<Response> {
+  // Firebase authentication is also a token/session issuance boundary. Do
+  // not issue fresh credentials from a stale User object after an erasure
+  // request has moved the account out of the active state.
+  const currentUser = await storage.getUser(user.id);
+  if (!currentUser || !isActiveAccount(currentUser)) {
+    logger.warn('[FIREBASE-AUTH] Refused credential issuance for inactive account', {
+      userId: user.id,
+      accountStatus: currentUser?.accountStatus ?? 'missing',
+    });
+    return res.status(401).json({ error: 'Account is not active' });
+  }
+  user = currentUser;
+
   logger.debug('💾 [FIREBASE-AUTH DEBUG] Saving session to database...');
   
   return new Promise((resolve) => {
