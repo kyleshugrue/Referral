@@ -43,7 +43,9 @@ import { queryDatabase } from './lib/database-client';
 import { createServerLifecycle } from './lib/server-lifecycle';
 import { createSchemaReadinessGate } from './lib/schema-readiness-gate';
 import { copyProxyResponseHeaders } from './lib/proxy-headers';
+import { verifyInternalAuth } from './lib/internal-auth';
 import { processAccountErasureJobs } from './services/account-erasure';
+import { getPublicReadinessResponse } from './lib/readiness-contract';
 
 // Function to serve static files in production
 function serveStaticFiles(app: ReturnType<typeof express>) {
@@ -236,42 +238,68 @@ async function main() {
     });
 
     app.get('/api/ready', async (_req, res) => {
-      if (!lifecycle.isReady()) {
-        return res.status(503).json({
-          status: 'not_ready',
-          reason: lifecycle.getState() === 'draining' ? 'draining' : 'starting',
+      const lifecycleState = lifecycle.isReady() ? 'ready' : lifecycle.getState() === 'draining' ? 'draining' : 'starting';
+      const readiness = await refreshSchemaReadiness();
+      let queueAvailable = true;
+      try {
+        await Promise.all([
+          storage.getQueuedNotificationStats(),
+          storage.getCallbackNotificationStats(),
+        ]);
+      } catch (error) {
+        logger.error('[Readiness] Queue health check failed', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
         });
+        queueAvailable = false;
+      }
+      const response = getPublicReadinessResponse(lifecycleState, readiness.ready, queueAvailable);
+      return res.status(response.statusCode).json(response.body);
+    });
+
+    // Detailed schema and queue diagnostics are intentionally kept behind the
+    // same timing-safe internal bearer boundary used by Worker callbacks.
+    app.get('/internal/readiness', async (req, res) => {
+      if (!verifyInternalAuth(req.headers.authorization, process.env.INTERNAL_API_SECRET)) {
+        return res.status(401).json({ error: 'Unauthorized' });
       }
 
       const readiness = await refreshSchemaReadiness();
-      if (!readiness.ready) {
-        return res.status(503).json({
-          status: 'not_ready',
-          reason: readiness.reason,
-          missingTables: readiness.reason === 'schema-incomplete' ? readiness.missingTables : undefined,
-          missingColumns: readiness.reason === 'schema-incomplete' ? readiness.missingColumns : undefined,
-          invalidColumns: readiness.reason === 'schema-incomplete' ? readiness.invalidColumns : undefined,
-          missingIndexes: readiness.reason === 'schema-incomplete' ? readiness.missingIndexes : undefined,
-          missingConstraints: readiness.reason === 'schema-incomplete' ? readiness.missingConstraints : undefined,
-        });
-      }
       try {
         const [push, callbacks] = await Promise.all([
           storage.getQueuedNotificationStats(),
           storage.getCallbackNotificationStats(),
         ]);
-        return res.status(200).json({
-          status: 'ready',
+        res.setHeader('Cache-Control', 'no-store');
+        return res.status(readiness.ready ? 200 : 503).json({
+          ready: readiness.ready,
+          reason: readiness.reason,
+          schema: {
+            missingTables: readiness.missingTables,
+            missingColumns: readiness.missingColumns,
+            invalidColumns: readiness.invalidColumns,
+            missingIndexes: readiness.missingIndexes,
+            missingConstraints: readiness.missingConstraints,
+          },
           queues: {
             push: { pending: push.pending, processing: push.processing, failed: push.failed },
             callbacks: { pending: callbacks.pending, processing: callbacks.processing, failed: callbacks.failed },
           },
         });
       } catch (error) {
-        logger.error('[Readiness] Queue health check failed', {
+        logger.error('[Readiness] Internal diagnostics failed', {
           errorClass: error instanceof Error ? error.name : 'UnknownError',
         });
-        return res.status(503).json({ status: 'not_ready', reason: 'queue-unavailable' });
+        return res.status(503).json({
+          ready: false,
+          reason: 'queue_unavailable',
+          schema: {
+            missingTables: readiness.missingTables,
+            missingColumns: readiness.missingColumns,
+            invalidColumns: readiness.invalidColumns,
+            missingIndexes: readiness.missingIndexes,
+            missingConstraints: readiness.missingConstraints,
+          },
+        });
       }
     });
 

@@ -417,44 +417,17 @@ router.patch('/', requireAuthJWT, async (req, res) => {
     // This section runs on EVERY profile update to catch the moment when all
     // required fields become available (typically during Step 3 of registration)
     const matchJobStatus = shouldQueueInitialMatchJobs(updatedUser);
+    let initialMatchQueueAttempted = false;
     
     if (matchJobStatus.shouldQueue) {
+      initialMatchQueueAttempted = true;
       console.log(`[UserRoute] 🎯 IMMEDIATE MATCH QUEUEING: User ${userId} ready for initial match jobs!`);
       console.log(`[UserRoute] Reason: ${matchJobStatus.reason}`);
       
       try {
-        // STEP 1: Atomically mark jobs as queued BEFORE queueing to prevent race conditions
-        // CRITICAL: Use conditional UPDATE to prevent duplicate job creation from concurrent requests
-        // Only set the flag if it's currently false (prevents race condition)
         const timestamp = new Date().toISOString();
-        const updateResult = await db.update(users)
-          .set({ 
-            initialMatchJobsQueued: true,
-            initialMatchJobsQueuedAt: timestamp
-          })
-          .where(and(
-            eq(users.id, userId),
-            eq(users.initialMatchJobsQueued, false) // CRITICAL: Only update if not already queued
-          ))
-          .returning({ id: users.id });
-        
-        // Check if we won the race - if no rows affected, another request already queued the jobs
-        if (!updateResult || updateResult.length === 0) {
-          console.log(`[UserRoute] ⚠️ Race condition detected: Another request already queued initial match jobs for user ${userId}`);
-          console.log(`[UserRoute] Refreshing user data to reflect queued status set by competing request`);
-          
-          // CRITICAL: Refresh user from database to get accurate queued status
-          // This ensures the API response reflects the true database state
-          const refreshedUser = await storage.getUser(userId);
-          if (refreshedUser) {
-            Object.assign(updatedUser, refreshedUser);
-            console.log(`[UserRoute] ✅ User data refreshed - initialMatchJobsQueued: ${refreshedUser.initialMatchJobsQueued}`);
-          }
-        } else {
-        
-        console.log(`[UserRoute] ✅ Atomically set initialMatchJobsQueued=true for user ${userId} (won race condition check)`);
-        
-        // STEP 2: Ensure geocoding is complete before queuing jobs
+        // Ensure geocoding is complete before queueing jobs. The completion flag
+        // is persisted only after every required direction is represented.
         // Coordinates are REQUIRED for location-based matching
         let needsGeocodingFix = false;
         let geocodingSuccess = true;
@@ -500,40 +473,49 @@ router.patch('/', requireAuthJWT, async (req, res) => {
         
         const matchJobResult = await simpleMatchJobHelper.queuePrioritizedMatchJobs(userId);
         
-        console.log(`[UserRoute] ✅ SUCCESS: Queued initial match jobs for user ${userId}:`, {
+        console.log(`[UserRoute] Initial match fan-out result for user ${userId}:`, {
           highPriorityJobs: matchJobResult.highPriorityJobs,
           lowPriorityJobs: matchJobResult.lowPriorityJobs,
           potentialMatches: matchJobResult.potentialMatches,
+          requiredDirections: matchJobResult.requiredDirections,
+          representedDirections: matchJobResult.representedDirections,
+          failedDirections: matchJobResult.failedDirections.length,
           totalJobs: matchJobResult.highPriorityJobs + matchJobResult.lowPriorityJobs,
           queuedAt: timestamp
         });
         
-        console.log(`[UserRoute] 📡 PostgreSQL NOTIFY sent - Worker VM will process jobs automatically`);
-        
-        // Update the local user object to reflect the queued status
-        updatedUser.initialMatchJobsQueued = true;
-        updatedUser.initialMatchJobsQueuedAt = timestamp;
+        if (matchJobResult.complete) {
+          const updateResult = await db.update(users)
+            .set({
+              initialMatchJobsQueued: true,
+              initialMatchJobsQueuedAt: timestamp
+            })
+            .where(and(
+              eq(users.id, userId),
+              eq(users.initialMatchJobsQueued, false)
+            ))
+            .returning({ id: users.id });
+
+          if (updateResult.length > 0) {
+            updatedUser.initialMatchJobsQueued = true;
+            updatedUser.initialMatchJobsQueuedAt = timestamp;
+          } else {
+            const refreshedUser = await storage.getUser(userId);
+            if (refreshedUser) Object.assign(updatedUser, refreshedUser);
+          }
+        } else {
+          logger.warn(`[UserRoute] Initial match fan-out remains incomplete for user ${userId}`, {
+            failedDirections: matchJobResult.failedDirections.length,
+            requiredDirections: matchJobResult.requiredDirections,
+          });
+          updatedUser.initialMatchJobsQueued = false;
+          updatedUser.initialMatchJobsQueuedAt = null;
         }
         
       } catch (matchJobError) {
         console.error(`[UserRoute] ❌ ERROR queueing initial match jobs for user ${userId}:`, matchJobError);
-        
-        // ROLLBACK: Reset the flag so jobs can be retried on next update
-        try {
-          await db.update(users)
-            .set({ 
-              initialMatchJobsQueued: false,
-              initialMatchJobsQueuedAt: null
-            })
-            .where(eq(users.id, userId));
-          
-          console.log(`[UserRoute] 🔄 Rolled back initialMatchJobsQueued flag for user ${userId} to allow retry`);
-        } catch (rollbackError) {
-          console.error(`[UserRoute] ❌ Failed to rollback initialMatchJobsQueued flag:`, rollbackError);
-        }
-        
-        // Don't fail the update - user can still use the app
-        // Jobs will be retried on next profile update or registration completion
+        updatedUser.initialMatchJobsQueued = false;
+        updatedUser.initialMatchJobsQueuedAt = null;
       }
     } else {
       console.log(`[UserRoute] ⏸️ Not queueing initial match jobs for user ${userId}: ${matchJobStatus.reason}`);
@@ -549,7 +531,7 @@ router.patch('/', requireAuthJWT, async (req, res) => {
       existingUser.registrationCompleted === false && 
       updatedUser.registrationCompleted === true;
 
-    if (isCompletingRegistration) {
+    if (isCompletingRegistration && !initialMatchQueueAttempted) {
       logger.debug(`[UserRoute] 🎉 FALLBACK: User ${userId} completed registration!`);
       
       // Check if initial match jobs were already queued by the immediate section above
@@ -560,25 +542,7 @@ router.patch('/', requireAuthJWT, async (req, res) => {
         console.log(`[UserRoute] ⚠️ FALLBACK: Jobs not queued yet, attempting to queue now...`);
         
         try {
-          // Mark as queued atomically with race condition protection
           const timestamp = new Date().toISOString();
-          const updateResult = await db.update(users)
-            .set({ 
-              initialMatchJobsQueued: true,
-              initialMatchJobsQueuedAt: timestamp
-            })
-            .where(and(
-              eq(users.id, userId),
-              eq(users.initialMatchJobsQueued, false) // Only update if not already queued
-            ))
-            .returning({ id: users.id });
-          
-          // Check if we won the race
-          if (!updateResult || updateResult.length === 0) {
-            console.log(`[UserRoute] ⚠️ FALLBACK: Race condition - jobs already queued by another request`);
-            return res.json(toSelfUserDto(updatedUser)); // Exit early
-          }
-          
           // Ensure geocoding complete
           let needsGeocodingFix = false;
           
@@ -613,27 +577,41 @@ router.patch('/', requireAuthJWT, async (req, res) => {
           // Queue jobs
           const matchJobResult = await simpleMatchJobHelper.queuePrioritizedMatchJobs(userId);
           
-          console.log(`[UserRoute] ✅ FALLBACK SUCCESS: Queued match jobs for user ${userId}:`, {
+          console.log(`[UserRoute] FALLBACK match fan-out result for user ${userId}:`, {
             highPriorityJobs: matchJobResult.highPriorityJobs,
             lowPriorityJobs: matchJobResult.lowPriorityJobs,
             potentialMatches: matchJobResult.potentialMatches,
+            requiredDirections: matchJobResult.requiredDirections,
+            representedDirections: matchJobResult.representedDirections,
+            failedDirections: matchJobResult.failedDirections.length,
             totalJobs: matchJobResult.highPriorityJobs + matchJobResult.lowPriorityJobs
           });
           
-          updatedUser.initialMatchJobsQueued = true;
-          updatedUser.initialMatchJobsQueuedAt = timestamp;
+          if (matchJobResult.complete) {
+            await db.update(users)
+              .set({
+                initialMatchJobsQueued: true,
+                initialMatchJobsQueuedAt: timestamp
+              })
+              .where(and(
+                eq(users.id, userId),
+                eq(users.initialMatchJobsQueued, false)
+              ));
+            updatedUser.initialMatchJobsQueued = true;
+            updatedUser.initialMatchJobsQueuedAt = timestamp;
+          } else {
+            logger.warn(`[UserRoute] FALLBACK match fan-out remains incomplete for user ${userId}`, {
+              failedDirections: matchJobResult.failedDirections.length,
+              requiredDirections: matchJobResult.requiredDirections,
+            });
+            updatedUser.initialMatchJobsQueued = false;
+            updatedUser.initialMatchJobsQueuedAt = null;
+          }
           
         } catch (matchJobError) {
           console.error(`[UserRoute] ❌ FALLBACK ERROR queuing jobs for user ${userId}:`, matchJobError);
-          
-          // Rollback flag
-          try {
-            await db.update(users)
-              .set({ initialMatchJobsQueued: false, initialMatchJobsQueuedAt: null })
-              .where(eq(users.id, userId));
-          } catch (rollbackError) {
-            console.error(`[UserRoute] ❌ Failed to rollback:`, rollbackError);
-          }
+          updatedUser.initialMatchJobsQueued = false;
+          updatedUser.initialMatchJobsQueuedAt = null;
         }
       } else {
         logger.debug(`[UserRoute] ⚠️ User ${userId} completed registration but missing required fields for AI matching`);

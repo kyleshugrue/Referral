@@ -1,4 +1,29 @@
 import type { IStorage } from '../storage';
+import type { JobMetadata, JobType } from './background-job-queue';
+
+export interface InitialMatchJobFailure {
+  userId: number;
+  targetUserId: number;
+  priority: number;
+}
+
+export interface InitialMatchJobsResult {
+  highPriorityJobs: number;
+  lowPriorityJobs: number;
+  potentialMatches: number;
+  requiredDirections: number;
+  representedDirections: number;
+  failedDirections: InitialMatchJobFailure[];
+  complete: boolean;
+}
+
+type QueueJob = (
+  userId: number,
+  jobType: JobType,
+  metadata: JobMetadata,
+  priority: number,
+  maxRetries: number,
+) => Promise<unknown>;
 
 /**
  * Simple Match Job Helper
@@ -14,9 +39,11 @@ import type { IStorage } from '../storage';
 
 export class SimpleMatchJobHelper {
   private storage: IStorage;
+  private readonly queueJob?: QueueJob;
 
-  constructor(storage: IStorage) {
+  constructor(storage: IStorage, queueJob?: QueueJob) {
     this.storage = storage;
+    this.queueJob = queueJob;
   }
 
   /**
@@ -26,11 +53,7 @@ export class SimpleMatchJobHelper {
    * HIGH priority (1): Viewing user's descriptions (what they see about matches)
    * LOW priority (9): Matched users' descriptions (what matched users see about viewing user)
    */
-  async queuePrioritizedMatchJobs(viewingUserId: number): Promise<{ 
-    highPriorityJobs: number; 
-    lowPriorityJobs: number; 
-    potentialMatches: number;
-  }> {
+  async queuePrioritizedMatchJobs(viewingUserId: number): Promise<InitialMatchJobsResult> {
     try {
       console.log(`[SimpleMatchJobHelper] Queueing prioritized match jobs for user ${viewingUserId}`);
 
@@ -45,14 +68,26 @@ export class SimpleMatchJobHelper {
       console.log(`[SimpleMatchJobHelper] Found ${potentialMatchIds.length} potential matches for user ${viewingUserId}`);
 
       if (potentialMatchIds.length === 0) {
-        return { highPriorityJobs: 0, lowPriorityJobs: 0, potentialMatches: 0 };
+        return {
+          highPriorityJobs: 0,
+          lowPriorityJobs: 0,
+          potentialMatches: 0,
+          requiredDirections: 0,
+          representedDirections: 0,
+          failedDirections: [],
+          complete: true,
+        };
       }
 
-      // Import background job queue
-      const { backgroundJobQueue } = await import('./background-job-queue');
+      const enqueue = this.queueJob ?? (async (...args: Parameters<QueueJob>) => {
+        const { backgroundJobQueue } = await import('./background-job-queue');
+        return backgroundJobQueue.queueJob(...args);
+      });
 
       let highPriorityCount = 0;
       let lowPriorityCount = 0;
+      let requiredDirections = 0;
+      const failedDirections: InitialMatchJobFailure[] = [];
 
       // Queue jobs for all potential matches - Worker VM will handle compatibility checking
       for (const matchedUserId of potentialMatchIds) {
@@ -61,12 +96,19 @@ export class SimpleMatchJobHelper {
           const matchedUser = await this.storage.getUser(matchedUserId);
           if (!matchedUser) {
             console.log(`[SimpleMatchJobHelper] Skipping user ${matchedUserId} - not found`);
+            failedDirections.push(
+              { userId: viewingUserId, targetUserId: matchedUserId, priority: 1 },
+              { userId: matchedUserId, targetUserId: viewingUserId, priority: 9 },
+            );
+            requiredDirections += 2;
             continue;
           }
 
+          requiredDirections += 2;
+
           // HIGH PRIORITY: Create job for viewing user's perspective (A→B)
           try {
-            await backgroundJobQueue.queueJob(
+            await enqueue(
               viewingUserId,
               'MATCH_DESCRIPTION',
               {
@@ -81,11 +123,12 @@ export class SimpleMatchJobHelper {
             highPriorityCount++;
           } catch (error) {
             console.error(`[SimpleMatchJobHelper] Error queuing high-priority job for ${viewingUserId}→${matchedUserId}:`, error);
+            failedDirections.push({ userId: viewingUserId, targetUserId: matchedUserId, priority: 1 });
           }
 
           // LOW PRIORITY: Create job for matched user's perspective (B→A)
           try {
-            await backgroundJobQueue.queueJob(
+            await enqueue(
               matchedUserId,
               'MATCH_DESCRIPTION',
               {
@@ -100,6 +143,7 @@ export class SimpleMatchJobHelper {
             lowPriorityCount++;
           } catch (error) {
             console.error(`[SimpleMatchJobHelper] Error queuing low-priority job for ${matchedUserId}→${viewingUserId}:`, error);
+            failedDirections.push({ userId: matchedUserId, targetUserId: viewingUserId, priority: 9 });
           }
         } catch (error) {
           console.error(`[SimpleMatchJobHelper] Error processing potential match ${matchedUserId}:`, error);
@@ -111,7 +155,11 @@ export class SimpleMatchJobHelper {
       return { 
         highPriorityJobs: highPriorityCount, 
         lowPriorityJobs: lowPriorityCount,
-        potentialMatches: potentialMatchIds.length
+        potentialMatches: potentialMatchIds.length,
+        requiredDirections,
+        representedDirections: requiredDirections - failedDirections.length,
+        failedDirections,
+        complete: failedDirections.length === 0,
       };
 
     } catch (error) {

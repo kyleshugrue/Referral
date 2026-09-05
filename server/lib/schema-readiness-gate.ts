@@ -4,6 +4,9 @@ import type { DatabaseReadinessResult } from './database-readiness';
 const SCHEMA_READINESS_EXEMPT_PATHS = new Set([
   '/api/health',
   '/api/ready',
+  // The handler performs the internal bearer check before returning the
+  // detailed schema diagnostics needed to repair an incomplete database.
+  '/internal/readiness',
 ]);
 
 const MAINTENANCE_HTML = `<!doctype html>

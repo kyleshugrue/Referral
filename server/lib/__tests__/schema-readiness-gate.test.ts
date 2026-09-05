@@ -65,6 +65,7 @@ describe('schema readiness gate', () => {
   it('keeps health and readiness diagnostics reachable', async () => {
     expect(invokeGate(incompleteReadiness, '/api/health').nextCalled).toBe(true);
     expect(invokeGate(incompleteReadiness, '/api/ready').nextCalled).toBe(true);
+    expect(invokeGate(incompleteReadiness, '/internal/readiness').nextCalled).toBe(true);
   });
 
   it('returns a safe JSON maintenance response before authenticated middleware', async () => {

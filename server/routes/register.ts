@@ -302,19 +302,23 @@ export async function partialRegisterFirebaseUser(req: Request, res: Response) {
           const timestamp = new Date().toISOString();
 
           // Queue prioritized AI match jobs (same logic as PATCH /api/user)
-          await simpleMatchJobHelper.queuePrioritizedMatchJobs(completedUser.id);
-
-          // Mark that initial match jobs have been queued
-          await storage.updateUser(completedUser.id, {
-            initialMatchJobsQueued: true,
-            initialMatchJobsQueuedAt: timestamp
-          });
-
-          // Update the user object to reflect the change
-          completedUser.initialMatchJobsQueued = true;
-          completedUser.initialMatchJobsQueuedAt = timestamp;
+          const matchJobResult = await simpleMatchJobHelper.queuePrioritizedMatchJobs(completedUser.id);
+          if (matchJobResult.complete) {
+            await storage.updateUser(completedUser.id, {
+              initialMatchJobsQueued: true,
+              initialMatchJobsQueuedAt: timestamp
+            });
+            completedUser.initialMatchJobsQueued = true;
+            completedUser.initialMatchJobsQueuedAt = timestamp;
+          } else {
+            completedUser.initialMatchJobsQueued = false;
+            completedUser.initialMatchJobsQueuedAt = null;
+          }
         } catch {
-          // Don't fail the entire request - match jobs will queue on next update
+          // Keep initialization incomplete so the next update retries only the
+          // missing idempotent directions.
+          completedUser.initialMatchJobsQueued = false;
+          completedUser.initialMatchJobsQueuedAt = null;
         }
       }
 
@@ -385,19 +389,23 @@ export async function partialRegisterFirebaseUser(req: Request, res: Response) {
           const timestamp = new Date().toISOString();
 
           // Queue prioritized AI match jobs (same logic as PATCH /api/user)
-          await simpleMatchJobHelper.queuePrioritizedMatchJobs(newUser.id);
-
-          // Mark that initial match jobs have been queued
-          await storage.updateUser(newUser.id, {
-            initialMatchJobsQueued: true,
-            initialMatchJobsQueuedAt: timestamp
-          });
-
-          // Update the user object to reflect the change
-          newUser.initialMatchJobsQueued = true;
-          newUser.initialMatchJobsQueuedAt = timestamp;
+          const matchJobResult = await simpleMatchJobHelper.queuePrioritizedMatchJobs(newUser.id);
+          if (matchJobResult.complete) {
+            await storage.updateUser(newUser.id, {
+              initialMatchJobsQueued: true,
+              initialMatchJobsQueuedAt: timestamp
+            });
+            newUser.initialMatchJobsQueued = true;
+            newUser.initialMatchJobsQueuedAt = timestamp;
+          } else {
+            newUser.initialMatchJobsQueued = false;
+            newUser.initialMatchJobsQueuedAt = null;
+          }
         } catch {
-          // Don't fail the entire request - match jobs will queue on next update
+          // Keep initialization incomplete so the next update retries only the
+          // missing idempotent directions.
+          newUser.initialMatchJobsQueued = false;
+          newUser.initialMatchJobsQueuedAt = null;
         }
       }
 
