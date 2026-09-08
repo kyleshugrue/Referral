@@ -19,12 +19,7 @@ export function ProtectedRoute({
     isLoading,
     hasFirebaseUser: !!firebaseUser,
     hasBackendUser: !!user,
-    backendUserDetails: user ? {
-      id: user.id,
-      email: user.email,
-      emailVerified: user.emailVerified,
-      registrationCompleted: user.registrationCompleted
-    } : null
+    hasBackendUserDetails: Boolean(user),
   });
 
   const allowedPathsWithoutRegistration = [

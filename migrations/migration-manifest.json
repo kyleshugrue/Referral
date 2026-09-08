@@ -36,6 +36,10 @@
     {
       "file": "0008_account_erasure.sql",
       "sha256": "a4b58b09017c25dc1c0fd9274c7c63d5af5a9c30c2b90b059a783c7957082ea3"
+    },
+    {
+      "file": "0009_message_delivery_status.sql",
+      "sha256": "60bb781a2474ccf51098d81b9eccf9b8957b455f63cc586d6caea005b0f2931b"
     }
   ]
 }

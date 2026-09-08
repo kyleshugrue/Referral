@@ -15,6 +15,7 @@ describe('migration integrity evidence', () => {
       '0006_rate_limit_windows.sql',
       '0007_delivery_obligations.sql',
       '0008_account_erasure.sql',
+      '0009_message_delivery_status.sql',
     ]);
     expect(result.manifestSha256).toMatch(/^[a-f0-9]{64}$/);
   });

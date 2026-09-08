@@ -548,6 +548,8 @@ export default function ChatPage() {
       receiverId: Number(userId),
       content: messageContent,
       createdAt: new Date().toISOString(),
+      deliveredAt: null,
+      readAt: null,
       status: 'sending',
       isTemporary: true
     };

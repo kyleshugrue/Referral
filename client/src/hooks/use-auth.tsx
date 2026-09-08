@@ -94,12 +94,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   
   // Sync Firebase user with our backend
   const syncUserWithBackend = useCallback(async (fbUser: FirebaseUser) => {
-    logger.debug("🔄 [SYNC DEBUG] Starting syncUserWithBackend...", {
-      uid: fbUser.uid,
-      email: fbUser.email,
+    logger.debug("🔄 [SYNC DEBUG] Starting syncUserWithBackend", {
       emailVerified: fbUser.emailVerified,
-      displayName: fbUser.displayName,
-      timestamp: new Date().toISOString()
     });
     
     try {
@@ -249,10 +245,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const unsubscribe = onAuthStateChanged(fbAuth, (user) => {
         logger.debug("🔐 [AUTH DEBUG] Firebase auth state changed:", {
           userExists: !!user,
-          uid: user?.uid,
-          email: user?.email,
           emailVerified: user?.emailVerified,
-          timestamp: new Date().toISOString()
         });
 
         setFirebaseUser(user);
@@ -352,7 +345,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logger.debug("📊 [QUERY DEBUG] Fetching /api/user data...", {
         timestamp: new Date().toISOString(),
         firebaseLoading,
-        firebaseUser: firebaseUser ? { uid: firebaseUser.uid, email: firebaseUser.email } : null
+        hasFirebaseUser: Boolean(firebaseUser),
       });
       
       try {
@@ -387,7 +380,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const loginMutation = useMutation({
     mutationFn: async (credentials: LoginData) => {
-      logger.debug("Attempting login with:", { email: credentials.email, password: '[REDACTED]' });
+      logger.debug("Attempting login");
       
       // Login with Firebase
       try {
@@ -629,7 +622,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const registerMutation = useMutation({
     mutationFn: async (userData: RegisterData) => {
-      logger.debug("Attempting registration with:", { ...userData, password: '[REDACTED]' });
+      logger.debug("Attempting registration");
       
       // Register with Firebase
       try {
@@ -1083,8 +1076,6 @@ export function useAuth() {
               status: syncResponse.status,
               statusText: syncResponse.statusText,
               errorText,
-              email: context.firebaseUser.email,
-              emailVerified: context.firebaseUser.emailVerified
             });
             logger.error("❌ [REFRESH DEBUG] This failed sync will cause 401 errors!");
           }

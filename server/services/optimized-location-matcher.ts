@@ -51,7 +51,7 @@ export class OptimizedLocationMatcher {
         };
 
         const distance = this.calculateDistance(coord1, coord2);
-        console.log(`[OptimizedLocationMatcher] Using cached coordinates - Distance between ${user1.currentLocation} and ${user2.currentLocation}: ${distance} miles (radius: ${user1MatchingRadius})`);
+        console.log(`[OptimizedLocationMatcher] Cached coordinate distance calculated for users ${user1.id} and ${user2.id}`, { distance, radius: user1MatchingRadius });
         
         return distance <= user1MatchingRadius;
       }
@@ -95,7 +95,7 @@ export class OptimizedLocationMatcher {
           const distance = this.calculateDistance(userCurrentCoord, desiredCoord);
           
           if (distance <= userMatchingRadius) {
-            console.log(`[OptimizedLocationMatcher] User ${user.id} at ${user.currentLocation} is within ${userMatchingRadius} miles of their own desired location ${coordData.location} (distance: ${distance} miles)`);
+            console.log(`[OptimizedLocationMatcher] User ${user.id} is within their matching radius`, { distance, radius: userMatchingRadius });
             return true;
           }
         } catch (parseError) {
@@ -104,7 +104,7 @@ export class OptimizedLocationMatcher {
         }
       }
 
-      console.log(`[OptimizedLocationMatcher] User ${user.id} at ${user.currentLocation} is NOT within radius of any of their desired locations`);
+      console.log(`[OptimizedLocationMatcher] User ${user.id} is not within a desired-location radius`);
       return false;
     } catch (error) {
       console.error(`[OptimizedLocationMatcher] Error checking user current in own desired:`, error);
@@ -141,7 +141,7 @@ export class OptimizedLocationMatcher {
           const distance = this.calculateDistance(user2CurrentCoord, desiredCoord);
           
           if (distance <= user1MatchingRadius) {
-            console.log(`[OptimizedLocationMatcher] User ${user2.id} at ${user2.currentLocation} is within ${user1MatchingRadius} miles of user ${user1.id}'s desired location ${coordData.location} (distance: ${distance} miles)`);
+            console.log(`[OptimizedLocationMatcher] User ${user2.id} is within user ${user1.id}'s matching radius`, { distance, radius: user1MatchingRadius });
             return true;
           }
         } catch (parseError) {
@@ -196,7 +196,7 @@ export class OptimizedLocationMatcher {
           }
         });
         
-        console.log(`[OptimizedLocationMatcher] Bidirectional edge case detected - filtered out current location for user ${user1.id}. Original: ${user1.desiredLocationCoords.length}, Filtered: ${desiredLocationCoords.length}`);
+        console.log(`[OptimizedLocationMatcher] Bidirectional edge case filtered a current location for user ${user1.id}`);
       }
 
       // Check each of user1's (possibly filtered) desired locations to see if any are within radius of user2's current location
@@ -211,7 +211,7 @@ export class OptimizedLocationMatcher {
           const distance = this.calculateDistance(user1DesiredCoord, user2CurrentCoord);
           
           if (distance <= user1MatchingRadius) {
-            console.log(`[OptimizedLocationMatcher] User ${user1.id} wants to relocate to ${coordData.location} which is within ${user1MatchingRadius} miles of user ${user2.id}'s current location ${user2.currentLocation} (distance: ${distance} miles)`);
+            console.log(`[OptimizedLocationMatcher] User ${user1.id} has a relocation match with user ${user2.id}`, { distance, radius: user1MatchingRadius });
             return true;
           }
         } catch (parseError) {
@@ -283,7 +283,7 @@ export class OptimizedLocationMatcher {
           if (user1WithinOwnRadius && user2WithinUser1Radius) {
             user1ToUser2Match = true;
             user1LocationOfInterest = coordData.location || 'Unknown';
-            console.log(`[OptimizedLocationMatcher] Metro radius match for User1: Both users within ${user1MatchingRadius} miles of overlapping location ${user1LocationOfInterest}`);
+            console.log(`[OptimizedLocationMatcher] Metro radius match for users ${user1.id} and ${user2.id}`, { radius: user1MatchingRadius });
             break;
           }
         } catch {
@@ -332,7 +332,7 @@ export class OptimizedLocationMatcher {
           if (user2WithinOwnRadius && user1WithinUser2Radius) {
             user2ToUser1Match = true;
             user2LocationOfInterest = coordData.location || 'Unknown';
-            console.log(`[OptimizedLocationMatcher] Metro radius match for User2: Both users within ${user2MatchingRadius} miles of overlapping location ${user2LocationOfInterest}`);
+            console.log(`[OptimizedLocationMatcher] Metro radius match for users ${user1.id} and ${user2.id}`, { radius: user2MatchingRadius });
             break;
           }
         } catch {
@@ -432,7 +432,7 @@ export class OptimizedLocationMatcher {
       }
 
       console.log(`[OptimizedLocationMatcher] Metro radius matching complete for users ${user1.id} and ${user2.id}: bidirectional=${bidirectionalLocationMatch}, API calls saved=${apiCallsSaved}`);
-      console.log(`[OptimizedLocationMatcher] Locations of interest: User1=${metroRadiusResult.user1LocationOfInterest}, User2=${metroRadiusResult.user2LocationOfInterest}`);
+      console.log(`[OptimizedLocationMatcher] Metro locations of interest calculated for users ${user1.id} and ${user2.id}`);
 
       return {
         user1ToUser2LocationMatch,
@@ -499,8 +499,7 @@ export class OptimizedLocationMatcher {
 
       if (isEdgeCase) {
         console.log(`[OptimizedLocationMatcher] Bidirectional edge case detected between users ${user1.id} and ${user2.id}:`);
-        console.log(`[OptimizedLocationMatcher] - ${user1.fullName} wants ${user2.currentLocation} (where ${user2.fullName} lives) and has ${user1.currentLocation} in desired`);
-        console.log(`[OptimizedLocationMatcher] - ${user2.fullName} wants ${user1.currentLocation} (where ${user1.fullName} lives) and has ${user2.currentLocation} in desired`);
+        console.log(`[OptimizedLocationMatcher] Bidirectional relocation match found for users ${user1.id} and ${user2.id}`);
         console.log(`[OptimizedLocationMatcher] - Will prioritize relocation swap over staying in place`);
       }
 

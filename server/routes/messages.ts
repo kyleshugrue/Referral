@@ -4,7 +4,7 @@ import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration';
 import { validateDirectMessageInput } from '../lib/message-validation';
 import { logger } from '../lib/logger';
-import { toMessageDto } from "../lib/privacy-dto";
+import { toMessageDto, toMessageSummaryDto } from "../lib/privacy-dto";
 import { parseStrictPositiveInteger } from "../lib/request-validation";
 import {
   decodeMessageCursor,
@@ -25,6 +25,30 @@ router.post("/group", (_req, res) => {
   res.status(410).json({
     message: "Group chat is not supported. Use a direct connection chat instead.",
   });
+});
+
+router.patch("/:messageId/status", async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ message: "User not found" });
+    const messageId = parseStrictPositiveInteger(req.params.messageId);
+    const status = req.body?.status;
+    if (!messageId || (status !== "delivered" && status !== "read")) {
+      return res.status(400).json({ message: "messageId and status are invalid" });
+    }
+    const message = await storage.updateMessageStatus(messageId, req.user.id, status);
+    return res.json(toMessageSummaryDto(message));
+  } catch (error) {
+    if (error instanceof Error && error.message === "Message not found") {
+      return res.status(404).json({ message: "Message not found" });
+    }
+    if (error instanceof Error && error.message === "User is not authorized to update this message status") {
+      return res.status(403).json({ message: "Not authorized to update this message" });
+    }
+    logger.error("[Messages] Status update failed", {
+      errorClass: error instanceof Error ? error.name : "unknown",
+    });
+    return res.status(500).json({ message: "Failed to update message status" });
+  }
 });
 
 router.get("/:userId", async (req, res) => {
