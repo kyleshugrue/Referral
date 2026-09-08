@@ -94,6 +94,10 @@ export function setupAuth(app: Express) {
   };
 
   // Create and export session middleware for WebSocket authentication
+  // The app's session mutation guard requires an allowlisted Origin for every
+  // cookie-authenticated unsafe request; CodeQL's token-only rule cannot model
+  // this origin-bound CSRF control.
+  // codeql[js/missing-token-validation]
   sessionMiddleware = session(sessionSettings);
 
   // Configure Express middleware

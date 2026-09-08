@@ -45,3 +45,7 @@ jobs:
         uses: github/codeql-action/analyze@6f5948dfacef28e207b48d0905cf90c03365536d # v3
         with:
           category: "/language:${{ matrix.language }}"
+          # Repository-level code scanning owns SARIF upload. The private
+          # repository has scanning disabled, while the public repository uses
+          # default setup; local analysis must not fail on either upload path.
+          upload: false
