@@ -142,7 +142,7 @@ export async function apiRequest(
       // This ensures we get the token that was set during the successful refresh
       const freshToken = getCurrentAccessToken();
       
-      console.log(`[API] Refresh complete. Fresh token available: ${!!freshToken}`);
+       console.log('[API] Refresh complete');
       
       if (freshToken && freshToken !== accessToken) {
         // Retry request with the FRESH token from token manager
@@ -319,7 +319,7 @@ export const getQueryFn: <T>(options: {
       // This ensures we get the token that was set during the successful refresh
       const freshToken = getCurrentAccessToken();
       
-      console.log(`[QueryClient] Refresh complete. Fresh token available: ${!!freshToken}`);
+       console.log('[QueryClient] Refresh complete');
       
       if (freshToken && freshToken !== jwtAccessToken) {
         // Retry request with the FRESH token from token manager

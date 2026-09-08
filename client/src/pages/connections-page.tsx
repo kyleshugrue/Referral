@@ -221,6 +221,8 @@ export default function ConnectionsPage() {
       senderId: currentUser.id,
       receiverId: activeConversationId || 0,
       createdAt: new Date().toISOString(),
+      deliveredAt: null,
+      readAt: null,
       status: 'sending',
       isTemporary: true // Mark as temporary so we can identify it later
     };
@@ -374,10 +376,7 @@ export default function ConnectionsPage() {
         
         // Debug logging for troubleshooting
         if (searchQuery && nameMatch) {
-          console.log(`[Search Debug] Connection name match found for "${searchQuery}":`, {
-            connectionName: conn.otherUser.fullName,
-            nameMatch
-          });
+                  console.log('[Search Debug] Connection name match evaluated', { nameMatch });
         }
         
         return nameMatch;

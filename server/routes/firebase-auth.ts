@@ -301,8 +301,6 @@ router.post('/', async (req, res) => {
             
             logger.debug('🎯 [FIREBASE-AUTH DEBUG] Using existing user with real data:', {
               userId: user.id,
-              fullName: user.fullName,
-              hasRealBirthday: !!user.birthday && user.birthday !== ''
             });
             break; // Success, exit retry loop
           } else if (user === undefined) {
@@ -388,10 +386,8 @@ router.post('/', async (req, res) => {
             registrationCompleted: false // Registration not complete until user finishes flow
           });
           
-          logger.debug('⚠️ [FIREBASE-AUTH DEBUG] Created fallback user from Firebase auth:', { 
-            id: user.id, 
-            hasBirthday: !!user.birthday,
-            hasRealName: user.fullName !== email.split('@')[0],
+          logger.debug('⚠️ [FIREBASE-AUTH DEBUG] Created fallback user from Firebase auth:', {
+            id: user.id,
             warning: 'User created with limited data - partial registration may have failed'
           });
       }

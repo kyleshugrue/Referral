@@ -249,8 +249,13 @@ export const messages = pgTable("messages", {
     .references(() => users.id, { onDelete: "cascade" }),
   content: text("content").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
+  deliveredAt: timestamp("delivered_at", { withTimezone: true, mode: "string" }),
+  readAt: timestamp("read_at", { withTimezone: true, mode: "string" }),
 }, (table) => ({
   conversationIdIdx: index("messages_conversation_id_idx").on(table.conversationId),
+  receiverDeliveryIdx: index("messages_receiver_delivery_idx").on(table.receiverId, table.deliveredAt),
+  receiverReadIdx: index("messages_receiver_read_idx").on(table.receiverId, table.readAt),
+  conversationCreatedIdx: index("messages_conversation_created_idx").on(table.conversationId, table.createdAt, table.id),
 }));
 
 // Update relations

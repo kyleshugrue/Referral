@@ -260,8 +260,6 @@ function NewMultiStepRegisterPage() {
     
     setIsVerified(isUserVerified);
     
-    logger.debug("MultiStepRegisterPage: Initializing with user verification status:", isUserVerified);
-    logger.debug("MultiStepRegisterPage: User data:", user);
     
     if (isUserVerified && user) {
       // For verified users, determine appropriate starting step and pre-populate with existing data

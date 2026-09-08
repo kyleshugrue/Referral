@@ -403,7 +403,7 @@ export class CostCalculator {
 
       // Add ZIP code optimization statistics
       const zipStats = geocodingService.getZipCodeStats();
-      console.log(`[CostCalculator] ZIP code optimization: ${zipStats.totalZipCodes} codes available, initialized: ${zipStats.initialized}`);
+      console.log('[CostCalculator] ZIP code optimization statistics collected');
 
       console.log(`[CostCalculator] Analysis complete:`, {
         totalCost: totalCost.toFixed(4),

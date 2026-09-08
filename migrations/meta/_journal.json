@@ -64,6 +64,13 @@
       "when": 1788340000000,
       "tag": "0008_account_erasure",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788879681002,
+      "tag": "0009_message_delivery_status",
+      "breakpoints": true
     }
   ]
 }

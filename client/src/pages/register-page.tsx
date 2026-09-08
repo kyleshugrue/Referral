@@ -62,7 +62,7 @@ export default function RegisterPage() {
 
   const onSubmit = async (formData: RegistrationFormValues) => {
     try {
-      logger.debug("Registration form submission started", { hasEmail: !!formData.email });
+      logger.debug("Registration form submission started");
 
       // Show toast to indicate form submission is starting
       toast({

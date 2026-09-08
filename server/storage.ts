@@ -22,6 +22,11 @@ import { recordQueueEvent } from './lib/operational-metrics';
 import { discoverableUserCondition, matchableUserCondition } from './lib/discoverability-policy';
 import { hasRequiredFieldsForMatching } from './lib/profile-matching';
 import { DEFAULT_MESSAGE_PAGE_SIZE, MAX_MESSAGE_PAGE_SIZE, type MessageCursor } from './lib/message-pagination';
+import {
+  type ConversationPageOptions,
+  normalizeConversationPageOptions,
+  escapeLikePattern,
+} from './lib/conversation-pagination';
 
 const PostgresSessionStore = connectPg(session);
 type UserWrite = Partial<InsertUser> & Record<string, unknown>;
@@ -93,8 +98,8 @@ export interface IStorage {
   getConnectionBetweenUsers(userId: number, connectedUserId: number): Promise<Connection | undefined>;
   getOrCreateConversation(user1Id: number, user2Id: number): Promise<Conversation>;
   getConversationById(conversationId: number): Promise<Conversation | undefined>;
-  getUserConversations(userId: number): Promise<(Conversation & { otherUser: User, lastMessage?: Message })[]>;
-  searchConversationMessages(userId: number, searchQuery: string): Promise<(Conversation & { otherUser: User, lastMessage?: Message, hasUnreadMessages?: boolean })[]>;
+  getUserConversations(userId: number, options?: ConversationPageOptions): Promise<(Conversation & { otherUser: User, lastMessage?: Message, hasUnreadMessages?: boolean })[]>;
+  searchConversationMessages(userId: number, searchQuery: string, options?: ConversationPageOptions): Promise<(Conversation & { otherUser: User, lastMessage?: Message, hasUnreadMessages?: boolean })[]>;
   updateMessageStatus(messageId: number, userId: number, status: 'read' | 'delivered'): Promise<Message>;
   // User Block methods
   blockUser(userId: number, blockedUserId: number): Promise<UserBlock>;
@@ -487,10 +492,12 @@ export class DatabaseStorage implements IStorage {
       const [user] = await db.select().from(users).where(eq(users.email, email));
       return user;
     } catch (error) {
-      logger.error(`[Storage] Error fetching user by email ${email}:`, error);
+      logger.error('[Storage] Error fetching user by email lookup', {
+        errorClass: error instanceof Error ? error.name : 'unknown',
+      });
       // For connection errors, return undefined instead of throwing
       if (error instanceof Error && (error.message.includes('57P01') || error.message.includes('ECONNRESET'))) {
-        logger.warn(`[Storage] Database connection issue, returning undefined for user email ${email}`);
+        logger.warn('[Storage] Database connection issue, returning undefined for email lookup');
         return undefined;
       }
       throw error;
@@ -571,20 +578,9 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createUser(insertUser: UserWrite): Promise<User> {
-    logger.debug("[Storage] Creating user with data:", {
-      email: insertUser.email,
-      fullName: insertUser.fullName,
-      title: insertUser.title,
-      industry: insertUser.industry,
-      currentLocation: insertUser.currentLocation,
-      currentCompany: insertUser.currentCompany,
-      bio: insertUser.bio,
-      resumeUrl: insertUser.resumeUrl,
-      desiredLocations: insertUser.desiredLocations ? JSON.stringify(insertUser.desiredLocations) : [],
-      desiredCompanies: insertUser.desiredCompanies ? JSON.stringify(insertUser.desiredCompanies) : [],
-      interests: insertUser.interests ? JSON.stringify(insertUser.interests) : [],
-      professionalInterests: insertUser.professionalInterests ? JSON.stringify(insertUser.professionalInterests) : [],
-      languages: insertUser.languages ? JSON.stringify(insertUser.languages) : []
+    logger.debug("[Storage] Creating user", {
+      hasEmail: Boolean(insertUser.email),
+      hasProfileData: Boolean(insertUser.fullName || insertUser.title || insertUser.bio),
     });
     
     // Ensure array fields are properly formatted
@@ -930,7 +926,7 @@ export class DatabaseStorage implements IStorage {
             const locationPromises: Promise<unknown>[] = [];
             
             if (finalData.currentLocation !== undefined) {
-              logger.debug(`[updateUser] Background: Caching current location for user ${id}: ${finalData.currentLocation}`);
+              logger.debug(`[updateUser] Background: Caching current location for user ${id}`);
               locationPromises.push(
                 locationCacheService.updateUserCurrentLocation(id, finalData.currentLocation)
                   .catch(error => logger.error(`[updateUser] Background: Error caching current location for user ${id}:`, error))
@@ -938,7 +934,7 @@ export class DatabaseStorage implements IStorage {
             }
             
             if (finalData.desiredLocations !== undefined && Array.isArray(finalData.desiredLocations)) {
-              logger.debug(`[updateUser] Background: Caching desired locations for user ${id}: ${finalData.desiredLocations.join(', ')}`);
+              logger.debug(`[updateUser] Background: Caching desired locations for user ${id}`);
               locationPromises.push(
                 locationCacheService.updateUserDesiredLocations(id, finalData.desiredLocations)
                   .catch(error => logger.error(`[updateUser] Background: Error caching desired locations for user ${id}:`, error))
@@ -1009,13 +1005,13 @@ export class DatabaseStorage implements IStorage {
   }
   
   async updateUserEmail(id: number, newEmail: string): Promise<User> {
-    logger.debug(`[Storage] Updating email for user ${id} to ${newEmail}`);
+    logger.debug(`[Storage] Updating email for user ${id}`);
     
     try {
       // Check if email already exists for another user
       const existingUser = await this.getUserByEmail(newEmail);
       if (existingUser && existingUser.id !== id) {
-        logger.error(`[Storage] Email ${newEmail} already in use by user ${existingUser.id}`);
+        logger.error(`[Storage] Email already in use by another user`, { userId: id });
         throw new Error("Email already in use by another user");
       }
       
@@ -1031,7 +1027,7 @@ export class DatabaseStorage implements IStorage {
         throw new Error("User not found");
       }
       
-      logger.debug(`[Storage] Successfully updated email for user ${id} to ${newEmail}`);
+      logger.debug(`[Storage] Successfully updated email for user ${id}`);
       return user;
     } catch (error) {
       logger.error(`[Storage] Error updating email for user ${id}:`, error);
@@ -2667,281 +2663,188 @@ export class DatabaseStorage implements IStorage {
     return conversation;
   }
 
-  async getUserConversations(userId: number): Promise<(Conversation & { otherUser: User, lastMessage?: Message, hasUnreadMessages?: boolean })[]> {
+  async getUserConversations(userId: number, options?: ConversationPageOptions): Promise<(Conversation & { otherUser: User, lastMessage?: Message, hasUnreadMessages?: boolean })[]> {
     try {
-      logger.debug('Fetching conversations for user:', userId);
-      
-      // Get all conversations where the user is either user1 or user2
+      const page = normalizeConversationPageOptions(options);
+      const cursorCondition = page.cursor
+        ? or(
+          lt(conversations.lastMessageAt, page.cursor.lastMessageAt),
+          and(
+            eq(conversations.lastMessageAt, page.cursor.lastMessageAt),
+            lt(conversations.id, page.cursor.conversationId),
+          ),
+        )
+        : undefined;
       const userConversations = await db.select()
         .from(conversations)
-        .where(
-          and(
-            or(
-              eq(conversations.user1Id, userId),
-              eq(conversations.user2Id, userId)
-            ),
-            or(eq(conversations.isGroup, false), isNull(conversations.isGroup)),
-          )
-        )
-        .orderBy(desc(conversations.lastMessageAt));
+        .where(and(
+          or(eq(conversations.user1Id, userId), eq(conversations.user2Id, userId)),
+          or(eq(conversations.isGroup, false), isNull(conversations.isGroup)),
+          cursorCondition,
+        ))
+        .orderBy(desc(conversations.lastMessageAt), desc(conversations.id))
+        .limit(page.limit);
 
-      logger.debug(`Found ${userConversations.length} conversations for user ${userId}:`,
-        userConversations.map(c => ({
-          id: c.id,
-          user1Id: c.user1Id,
-          user2Id: c.user2Id,
-          lastMessageAt: c.lastMessageAt
-        }))
-      );
-      
-      // Track seen conversation partners to prevent duplicate conversations
       const seenPartnerIds = new Set<number>();
-
-      const result = [];
-      for (const conv of userConversations) {
-        // For each conversation, get the other user's details
-        const otherUserId = conv.user1Id === userId ? conv.user2Id : conv.user1Id;
-        
-        // Skip this conversation if we've already seen this partner
-        // This prevents duplicate conversations with the same user from appearing
-        if (seenPartnerIds.has(otherUserId)) {
-          logger.debug(`Skipping duplicate conversation ${conv.id} with user ${otherUserId} (already processed a conversation with this user)`);
-          continue;
-        }
-        
-        // Add this partner to the seen set
+      const selectedConversations = userConversations.filter((conversation) => {
+        const otherUserId = conversation.user1Id === userId ? conversation.user2Id : conversation.user1Id;
+        if (seenPartnerIds.has(otherUserId)) return false;
         seenPartnerIds.add(otherUserId);
-        
-        logger.debug(`Getting other user ${otherUserId} for conversation ${conv.id}`);
-
-        const [otherUser] = await db
-          .select()
-          .from(users)
-          .where(eq(users.id, otherUserId));
-
-        if (!otherUser) {
-          logger.debug(`Warning: Could not find other user ${otherUserId} for conversation ${conv.id}`);
-          continue;
-        }
-
-        // Get all messages for this conversation to show preview
-        const [lastMessage] = await db
-          .select()
+        return true;
+      });
+      const conversationIds = selectedConversations.map(({ id }) => id);
+      if (conversationIds.length === 0) return [];
+      const otherUserIds = selectedConversations.map((conversation) =>
+        conversation.user1Id === userId ? conversation.user2Id : conversation.user1Id
+      );
+      const [otherUsers, lastMessages, unreadRows] = await Promise.all([
+        db.select().from(users).where(inArray(users.id, otherUserIds)),
+        db.selectDistinctOn([messages.conversationId])
           .from(messages)
-          .where(eq(messages.conversationId, conv.id))
-          .orderBy(desc(messages.createdAt))
-          .limit(1);
+          .where(inArray(messages.conversationId, conversationIds))
+          .orderBy(messages.conversationId, desc(messages.createdAt), desc(messages.id)),
+        db.selectDistinct({ conversationId: messages.conversationId })
+          .from(notifications)
+          .innerJoin(messages, eq(notifications.relatedId, messages.id))
+          .where(and(
+            eq(notifications.userId, userId),
+            eq(notifications.type, "message"),
+            eq(notifications.read, false),
+            inArray(messages.conversationId, conversationIds),
+          )),
+      ]);
+      const userById = new Map(otherUsers.map((user) => [user.id, user]));
+      const messageByConversation = new Map(lastMessages.map((message) => [message.conversationId, message]));
+      const unreadConversationIds = new Set(unreadRows.map(({ conversationId }) => conversationId));
 
-        // Check if there are unread messages for this conversation
-        let hasUnreadMessages = false;
-        
-        if (lastMessage) {
-          // Get message IDs for this conversation
-          const messageIds = await db
-            .select({ id: messages.id })
-            .from(messages)
-            .where(eq(messages.conversationId, conv.id));
-          
-          // Check if there are unread notifications for these messages
-          if (messageIds.length > 0) {
-            const unreadNotifications = await db
-              .select()
-              .from(notifications)
-              .where(
-                and(
-                  eq(notifications.userId, userId),
-                  eq(notifications.type, "message"),
-                  eq(notifications.read, false),
-                  inArray(
-                    notifications.relatedId, 
-                    messageIds.map(m => m.id)
-                  )
-                )
-              );
-            
-            hasUnreadMessages = unreadNotifications.length > 0;
-          }
-        }
-
-        const conversation = {
-          ...conv,
+      return selectedConversations.flatMap((conversation) => {
+        const otherUserId = conversation.user1Id === userId ? conversation.user2Id : conversation.user1Id;
+        const otherUser = userById.get(otherUserId);
+        if (!otherUser) return [];
+        return [{
+          ...conversation,
           otherUser,
-          lastMessage,
-          hasUnreadMessages
-        };
-
-        logger.debug('Adding conversation:', {
-          id: conversation.id,
-          otherUser: {
-            id: conversation.otherUser.id,
-            fullName: conversation.otherUser.fullName
-          },
-          lastMessage: lastMessage ? {
-            id: lastMessage.id,
-            content: lastMessage.content,
-            createdAt: lastMessage.createdAt
-          } : undefined,
-          hasUnreadMessages
-        });
-
-        result.push(conversation);
-      }
-
-      logger.debug(`Returning ${result.length} conversations for user ${userId}`);
-      return result;
+          lastMessage: messageByConversation.get(conversation.id),
+          hasUnreadMessages: unreadConversationIds.has(conversation.id),
+        }];
+      });
     } catch (error) {
-      logger.error('Error in getUserConversations:', error);
+      logger.error('Error in getUserConversations:', error instanceof Error ? error.name : 'unknown');
       throw error;
     }
   }
 
-  async searchConversationMessages(userId: number, searchQuery: string): Promise<(Conversation & { otherUser: User, lastMessage?: Message, hasUnreadMessages?: boolean })[]> {
+  async searchConversationMessages(userId: number, searchQuery: string, options?: ConversationPageOptions): Promise<(Conversation & { otherUser: User, lastMessage?: Message, hasUnreadMessages?: boolean })[]> {
     try {
-      logger.debug(`[Storage] Searching conversations for user ${userId} with query: "${searchQuery}"`);
-      
-      // Get all conversations for the user
-      const userConversations = await db.select()
-        .from(conversations)
-        .where(
+      const page = normalizeConversationPageOptions(options);
+      const pattern = `%${escapeLikePattern(searchQuery.trim())}%`;
+      const cursorCondition = page.cursor
+        ? or(
+          lt(conversations.lastMessageAt, page.cursor.lastMessageAt),
           and(
-            or(
-              eq(conversations.user1Id, userId),
-              eq(conversations.user2Id, userId)
-            ),
-            or(eq(conversations.isGroup, false), isNull(conversations.isGroup)),
-          )
-        );
+            eq(conversations.lastMessageAt, page.cursor.lastMessageAt),
+            lt(conversations.id, page.cursor.conversationId),
+          ),
+        )
+        : undefined;
+      const candidateRows = await db.select({
+        conversation: conversations,
+        otherUser: users,
+      })
+        .from(conversations)
+        .innerJoin(users, sql`${users.id} = CASE WHEN ${conversations.user1Id} = ${userId} THEN ${conversations.user2Id} ELSE ${conversations.user1Id} END`)
+        .where(and(
+          or(eq(conversations.user1Id, userId), eq(conversations.user2Id, userId)),
+          or(eq(conversations.isGroup, false), isNull(conversations.isGroup)),
+          cursorCondition,
+          or(
+            ilike(users.fullName, pattern),
+            sql`EXISTS (
+              SELECT 1 FROM messages search_messages
+              WHERE search_messages.conversation_id = ${conversations.id}
+                AND search_messages.content ILIKE ${pattern} ESCAPE '\\'
+            )`,
+          ),
+        ))
+        .orderBy(desc(conversations.lastMessageAt), desc(conversations.id))
+        .limit(page.limit);
 
-      logger.debug(`[Storage] Found ${userConversations.length} total conversations to search`);
-      
-      // Track seen conversation partners to prevent duplicates
       const seenPartnerIds = new Set<number>();
-      const matchingConversations = [];
-
-      for (const conv of userConversations) {
-        const otherUserId = conv.user1Id === userId ? conv.user2Id : conv.user1Id;
-        
-        // Skip duplicate conversations with the same user
-        if (seenPartnerIds.has(otherUserId)) {
-          continue;
-        }
+      const selectedRows = candidateRows.filter(({ conversation }) => {
+        const otherUserId = conversation.user1Id === userId ? conversation.user2Id : conversation.user1Id;
+        if (seenPartnerIds.has(otherUserId)) return false;
         seenPartnerIds.add(otherUserId);
-
-        // Get the other user's details
-        const [otherUser] = await db
-          .select()
-          .from(users)
-          .where(eq(users.id, otherUserId));
-
-        if (!otherUser) {
-          continue;
-        }
-
-        // Check if the user's name matches the search query
-        const nameMatch = otherUser.fullName.toLowerCase().includes(searchQuery.toLowerCase());
-
-        // Get all messages for this conversation and check if any match the search query
-        const allMessages = await db
-          .select()
-          .from(messages)
-          .where(eq(messages.conversationId, conv.id))
-          .orderBy(desc(messages.createdAt));
-
-        const messageMatch = allMessages.some(message => 
-          message.content.toLowerCase().includes(searchQuery.toLowerCase())
-        );
-
-        // If either name or any message matches, include this conversation
-        if (nameMatch || messageMatch) {
-          // Choose which message to display: if there's a message match, show the most recent matching message; otherwise show the latest message
-          let displayMessage;
-          if (messageMatch) {
-            // Find the most recent message that matches the search query
-            // allMessages is already sorted by createdAt DESC, so find the first match
-            displayMessage = allMessages.find(msg => 
-              msg.content.toLowerCase().includes(searchQuery.toLowerCase())
-            );
-          }
-          
-          // If no specific message match, show the latest message
-          if (!displayMessage) {
-            displayMessage = allMessages.length > 0 ? allMessages[0] : undefined;
-          }
-
-          // Check for unread messages
-          let hasUnreadMessages = false;
-          if (allMessages.length > 0) {
-            const messageIds = allMessages.map(m => m.id);
-            
-            const unreadNotifications = await db
-              .select()
-              .from(notifications)
-              .where(
-                and(
-                  eq(notifications.userId, userId),
-                  eq(notifications.type, "message"),
-                  eq(notifications.read, false),
-                  inArray(notifications.relatedId, messageIds)
-                )
-              );
-            
-            hasUnreadMessages = unreadNotifications.length > 0;
-          }
-
-          matchingConversations.push({
-            ...conv,
-            otherUser,
-            lastMessage: displayMessage,
-            hasUnreadMessages
-          });
-
-          logger.debug(`[Storage] Match found - Name: ${nameMatch}, Message: ${messageMatch}, User: ${otherUser.fullName}, Showing message: ${displayMessage?.content}`);
-        }
-      }
-
-      // Sort by last message date, most recent first
-      matchingConversations.sort((a, b) => {
-        const aTime = a.lastMessageAt || a.createdAt;
-        const bTime = b.lastMessageAt || b.createdAt;
-        return new Date(bTime).getTime() - new Date(aTime).getTime();
+        return true;
       });
+      if (selectedRows.length === 0) return [];
+      const conversationIds = selectedRows.map(({ conversation }) => conversation.id);
+      const [matchingMessages, latestMessages, unreadRows] = await Promise.all([
+        db.selectDistinctOn([messages.conversationId])
+          .from(messages)
+          .where(and(inArray(messages.conversationId, conversationIds), ilike(messages.content, pattern)))
+          .orderBy(messages.conversationId, desc(messages.createdAt), desc(messages.id)),
+        db.selectDistinctOn([messages.conversationId])
+          .from(messages)
+          .where(inArray(messages.conversationId, conversationIds))
+          .orderBy(messages.conversationId, desc(messages.createdAt), desc(messages.id)),
+        db.selectDistinct({ conversationId: messages.conversationId })
+          .from(notifications)
+          .innerJoin(messages, eq(notifications.relatedId, messages.id))
+          .where(and(
+            eq(notifications.userId, userId),
+            eq(notifications.type, "message"),
+            eq(notifications.read, false),
+            inArray(messages.conversationId, conversationIds),
+          )),
+      ]);
+      const matchingMessageByConversation = new Map(matchingMessages.map((message) => [message.conversationId, message]));
+      const latestMessageByConversation = new Map(latestMessages.map((message) => [message.conversationId, message]));
+      const unreadConversationIds = new Set(unreadRows.map(({ conversationId }) => conversationId));
 
-      logger.debug(`[Storage] Returning ${matchingConversations.length} matching conversations`);
-      return matchingConversations;
+      return selectedRows.map(({ conversation, otherUser }) => ({
+        ...conversation,
+        otherUser,
+        lastMessage: matchingMessageByConversation.get(conversation.id) ?? latestMessageByConversation.get(conversation.id),
+        hasUnreadMessages: unreadConversationIds.has(conversation.id),
+      }));
     } catch (error) {
-      logger.error('[Storage] Error in searchConversationMessages:', error);
+      logger.error('[Storage] Error in searchConversationMessages:', error instanceof Error ? error.name : 'unknown');
       throw error;
     }
   }
 
   async updateMessageStatus(messageId: number, userId: number, status: 'read' | 'delivered'): Promise<Message> {
     try {
-      // Get the message
-      const [message] = await db
-        .select()
+      const now = new Date().toISOString();
+      const updatedMessage = await db.transaction(async (tx) => {
+        const [message] = await tx.update(messages)
+          .set(status === "read"
+            ? {
+              deliveredAt: sql`COALESCE(${messages.deliveredAt}, ${now})`,
+              readAt: sql`COALESCE(${messages.readAt}, ${now})`,
+            }
+            : { deliveredAt: sql`COALESCE(${messages.deliveredAt}, ${now})` })
+          .where(and(eq(messages.id, messageId), eq(messages.receiverId, userId)))
+          .returning();
+        if (message && status === "read") {
+          await tx.update(notifications)
+            .set({ read: true })
+            .where(and(
+              eq(notifications.userId, userId),
+              eq(notifications.type, "message"),
+              eq(notifications.relatedId, messageId),
+            ));
+        }
+        return message;
+      });
+      if (updatedMessage) {
+        return updatedMessage;
+      }
+      const [message] = await db.select({ receiverId: messages.receiverId })
         .from(messages)
         .where(eq(messages.id, messageId));
-
-      if (!message) {
-        throw new Error('Message not found');
-      }
-
-      // Verify the user is the receiver of this message
-      if (message.receiverId !== userId) {
-        throw new Error('User is not authorized to update this message status');
-      }
-
-      // Update the message with new status
-      const statusTimestamp = new Date().toISOString();
-      const statusField = status === 'read' ? 'readAt' : 'deliveredAt';
-      void statusTimestamp;
-      void statusField;
-
-      // For now, just return the message as we can't update it without schema changes
-      // In a real implementation, we would add these fields to the messages table
-      logger.debug(`Would update message ${messageId} with ${status} status for user ${userId}`);
-
-      return message;
+      if (!message) throw new Error("Message not found");
+      throw new Error("User is not authorized to update this message status");
     } catch (error) {
       logger.error('Error updating message status:', error);
       throw error;

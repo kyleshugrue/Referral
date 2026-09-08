@@ -87,7 +87,7 @@ class ZipCodeGeocoder {
 
     const coordinates = await this.getZipCodeCoordinates(zipCode);
     if (coordinates) {
-      console.log(`[ZipCodeGeocoder] Found ZIP ${zipCode} coordinates: ${coordinates.lat}, ${coordinates.lng}`);
+      console.log('[ZipCodeGeocoder] ZIP coordinates resolved');
       return coordinates;
     }
 

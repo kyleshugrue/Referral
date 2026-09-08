@@ -177,7 +177,7 @@ class GeocodingService {
     }
     
     const distance = this.calculateDistance(coord1, coord2);
-    console.log(`[GeocodingService] Distance between ${location1} and ${location2}: ${distance} miles (radius: ${radiusMiles})`);
+    console.log('[GeocodingService] Distance calculated', { distance, radius: radiusMiles });
     
     return distance <= radiusMiles;
   }
@@ -191,7 +191,7 @@ class GeocodingService {
     for (const desiredLocation of desiredLocations) {
       const isWithin = await this.isWithinRadius(currentLocation, desiredLocation, radiusMiles);
       if (isWithin) {
-        console.log(`[GeocodingService] ${currentLocation} is within ${radiusMiles} miles of ${desiredLocation}`);
+        console.log('[GeocodingService] Current location is within desired radius', { radius: radiusMiles });
         return true;
       }
     }

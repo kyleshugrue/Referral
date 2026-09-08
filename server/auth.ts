@@ -130,7 +130,7 @@ export function setupAuth(app: Express) {
           `[TrustProxy] sample ${trustProxySamples}/5`,
           {
             hasForwardedFor: Boolean(req.headers["x-forwarded-for"]),
-            resolvedClientIp: req.ip || 'unknown',
+            hasResolvedClientIp: Boolean(req.ip),
           },
         );
       }

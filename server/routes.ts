@@ -60,6 +60,11 @@ import {
 } from "./lib/privacy-dto";
 import guidesRouter from "./seo/guides-router";
 import { parseBoundedIntegerQuery, parseStrictPositiveInteger, boundedString } from "./lib/request-validation";
+import {
+  decodeConversationCursor,
+  encodeConversationCursor,
+  MAX_CONVERSATION_PAGE_SIZE,
+} from "./lib/conversation-pagination";
 import { parseServerEnvironment } from "./lib/env";
 import { queryDatabase } from "./lib/database-client";
 import {
@@ -411,8 +416,23 @@ export async function registerRoutes(app: Express): Promise<void> {
         const currentUserId = req.user!.id;
         logger.debug(`[Routes] Getting all conversations for user ${currentUserId}`);
 
-        const conversations = await storage.getUserConversations(currentUserId);
+        const rawLimit = Number(req.query.limit ?? 25);
+        if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > MAX_CONVERSATION_PAGE_SIZE) {
+          return res.status(400).json({ message: `limit must be an integer between 1 and ${MAX_CONVERSATION_PAGE_SIZE}` });
+        }
+        const cursor = req.query.cursor ? decodeConversationCursor(req.query.cursor) : undefined;
+        if (req.query.cursor && !cursor) {
+          return res.status(400).json({ message: "Invalid conversation cursor" });
+        }
+        const conversations = await storage.getUserConversations(currentUserId, { limit: rawLimit, cursor });
         logger.debug(`[Routes] Found ${conversations.length} conversations for user ${currentUserId}`);
+        if (conversations.length === rawLimit) {
+          const last = conversations[conversations.length - 1];
+          res.setHeader("X-Next-Cursor", encodeConversationCursor({
+            lastMessageAt: last.lastMessageAt,
+            conversationId: last.id,
+          }));
+        }
         res.json(conversations.map(toConversationDto));
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -437,8 +457,23 @@ export async function registerRoutes(app: Express): Promise<void> {
 
          logger.debug(`[Routes] Searching conversations for user ${currentUserId}`);
 
-        const searchResults = await storage.searchConversationMessages(currentUserId, searchQuery.trim());
+        const rawLimit = Number(req.query.limit ?? 25);
+        if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > MAX_CONVERSATION_PAGE_SIZE) {
+          return res.status(400).json({ message: `limit must be an integer between 1 and ${MAX_CONVERSATION_PAGE_SIZE}` });
+        }
+        const cursor = req.query.cursor ? decodeConversationCursor(req.query.cursor) : undefined;
+        if (req.query.cursor && !cursor) {
+          return res.status(400).json({ message: "Invalid conversation cursor" });
+        }
+        const searchResults = await storage.searchConversationMessages(currentUserId, searchQuery.trim(), { limit: rawLimit, cursor });
         logger.debug(`[Routes] Found ${searchResults.length} matching conversations for user ${currentUserId}`);
+        if (searchResults.length === rawLimit) {
+          const last = searchResults[searchResults.length - 1];
+          res.setHeader("X-Next-Cursor", encodeConversationCursor({
+            lastMessageAt: last.lastMessageAt,
+            conversationId: last.id,
+          }));
+        }
         res.json(searchResults.map(toConversationDto));
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
