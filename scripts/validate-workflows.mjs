@@ -14,6 +14,15 @@ import YAML from "yaml";
 
 const WORKFLOW_EXTENSIONS = new Set([".yml", ".yaml"]);
 const EXPRESSION_PATTERN = /\$\{\{[\s\S]*?\}\}/g;
+const ACTION_REFERENCE_PATTERN = /^\s*uses:\s*([^\s#]+)/gm;
+const NPM_RUN_PATTERN = /\bnpm\s+run\b([^\r\n]*)/g;
+const PRIVATE_WORKFLOW_MARKERS = [
+  "check:codeql",
+  "scripts/check-codeql-sarif.mjs",
+  "publisher:preflight",
+  "public-showcase-queue.mjs",
+  ["github", "token-git.sh"].join("-"),
+];
 
 const fail = (message) => {
   throw new Error(message);
@@ -130,6 +139,72 @@ export const validateWorkflowText = (text, filePath = "<workflow>") => {
   return { filePath, jobCount: jobs.items.length };
 };
 
+const readPackageScripts = async (packagePath) => {
+  let packageJson;
+  try {
+    packageJson = JSON.parse(await readFile(packagePath, "utf8"));
+  } catch (error) {
+    fail(`${packagePath}: unable to read package.json: ${error.message}`);
+  }
+  if (!packageJson || typeof packageJson !== "object" || Array.isArray(packageJson)) {
+    fail(`${packagePath}: package.json must contain an object.`);
+  }
+  if (!packageJson.scripts || typeof packageJson.scripts !== "object" || Array.isArray(packageJson.scripts)) {
+    fail(`${packagePath}: package.json must define a scripts object.`);
+  }
+  return new Set(Object.keys(packageJson.scripts));
+};
+
+export const validatePublicWorkflowText = (text, filePath, scripts) => {
+  for (const match of text.matchAll(NPM_RUN_PATTERN)) {
+    const command = match[1].trim();
+    const scriptMatch = command.match(/^(?:--[A-Za-z0-9_-]+(?:\s+|$))*([A-Za-z0-9:_-]+)/);
+    if (!scriptMatch) {
+      fail(`${filePath}: public workflow npm run reference must name a literal script.`);
+    }
+    const script = scriptMatch[1];
+    if (!scripts.has(script)) {
+      fail(`${filePath}: public workflow invokes missing npm script: ${script}`);
+    }
+  }
+
+  const lowerText = text.toLowerCase();
+  for (const marker of PRIVATE_WORKFLOW_MARKERS) {
+    if (lowerText.includes(marker.toLowerCase())) {
+      fail(`${filePath}: public workflow references private-only command or tooling: ${marker}`);
+    }
+  }
+
+  for (const match of text.matchAll(ACTION_REFERENCE_PATTERN)) {
+    const reference = match[1];
+    if (!reference.includes("@") || !/@[0-9a-f]{40}$/i.test(reference)) {
+      fail(`${filePath}: public workflow action must use a full commit SHA: ${reference}`);
+    }
+  }
+
+  if (/codeql/i.test(path.basename(filePath))) {
+    const document = YAML.parseDocument(text, { version: "1.2", uniqueKeys: true });
+    const root = document.toJSON();
+    const permissions = root?.permissions;
+    if (permissions?.contents !== "read" ||
+        permissions?.["security-events"] !== "write" ||
+        permissions?.actions !== "read") {
+      fail(`${filePath}: public CodeQL workflow must use least-privilege CodeQL permissions.`);
+    }
+    if (!/github\/codeql-action\/init@[0-9a-f]{40}/i.test(text) ||
+        !/github\/codeql-action\/autobuild@[0-9a-f]{40}/i.test(text) ||
+        !/github\/codeql-action\/analyze@[0-9a-f]{40}/i.test(text)) {
+      fail(`${filePath}: public CodeQL workflow must initialize, autobuild, and analyze with pinned CodeQL actions.`);
+    }
+    if (!/javascript-typescript/.test(text)) {
+      fail(`${filePath}: public CodeQL workflow must analyze JavaScript/TypeScript.`);
+    }
+    if (/upload:\s*false\b/i.test(text)) {
+      fail(`${filePath}: public CodeQL workflow must publish SARIF through CodeQL.`);
+    }
+  }
+};
+
 const collectWorkflowFiles = async (inputPath) => {
   const info = await stat(inputPath);
   if (info.isFile()) {
@@ -156,10 +231,24 @@ export const validateWorkflowPaths = async (paths) => {
   return results;
 };
 
+export const validatePublicWorkflowPaths = async ({ paths, packagePath }) => {
+  const files = [...new Set((await Promise.all(paths.map(collectWorkflowFiles))).flat())].sort();
+  if (files.length === 0) fail("No public workflow YAML files were found.");
+  const scripts = await readPackageScripts(path.resolve(packagePath));
+  const results = [];
+  for (const filePath of files) {
+    const text = await readFile(filePath, "utf8");
+    results.push(validateWorkflowText(text, filePath));
+    validatePublicWorkflowText(text, filePath, scripts);
+  }
+  return results;
+};
+
 export const parseWorkflowCli = (argv, cwd = process.cwd()) => {
   let workflowRoot = cwd;
   const overlayRoots = [];
   const paths = [];
+  let publicPackage;
 
   const nextValue = (index, option) => {
     const value = argv[index + 1];
@@ -179,6 +268,11 @@ export const parseWorkflowCli = (argv, cwd = process.cwd()) => {
       index += 1;
     } else if (argument.startsWith("--overlay-root=")) {
       overlayRoots.push(argument.slice("--overlay-root=".length));
+    } else if (argument === "--public-package") {
+      publicPackage = nextValue(index, argument);
+      index += 1;
+    } else if (argument.startsWith("--public-package=")) {
+      publicPackage = argument.slice("--public-package=".length);
     } else if (argument.startsWith("--")) {
       fail(`Unsupported workflow validation option: ${argument}`);
     } else {
@@ -194,14 +288,17 @@ export const parseWorkflowCli = (argv, cwd = process.cwd()) => {
   return {
     workflowRoot: resolvedRoot,
     paths: [...resolvedPaths, ...overlayRoots.map((value) => path.resolve(value))],
+    publicPackage: publicPackage ? path.resolve(workflowRoot, publicPackage) : null,
   };
 };
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
-  const { paths } = parseWorkflowCli(process.argv.slice(2));
+  const { paths, publicPackage } = parseWorkflowCli(process.argv.slice(2));
   try {
-    const results = await validateWorkflowPaths(paths);
+    const results = publicPackage
+      ? await validatePublicWorkflowPaths({ paths, packagePath: publicPackage })
+      : await validateWorkflowPaths(paths);
     console.log(`Workflow validation passed: ${results.length} file(s), ${results.reduce((sum, result) => sum + result.jobCount, 0)} job(s).`);
   } catch (error) {
     console.error(`Workflow validation failed: ${error instanceof Error ? error.message : String(error)}`);

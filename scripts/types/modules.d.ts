@@ -37,6 +37,7 @@ declare module '*.mjs' {
   export const validatePublicHygieneAllowlist: any;
   export const validateStagedPublicPaths: any;
   export const validateWorkflowText: any;
+  export const validatePublicWorkflowText: any;
   export const verifyMigrationIntegrity: any;
   export const resolveSelection: any;
   export const IndependentScanError: any;
