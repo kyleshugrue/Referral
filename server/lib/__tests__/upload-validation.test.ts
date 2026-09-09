@@ -10,6 +10,7 @@ import {
   ALLOWED_RESUME_MIME_TYPES,
   UPLOAD_LIMITS,
 } from '../upload-validation';
+import { resolveManagedUploadPath } from '../../upload';
 
 describe('getSafeExtension', () => {
   it('accepts allowed resume extensions case-insensitively', () => {
@@ -113,5 +114,15 @@ describe('UPLOAD_LIMITS', () => {
       maxImagePixels: 20_000_000,
       maxPreviewPages: 5,
     });
+  });
+});
+
+describe('resolveManagedUploadPath', () => {
+  it('accepts managed upload paths and rejects traversal or outside paths', () => {
+    expect(resolveManagedUploadPath(`${process.cwd()}/uploads/resume-123-abcdef0123456789.pdf`))
+      .toBe(`${process.cwd()}/uploads/resume-123-abcdef0123456789.pdf`);
+    expect(resolveManagedUploadPath(`${process.cwd()}/uploads/../secrets.txt`)).toBeNull();
+    expect(resolveManagedUploadPath('/tmp/not-an-upload.txt')).toBeNull();
+    expect(resolveManagedUploadPath(`${process.cwd()}/uploads/link\0escape`)).toBeNull();
   });
 });

@@ -45,6 +45,16 @@ if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
+const uploadRoot = path.resolve(uploadDir);
+
+export function resolveManagedUploadPath(filePath: string | undefined): string | null {
+  if (!filePath || filePath.includes('\0')) return null;
+  const resolvedPath = path.resolve(filePath);
+  const relativePath = path.relative(uploadRoot, resolvedPath);
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) return null;
+  return resolvedPath;
+}
+
 /**
  * Remove a multer temporary file without ever following a path outside the
  * application upload directory. Callers should use this in a finally block;
@@ -54,13 +64,8 @@ if (!fs.existsSync(uploadDir)) {
 export async function cleanupTemporaryUpload(filePath: string | undefined): Promise<void> {
   if (!filePath) return;
 
-  const resolvedPath = path.resolve(filePath);
-  const relativeToUploadRoot = path.relative(path.resolve(uploadDir), resolvedPath);
-  if (
-    !relativeToUploadRoot ||
-    relativeToUploadRoot.startsWith('..') ||
-    path.isAbsolute(relativeToUploadRoot)
-  ) {
+  const resolvedPath = resolveManagedUploadPath(filePath);
+  if (!resolvedPath) {
     logger.warn('[Upload] Refusing to clean a path outside the upload directory');
     return;
   }
@@ -265,25 +270,27 @@ export async function processResumeUpload(input: Express.Multer.File | string): 
 
     if (typeof input === 'string') {
       fileUrl = input;
-      filePath = path.join(uploadDir, path.basename(input));
+      filePath = resolveManagedUploadPath(path.join(uploadDir, path.basename(input))) ?? '';
     } else {
       logger.debug(`[Resume Processing] Processing upload (${input.mimetype}, ${input.size} bytes)`);
       // Ensure the URL uses forward slashes and is relative to the root
       fileUrl = `/uploads/${path.basename(input.path)}`.replace(/\\/g, '/');
-      filePath = input.path;
+      filePath = resolveManagedUploadPath(input.path) ?? '';
     }
 
     let previewUrls: string[] = [];
 
     // Check if the file exists
-    if (!fs.existsSync(filePath)) {
-      logger.error('[Resume Processing] Uploaded file not found on disk');
-      throw new Error('File not found');
-    }
-
     // Check if the file is a PDF
-    const fileContent = await fs.promises.readFile(filePath);
-    const isPDF = fileContent.toString('hex').startsWith('255044462d'); // PDF magic number
+    if (!filePath) throw new Error('Invalid managed upload path');
+    const header = Buffer.alloc(16);
+    const fileHandle = await fs.promises.open(filePath, 'r');
+    try {
+      await fileHandle.read(header, 0, header.length, 0);
+    } finally {
+      await fileHandle.close();
+    }
+    const isPDF = header.toString('hex').startsWith('255044462d'); // PDF magic number
 
     if (isPDF) {
       logger.debug('[Resume Processing] File is a PDF, attempting preview generation...');

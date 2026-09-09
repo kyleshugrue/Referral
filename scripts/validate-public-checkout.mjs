@@ -11,8 +11,8 @@
 
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { constants } from "node:fs";
+import { lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -132,6 +132,17 @@ const pathExists = async (candidate) => {
   } catch (error) {
     if (error?.code === "ENOENT") return false;
     throw error;
+  }
+};
+
+const readRegularFile = async (filePath, label) => {
+  const handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) fail(`${label} must be a regular file.`);
+    return { info, bytes: await handle.readFile() };
+  } finally {
+    await handle.close();
   }
 };
 
@@ -333,14 +344,16 @@ const copyTrackedFiles = async (sourceRoot, destinationRoot, paths) => {
   await assertSafeDirectory(destinationRoot, "Public checkout");
   for (const relativePath of paths) {
     const sourcePath = path.join(sourceRoot, relativePath);
-    const info = await lstat(sourcePath).catch(() => fail("Tracked source file is unavailable."));
-    if (!info.isFile() || info.isSymbolicLink()) fail("Public checkout contains a non-regular tracked file.");
+    const { info, bytes } = await readRegularFile(sourcePath, "Tracked source file");
     const destinationPath = assertDestinationPath(destinationRoot, relativePath);
     await assertExistingAncestorsSafe(destinationPath, "Public checkout destination");
     await mkdir(path.dirname(destinationPath), { recursive: true });
-    if (await pathExists(destinationPath)) fail("Public checkout destination is not empty.");
-    await writeFile(destinationPath, await readFile(sourcePath), { mode: info.mode & 0o777 });
-    await chmod(destinationPath, info.mode & 0o777);
+    try {
+      await writeFile(destinationPath, bytes, { mode: info.mode & 0o777, flag: "wx" });
+    } catch (error) {
+      if (error?.code === "EEXIST") fail("Public checkout destination is not empty.");
+      throw error;
+    }
   }
 };
 
@@ -350,9 +363,7 @@ export const buildIntegrityManifest = async ({ root, paths, commit, tree }) => {
   const files = [];
   for (const relativePath of [...paths].sort()) {
     const filePath = assertDestinationPath(root, relativePath);
-    const info = await lstat(filePath).catch(() => fail("Public clean-room file is unavailable."));
-    if (!info.isFile() || info.isSymbolicLink()) fail("Public clean-room tree contains a non-regular file.");
-    const bytes = await readFile(filePath);
+    const { info, bytes } = await readRegularFile(filePath, "Public clean-room file");
     files.push({
       path: relativePath,
       sourcePath: relativePath,
@@ -528,16 +539,27 @@ export const CLEAN_ROOM_COMMANDS = Object.freeze([
 
 const normalizeGitHubLockfile = async (root) => {
   const lockfilePath = path.join(root, "package-lock.json");
-  if (!existsSync(lockfilePath)) return;
-  const original = await readFile(lockfilePath, "utf8");
-  const count = original.split(REPLIT_LOCKFILE_PREFIX).length - 1;
-  const normalized = original.split(REPLIT_LOCKFILE_PREFIX).join(PUBLIC_LOCKFILE_PREFIX);
-  if (normalized.includes("package-firewall.replit.local")) {
-    fail("GitHub clean-room lockfile still contains an internal package firewall URL.");
+  let handle;
+  try {
+    handle = await open(lockfilePath, constants.O_RDWR | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
   }
-  if (count > 0) {
-    await writeFile(lockfilePath, normalized);
-    console.log(`Normalized ${count} Replit firewall lockfile URLs in disposable clean room.`);
+  try {
+    const original = await handle.readFile("utf8");
+    const count = original.split(REPLIT_LOCKFILE_PREFIX).length - 1;
+    const normalized = original.split(REPLIT_LOCKFILE_PREFIX).join(PUBLIC_LOCKFILE_PREFIX);
+    if (normalized.includes("package-firewall.replit.local")) {
+      fail("GitHub clean-room lockfile still contains an internal package firewall URL.");
+    }
+    if (count > 0) {
+      await handle.truncate(0);
+      await handle.writeFile(normalized, "utf8");
+      console.log(`Normalized ${count} Replit firewall lockfile URLs in disposable clean room.`);
+    }
+  } finally {
+    await handle.close();
   }
 };
 
@@ -569,7 +591,7 @@ const makeTemporaryRoot = async (sourceRoot, requestedRoot) => {
   const root = absolutePath(requestedRoot, "Temporary root");
   assertOutside(root, sourceRoot, "Temporary root");
   await assertSafeDirectory(root, "Temporary root", { allowMissing: true });
-  if (existsSync(root)) {
+  if (await pathExists(root)) {
     const entries = await readdir(root);
     if (entries.length > 0) fail("Temporary root must be empty.");
     const ownedRoot = await mkdtemp(path.join(root, "referral-public-clean-room-"));
@@ -622,8 +644,8 @@ const main = async () => {
   assertSourceClean(sourceBefore);
   const canonicalMode =
     !options.publicCheckout &&
-    existsSync(path.join(options.sourceRoot, "scripts", "deterministic-export.mjs")) &&
-    existsSync(path.join(options.sourceRoot, "scripts", "export-manifests", "public.json"));
+    await pathExists(path.join(options.sourceRoot, "scripts", "deterministic-export.mjs")) &&
+    await pathExists(path.join(options.sourceRoot, "scripts", "export-manifests", "public.json"));
   const temporary = await makeTemporaryRoot(options.sourceRoot, options.temporaryRoot);
   const publicRoot = canonicalMode ? path.join(temporary.root, "public") : temporary.root;
   if (options.canonicalArtifact) {

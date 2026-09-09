@@ -80,6 +80,10 @@ const SENSITIVE_URL_PARAMS = [
   'password',
   'auth',
 ];
+const SENSITIVE_URL_PARAM_PATTERN = new RegExp(
+  `([?&](?:${SENSITIVE_URL_PARAMS.map((param) => param.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})=)[^&\\s]+`,
+  'gi',
+);
 
 // Matches email-address-shaped strings.
 const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
@@ -138,10 +142,7 @@ export function scrubSensitiveText(text: string): string {
     '$1[REDACTED]',
   );
 
-  for (const param of SENSITIVE_URL_PARAMS) {
-    const paramPattern = new RegExp(`([?&]${param}=)[^&\\s]+`, 'gi');
-    result = result.replace(paramPattern, '$1[REDACTED]');
-  }
+  result = result.replace(SENSITIVE_URL_PARAM_PATTERN, '$1[REDACTED]');
 
   result = result.replace(JWT_PATTERN, '[REDACTED_TOKEN]');
   result = result.replace(AUTHORIZATION_PATTERN, '[REDACTED_AUTHORIZATION]');

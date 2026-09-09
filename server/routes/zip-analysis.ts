@@ -10,8 +10,10 @@ import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration';
 import { requireAdmin } from '../middleware/require-admin';
 import { logger } from '../lib/logger';
+import { expensiveRequestLimiter } from '../lib/rate-limits';
 
 const router = Router();
+router.use(expensiveRequestLimiter);
 router.use(requireAuthJWT);
 router.use(requireCompleteRegistration);
 router.use(requireAdmin);

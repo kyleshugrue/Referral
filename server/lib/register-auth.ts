@@ -23,9 +23,9 @@ type RegistrantRequest = Request & { registrant?: VerifiedRegistrant };
 /** Extract a bearer token from an Authorization header value. */
 export function extractBearerToken(header: unknown): string | null {
   if (typeof header !== 'string') return null;
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  const token = match?.[1]?.trim();
-  return token ? token : null;
+  const match = header.match(/^Bearer[ \t]+([^ \t\r\n]+)[ \t]*$/i);
+  const token = match?.[1];
+  return token && token.length <= 16_384 ? token : null;
 }
 
 /** Convert the legacy JSON-body token shape to the normal bearer-token form. */

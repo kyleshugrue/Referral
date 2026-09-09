@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 
 const WORKFLOW_EXTENSIONS = new Set([".yml", ".yaml"]);
-const EXPRESSION_PATTERN = /\$\{\{[\s\S]*?\}\}/g;
+const EXPRESSION_PATTERN = /\x24\{\{[\s\S]*?\}\}/g;
 const ACTION_REFERENCE_PATTERN = /^\s*uses:\s*([^\s#]+)/gm;
 const NPM_RUN_PATTERN = /\bnpm\s+run\b([^\r\n]*)/g;
 const PRIVATE_WORKFLOW_MARKERS = [
@@ -71,7 +71,7 @@ const walkScalars = (node, visit) => {
 
 const validateExpressions = (document, filePath) => {
   walkScalars(document.contents, (value) => {
-    const opens = (value.match(/\$\{\{/g) ?? []).length;
+    const opens = (value.match(/\x24\{\{/g) ?? []).length;
     const closes = (value.match(/\}\}/g) ?? []).length;
     if (opens !== closes) {
       fail(`${filePath}: unbalanced GitHub Actions expression delimiters.`);

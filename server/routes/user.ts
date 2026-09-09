@@ -15,7 +15,7 @@ import { requireAdmin } from '../middleware/require-admin';
 import { logger } from '../lib/logger';
 import { hasRequiredFieldsForMatching, shouldQueueInitialMatchJobs } from '../lib/profile-matching';
 import { toSelfUserDto } from '../lib/privacy-dto';
-import { profileMutationLimiter } from '../lib/rate-limits';
+import { expensiveRequestLimiter, profileMutationLimiter, profileReadLimiter } from '../lib/rate-limits';
 import { normalizeStringArray } from '../lib/registration-input';
 
 const router = Router();
@@ -75,7 +75,7 @@ const console = {
 // DB-connected route module (see server/lib/__tests__/profile-matching.test.ts).
 
 // Get current user
-router.get('/', requireAuthJWT, async (req, res) => {
+router.get('/', requireAuthJWT, profileReadLimiter, async (req, res) => {
   logger.debug("👤 [USER-ROUTE DEBUG] Handling /api/user GET request", {
     hasSession: !!req.session,
     isAuthenticated: req.isAuthenticated(),
@@ -685,7 +685,7 @@ router.patch('/', requireAuthJWT, profileMutationLimiter, async (req, res) => {
 });
 
 // Admin route to fix missing coordinates for all users in the database
-router.post('/fix-all-coordinates', requireAuthJWT, requireCompleteRegistration, requireAdmin, async (req, res) => {
+router.post('/fix-all-coordinates', requireAuthJWT, requireCompleteRegistration, requireAdmin, expensiveRequestLimiter, async (req, res) => {
   try {
     console.log(`[UserRoute] Fixing missing coordinates for all users...`);
 
@@ -743,7 +743,7 @@ router.post('/fix-all-coordinates', requireAuthJWT, requireCompleteRegistration,
 });
 
 // Utility route to ensure all users have geocoded coordinates
-router.post('/ensure-coordinates', requireAuthJWT, requireCompleteRegistration, async (req, res) => {
+router.post('/ensure-coordinates', requireAuthJWT, requireCompleteRegistration, profileMutationLimiter, async (req, res) => {
   try {
     if (!req.user) {
       return res.status(401).json({ message: 'User not found' });

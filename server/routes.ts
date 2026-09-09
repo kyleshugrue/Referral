@@ -10,6 +10,7 @@ import {
   processResumeUpload,
   verifyUploadedFile,
   cleanupTemporaryUpload,
+  resolveManagedUploadPath,
 } from "./upload";
 import locationRouter from "./routes/locations";
 import messagesRouter from "./routes/messages";
@@ -85,6 +86,26 @@ const PRIVACY_LAST_MODIFIED_DISPLAY = PRIVACY_LAST_MODIFIED
 const PRIVACY_DATE_METADATA = PRIVACY_LAST_MODIFIED
   ? `"dateModified": "${PRIVACY_LAST_MODIFIED}",`
   : "";
+
+const uploadRoot = path.resolve(process.cwd(), 'uploads');
+
+function resolveLegacyUploadPath(reference: unknown): string | null {
+  if (typeof reference !== 'string' || !reference.startsWith('/uploads/')) return null;
+  let relativePath: string;
+  try {
+    relativePath = decodeURIComponent(reference.slice('/uploads/'.length));
+  } catch {
+    return null;
+  }
+  if (!relativePath || relativePath.includes('\0') || relativePath.includes('\\')) return null;
+  const segments = relativePath.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..' || !/^[A-Za-z0-9._-]+$/.test(segment))) {
+    return null;
+  }
+  const candidate = path.resolve(uploadRoot, relativePath);
+  const contained = path.relative(uploadRoot, candidate);
+  return contained && !contained.startsWith('..') && !path.isAbsolute(contained) ? candidate : null;
+}
 
 export async function registerRoutes(app: Express): Promise<void> {
   const serverEnv = parseServerEnvironment();
@@ -1416,14 +1437,10 @@ export async function registerRoutes(app: Express): Promise<void> {
         return res.status(404).end();
       }
       const relativePath = decodeURIComponent(rawRelativePath);
-      const candidate = path.resolve(process.cwd(), 'uploads', relativePath);
-      const uploadRoot = path.resolve(process.cwd(), 'uploads');
-      const relativeToRoot = path.relative(uploadRoot, candidate);
-      if (!relativeToRoot || relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) {
-        return res.status(404).end();
-      }
-
       const reference = `/uploads/${relativePath}`;
+      const candidate = resolveLegacyUploadPath(reference);
+      if (!candidate) return res.status(404).end();
+
       if (!await storage.canUserAccessLegacyMedia(req.user!.id, reference)) {
         return res.status(404).end();
       }
@@ -1435,7 +1452,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       }
 
       res.setHeader('Cache-Control', 'private, max-age=3600');
-      return res.sendFile(resolvedPath);
+      return res.sendFile(resolvedRelativePath, { root: uploadRoot });
     } catch (error) {
       logger.warn('[Media] Legacy media lookup failed', {
         requestId: req.requestId,
@@ -1508,8 +1525,8 @@ export async function registerRoutes(app: Express): Promise<void> {
             });
           });
         } else if (previousReference.startsWith('/uploads/')) {
-          const localPath = path.resolve(process.cwd(), 'uploads', previousReference.slice('/uploads/'.length));
-          await cleanupTemporaryUpload(localPath);
+           const localPath = resolveLegacyUploadPath(previousReference);
+           if (localPath) await cleanupTemporaryUpload(localPath);
         }
       }
 
@@ -1542,8 +1559,8 @@ export async function registerRoutes(app: Express): Promise<void> {
         if (reference.startsWith('/api/media/')) {
           await firebaseStorageService.deleteMediaReference(reference);
         } else if (reference.startsWith('/uploads/')) {
-          const localPath = path.resolve(process.cwd(), 'uploads', reference.slice('/uploads/'.length));
-          await cleanupTemporaryUpload(localPath);
+           const localPath = resolveLegacyUploadPath(reference);
+           if (localPath) await cleanupTemporaryUpload(localPath);
         }
       }));
 
@@ -1634,7 +1651,10 @@ export async function registerRoutes(app: Express): Promise<void> {
       if (!req.file) {
         return res.status(400).json({ message: 'No file uploaded' });
       }
-      temporaryPath = req.file.path;
+       temporaryPath = resolveManagedUploadPath(req.file.path) ?? undefined;
+       if (!temporaryPath) {
+         return res.status(400).json({ message: 'Invalid managed upload path' });
+       }
 
        const userId = (req as express.Request & { authMethod?: string }).authMethod
          ? req.user?.id
@@ -1668,7 +1688,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         logger.debug('[Resume Upload] Uploading to Firebase Storage...');
         
         // Read file buffer
-        const fileBuffer = req.file.buffer || fs.readFileSync(req.file.path);
+         const fileBuffer = req.file.buffer || fs.readFileSync(temporaryPath);
         
         // Upload to Firebase Storage
         const firebaseResult = await firebaseStorageService.uploadResume(
@@ -1771,7 +1791,10 @@ export async function registerRoutes(app: Express): Promise<void> {
         logger.debug('[Photo Upload] No file in request');
         return res.status(400).json({ message: 'No file uploaded' });
       }
-      temporaryPath = req.file.path;
+       temporaryPath = resolveManagedUploadPath(req.file.path) ?? undefined;
+       if (!temporaryPath) {
+         return res.status(400).json({ message: 'Invalid managed upload path' });
+       }
 
       logger.debug(`[Photo Upload] File received (${req.file.mimetype}, ${req.file.size} bytes)`);
 
@@ -1796,7 +1819,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         logger.debug('[Photo Upload] Uploading to Firebase Storage...');
         
         // Read file buffer
-        const fileBuffer = req.file.buffer || fs.readFileSync(req.file.path);
+         const fileBuffer = req.file.buffer || fs.readFileSync(temporaryPath);
         
         // Upload to Firebase Storage
         const result = await firebaseStorageService.uploadProfilePicture(

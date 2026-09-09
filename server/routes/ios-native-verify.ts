@@ -3,12 +3,13 @@ import { storage } from '../storage';
 import { auth } from '../lib/firebase-admin';
 import { logger } from '../lib/logger';
 import { requireTrustedOriginForSessionMutation } from '../lib/http-security';
+import { requireAuthJWT } from '../middleware/auth-jwt';
 
 const router = Router();
 
 // Dedicated secure endpoint for iOS native email verification bypass
 // This endpoint requires proper Firebase token verification before setting emailVerified=true
-router.post('/', requireTrustedOriginForSessionMutation, async (req, res) => {
+router.post('/', requireAuthJWT, requireTrustedOriginForSessionMutation, async (req, res) => {
   if (
     req.get('X-Platform') !== 'ios-native' ||
     req.get('X-Capacitor-Platform') !== 'ios'

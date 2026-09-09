@@ -50,6 +50,7 @@ import {
   ACCOUNT_ERASURE_SWEEP_INTERVAL_MS,
 } from './lib/account-erasure-contract';
 import { getPublicReadinessResponse } from './lib/readiness-contract';
+import { internalLimiter, publicLookupLimiter } from './lib/rate-limits';
 
 // Function to serve static files in production
 function serveStaticFiles(app: ReturnType<typeof express>) {
@@ -69,7 +70,7 @@ function serveStaticFiles(app: ReturnType<typeof express>) {
   // Serve index.html only for known SPA routes.
   // Unrecognised paths return HTTP 404 so search engines and AI crawlers
   // correctly classify them as non-existent instead of indexing soft-404s.
-  app.get('*', (req, res, next) => {
+  app.get('*', publicLookupLimiter, (req, res, next) => {
     // Skip API and WebSocket routes
     if (req.path.startsWith('/api') || req.path.startsWith('/ws')) {
       return next();
@@ -87,7 +88,7 @@ function serveStaticFiles(app: ReturnType<typeof express>) {
       res.setHeader("X-Robots-Tag", "noindex, nofollow");
     }
 
-    res.status(statusCode).sendFile(indexHtmlPath);
+    res.status(statusCode).sendFile('index.html', { root: distPath });
   });
 }
 
@@ -277,7 +278,7 @@ async function main() {
 
     // Detailed schema and queue diagnostics are intentionally kept behind the
     // same timing-safe internal bearer boundary used by Worker callbacks.
-    app.get('/internal/readiness', async (req, res) => {
+    app.get('/internal/readiness', internalLimiter, async (req, res) => {
       if (!verifyInternalAuth(req.headers.authorization, process.env.INTERNAL_API_SECRET)) {
         return res.status(401).json({ error: 'Unauthorized' });
       }

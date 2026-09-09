@@ -374,7 +374,7 @@ const ResumeViewPage = () => {
   }
 
   // Only show the "Resume Not Available" message after initial load is complete
-  if (!resumeUrls.length && initialLoadComplete) {
+  if (!resumeUrls.length) {
     return (
       <div className="min-h-screen bg-slate-800">
         {/* Fixed header with safe area padding */}

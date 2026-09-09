@@ -61,7 +61,7 @@ export default function PasswordStrengthChecker({ password, showChecker = true }
   // 1. showChecker is false
   // 2. there's no password (user hasn't started typing)
   // 3. all requirements are met
-  if (!showChecker || !password || (password && failedRequirements.length === 0)) {
+  if (!showChecker || !password || failedRequirements.length === 0) {
     return null;
   }
 

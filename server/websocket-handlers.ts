@@ -304,12 +304,9 @@ export function setupWebSocketServer(server: HTTPServer) {
 
       // Extract platform information from User-Agent or other headers
       const userAgent = request.headers['user-agent'] || '';
-      let platform = 'unknown';
-      if (userAgent.includes('Capacitor')) {
-        platform = userAgent.includes('iPhone') || userAgent.includes('iOS') ? 'ios-native' : 'android-native';
-      } else {
-        platform = 'web';
-      }
+      const platform = userAgent.includes('Capacitor')
+        ? (userAgent.includes('iPhone') || userAgent.includes('iOS') ? 'ios-native' : 'android-native')
+        : 'web';
 
       // Store new connection with metadata
       const newReconnectAttempts = existingClient ? 

@@ -119,6 +119,21 @@ export const profileMutationLimiter = rateLimit({
   message: jsonMessage('Too many profile updates. Please try again shortly.'),
 });
 
+/** Authenticated profile reads: bounded independently from state-changing work. */
+export const profileReadLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 120,
+  ...standardLimiterOptions,
+  keyGenerator: (req) => pseudonymousRateLimitKey(
+    'profile-read',
+    req.user?.id !== undefined
+      ? `user:${req.user.id}`
+      : `ip:${ipKeyGenerator(req.ip || 'unknown')}`,
+  ),
+  ...sharedStore('profile-read'),
+  message: jsonMessage('Too many profile requests. Please try again shortly.'),
+});
+
 /** Device registration is authenticated, but still bounded to prevent token churn. */
 export const pushRegistrationLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,

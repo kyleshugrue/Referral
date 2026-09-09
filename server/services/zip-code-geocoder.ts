@@ -47,23 +47,9 @@ class ZipCodeGeocoder {
   private extractZipCode(location: string): string | null {
     if (!location) return null;
 
-    // Common ZIP code patterns
-    const patterns = [
-      /\b(\d{5})\b/,           // 5-digit ZIP
-      /\b(\d{5}-\d{4})\b/,     // ZIP+4 format
-      /\b(\d{5})\s*$/,         // ZIP at end of string
-      /,\s*(\d{5})\s*$/,       // ZIP after comma at end
-      /\s+(\d{5})\s*$/,        // ZIP after space at end
-    ];
-
-    for (const pattern of patterns) {
-      const match = location.match(pattern);
-      if (match) {
-        return match[1].split('-')[0]; // Get 5-digit part only
-      }
-    }
-
-    return null;
+    if (location.length > 512) return null;
+    const match = location.match(/\b(\d{5})(?:-\d{4})?\b/);
+    return match?.[1] ?? null;
   }
 
   /**

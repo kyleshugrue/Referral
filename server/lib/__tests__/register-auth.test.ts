@@ -33,6 +33,11 @@ describe('extractBearerToken', () => {
     expect(extractBearerToken('Bearer')).toBeNull();
     expect(extractBearerToken('Bearer   ')).toBeNull();
   });
+
+  it('rejects control characters and oversized bearer values', () => {
+    expect(extractBearerToken('Bearer token123\nattacker')).toBeNull();
+    expect(extractBearerToken(`Bearer ${'x'.repeat(16_385)}`)).toBeNull();
+  });
 });
 
 describe('legacyFirebaseTokenAuthorization', () => {

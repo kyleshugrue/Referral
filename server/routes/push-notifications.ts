@@ -36,7 +36,7 @@ const removeTokenSchema = z.object({
  * Health check endpoint for push notification system
  * GET /api/push-notifications/health
  */
-router.get("/health", async (req, res) => {
+router.get("/health", pushDiagnosticsLimiter, async (req, res) => {
   const health = {
     status: "ok",
     timestamp: new Date().toISOString(),
@@ -120,7 +120,7 @@ router.post("/register", pushRegistrationLimiter, async (req, res) => {
  * Remove device token for push notifications
  * POST /api/push-notifications/unregister
  */
-router.post("/unregister", async (req, res) => {
+router.post("/unregister", pushRegistrationLimiter, async (req, res) => {
   try {
     if (!req.user) {
       return res.status(401).json({ message: 'User not found' });
@@ -158,7 +158,7 @@ router.post("/unregister", async (req, res) => {
  * Get push notification registration status for authenticated user
  * GET /api/push-notifications/status
  */
-router.get("/status", async (req, res) => {
+router.get("/status", pushRegistrationLimiter, async (req, res) => {
   try {
     if (!req.user) {
       return res.status(401).json({ message: 'User not found' });

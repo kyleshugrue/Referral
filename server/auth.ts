@@ -13,7 +13,7 @@ declare module 'express-serve-static-core' {
 
 import { logger } from './lib/logger';
 import { Request, Response, NextFunction } from 'express';
-import { registerLimiter } from './lib/rate-limits';
+import { authLimiter, registerLimiter } from './lib/rate-limits';
 import { legacyFirebaseTokenAuthorization, requireVerifiedFirebaseUser } from './lib/register-auth';
 import { registerFirebaseUser } from './routes/register';
 import { toSelfUserDto } from './lib/privacy-dto';
@@ -195,7 +195,7 @@ export function setupAuth(app: Express) {
   // The local strategy was removed during Firebase migration (Oct 21, 2025)
   // All login functionality now uses Firebase Authentication via /api/firebase-auth
 
-  app.post("/api/logout", requireAuthJWT, async (req, res, next) => {
+  app.post("/api/logout", authLimiter, requireAuthJWT, async (req, res, next) => {
     try {
       const authRequest = req as Request & { authMethod?: 'jwt' | 'session'; authSessionId?: string };
       if (req.user && authRequest.authMethod === 'jwt' && authRequest.authSessionId) {

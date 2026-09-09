@@ -909,21 +909,17 @@ function NewMultiStepRegisterPage() {
           // Edge case: user exists but Firebase hasn't rehydrated yet
           // Wait a bit and try to get Firebase user
           logger.warn("[REGISTRATION] User exists but firebaseUser is null, waiting for Firebase rehydration");
-          
+
           await new Promise(resolve => setTimeout(resolve, 1000));
-          
+
           // If still no Firebase user after waiting, show helpful error
-          if (!firebaseUser) {
-            setIsSaving(false);
-            
-            toast({
-              variant: "destructive",
-              title: "Authentication loading",
-              description: "Please wait a moment and click Continue again.",
-            });
-            
-            return; // Allow retry instead of blocking
-          }
+          setIsSaving(false);
+          toast({
+            variant: "destructive",
+            title: "Authentication loading",
+            description: "Please wait a moment and click Continue again.",
+          });
+          return; // Allow retry instead of blocking
         }
         
         // If user is already registered in our system, use the regular API

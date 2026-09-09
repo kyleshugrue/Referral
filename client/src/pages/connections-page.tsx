@@ -221,7 +221,7 @@ export default function ConnectionsPage() {
       conversationId: activeConversation?.id || 0,
       content: newMessage.trim(),
       senderId: currentUser.id,
-      receiverId: activeConversationId || 0,
+      receiverId: activeConversationId,
       createdAt: new Date().toISOString(),
       deliveredAt: null,
       readAt: null,
@@ -417,7 +417,7 @@ export default function ConnectionsPage() {
                       </h1>
                     </div>
                     {/* Search field below Connections title */}
-                    {!isLoadingConnections && safeConnections.length > 0 && (
+                    {safeConnections.length > 0 && (
                       <div className="relative mt-2">
                         <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
                           <Search className="h-4 w-4 text-muted-foreground" />
@@ -434,12 +434,7 @@ export default function ConnectionsPage() {
                   </div>
                   
                   {/* Connections Carousel Section - in same container as title and search */}
-                  {isLoadingConnections ? (
-                    <div className="flex items-center justify-center py-8">
-                      <Loader2 className="h-6 w-6 animate-spin" />
-                    </div>
-                  ) : (
-                    <div className="overflow-visible">
+                  <div className="overflow-visible">
                       <div className="connections-carousel-container" style={{ margin: 0 }}>
                         <ConnectionsCarousel
                           connections={filteredConnections}
@@ -463,8 +458,7 @@ export default function ConnectionsPage() {
                           }}
                         />
                       </div>
-                    </div>
-                  )}
+                  </div>
                 </div>
 
                 {/* Messages Title */}

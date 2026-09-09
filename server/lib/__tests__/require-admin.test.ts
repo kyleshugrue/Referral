@@ -38,12 +38,11 @@ describe('administrator authorization', () => {
       json: () => response,
     };
 
-    const denied = requireAdmin(
+    requireAdmin(
       { user: { id: 8 }, path: '/admin', method: 'GET' } as never,
       response as never,
       next,
     );
-    expect(denied).toBeUndefined();
     expect(statusCode).toBe(403);
 
     let called = false;
