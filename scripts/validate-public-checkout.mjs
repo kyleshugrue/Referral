@@ -30,7 +30,10 @@ const SYNTHETIC_BUILD_ENV = Object.freeze({
   VITE_FIREBASE_APP_ID: "1:000000000000:web:0000000000000000000000",
   VITE_SMOKE_TEST: "true",
 });
-const REPLIT_LOCKFILE_PREFIX = ["http://package-firewall", ".replit.local/npm/"].join("");
+const REPLIT_LOCKFILE_PREFIXES = [
+  ["http://package-firewall", ".replit.local/npm/"].join(""),
+  ["http://package-firewall", ".replit.internal/npm/"].join(""),
+];
 const PUBLIC_LOCKFILE_PREFIX = "https://registry.npmjs.org/";
 const CLEAN_ROOM_DATABASE_ENDPOINT = Object.freeze([
   "postgres://",
@@ -547,9 +550,15 @@ const normalizeGitHubLockfile = async (root) => {
   }
   try {
     const original = await handle.readFile("utf8");
-    const count = original.split(REPLIT_LOCKFILE_PREFIX).length - 1;
-    const normalized = original.split(REPLIT_LOCKFILE_PREFIX).join(PUBLIC_LOCKFILE_PREFIX);
-    if (normalized.includes("package-firewall.replit.local")) {
+    const normalized = REPLIT_LOCKFILE_PREFIXES.reduce(
+      (value, prefix) => value.split(prefix).join(PUBLIC_LOCKFILE_PREFIX),
+      original,
+    );
+    const count = REPLIT_LOCKFILE_PREFIXES.reduce(
+      (total, prefix) => total + original.split(prefix).length - 1,
+      0,
+    );
+    if (/package-firewall\.replit\.(?:local|internal)/.test(normalized)) {
       fail("GitHub clean-room lockfile still contains an internal package firewall URL.");
     }
     if (count > 0) {

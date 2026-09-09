@@ -1,6 +1,7 @@
 import passport from "passport";
 import { Express, json, urlencoded } from "express";
 import session from "express-session";
+import csrf from "csurf";
 import { randomBytes } from "crypto";
 import { storage } from "./storage";
 import { User as SelectUser } from "@shared/schema";
@@ -22,6 +23,8 @@ import { parseServerEnvironment } from './lib/env';
 import { isActiveAccount } from './lib/account-status';
 import { closeUserConnections } from './websocket-utils';
 import { requireAuthJWT } from './middleware/auth-jwt';
+import { csrfSync } from 'csrf-sync';
+import { isOriginAllowed } from './lib/http-security';
 
 // Export session middleware for WebSocket authentication
 export let sessionMiddleware: ReturnType<typeof session>;
@@ -95,12 +98,22 @@ export function setupAuth(app: Express) {
     },
   };
 
-  // Create and export session middleware for WebSocket authentication
-  // The app's session mutation guard requires an allowlisted Origin for every
-  // cookie-authenticated unsafe request; CodeQL's token-only rule cannot model
-  // this origin-bound CSRF control.
-  // lgtm [js/missing-token-validation]
+  // Create and export session middleware for WebSocket authentication.
   sessionMiddleware = session(sessionSettings);
+  const csrfProtection = csrf();
+  const { csrfSynchronisedProtection } = csrfSync({
+    // Native bearer requests do not use the browser session. Browser requests
+    // from an allowlisted origin are already protected by the same-origin
+    // policy below; other unsafe requests must present a synchronizer token.
+    skipCsrfProtection: (req) => {
+      if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return true;
+      if (typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ')) {
+        return true;
+      }
+      const origin = req.get('origin');
+      return !origin || isOriginAllowed(origin, isProduction);
+    },
+  });
 
   // Configure Express middleware
   //
@@ -159,6 +172,19 @@ export function setupAuth(app: Express) {
   app.use(json({ limit: serverEnv.jsonBodyLimitBytes }));
   app.use(urlencoded({ extended: true, limit: serverEnv.urlencodedBodyLimitBytes }));
   app.use(sessionMiddleware);
+  app.use(csrfSynchronisedProtection);
+  app.use((req, res, next) => {
+    if (
+      ['GET', 'HEAD', 'OPTIONS'].includes(req.method) ||
+      (typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ')) ||
+      !req.get('origin') ||
+      isOriginAllowed(req.get('origin'), isProduction)
+    ) {
+      next();
+      return;
+    }
+    csrfProtection(req, res, next);
+  });
   app.use(passport.initialize());
   app.use(passport.session());
 
