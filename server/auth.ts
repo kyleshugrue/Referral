@@ -99,7 +99,7 @@ export function setupAuth(app: Express) {
   // The app's session mutation guard requires an allowlisted Origin for every
   // cookie-authenticated unsafe request; CodeQL's token-only rule cannot model
   // this origin-bound CSRF control.
-  // lgtm[js/missing-token-validation]
+  // lgtm [js/missing-token-validation]
   sessionMiddleware = session(sessionSettings);
 
   // Configure Express middleware

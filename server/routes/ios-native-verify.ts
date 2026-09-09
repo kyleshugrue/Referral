@@ -1,15 +1,27 @@
-import { Router } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { storage } from '../storage';
 import { auth } from '../lib/firebase-admin';
 import { logger } from '../lib/logger';
 import { requireTrustedOriginForSessionMutation } from '../lib/http-security';
 import { requireAuthJWT } from '../middleware/auth-jwt';
+import { z } from 'zod';
 
 const router = Router();
+const firebaseTokenSchema = z.string().min(1);
+
+function requireFirebaseVerificationToken(req: Request, res: Response, next: NextFunction): void {
+  const parsed = firebaseTokenSchema.safeParse(req.body?.token);
+  if (!parsed.success) {
+    res.status(400).json({ message: 'Firebase token is required for iOS native verification' });
+    return;
+  }
+  res.locals.firebaseVerificationToken = parsed.data;
+  next();
+}
 
 // Dedicated secure endpoint for iOS native email verification bypass
 // This endpoint requires proper Firebase token verification before setting emailVerified=true
-router.post('/', requireAuthJWT, requireTrustedOriginForSessionMutation, async (req, res) => {
+router.post('/', requireAuthJWT, requireTrustedOriginForSessionMutation, requireFirebaseVerificationToken, async (req, res) => {
   if (
     req.get('X-Platform') !== 'ios-native' ||
     req.get('X-Capacitor-Platform') !== 'ios'
@@ -29,13 +41,8 @@ router.post('/', requireAuthJWT, requireTrustedOriginForSessionMutation, async (
   }
 
   try {
-    const { token } = req.body;
+    const token = res.locals.firebaseVerificationToken as string;
     const userId = req.user.id;
-    
-    if (!token) {
-      logger.debug("❌ [IOS-NATIVE-VERIFY] No Firebase token provided");
-      return res.status(400).json({ message: 'Firebase token is required for iOS native verification' });
-    }
     
     try {
       // Verify the Firebase token using Firebase Admin

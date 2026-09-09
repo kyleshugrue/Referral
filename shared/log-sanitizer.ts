@@ -186,25 +186,14 @@ export function sanitizeLogValue(value: unknown, seen: WeakSet<object> = new Wea
     }
     seen.add(value);
 
-    const output: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      if (isSensitiveKey(key)) {
-        Object.defineProperty(output, key, {
-          configurable: true,
-          enumerable: true,
-          value: val === undefined ? undefined : '[REDACTED]',
-          writable: true,
-        });
-      } else {
-        Object.defineProperty(output, key, {
-          configurable: true,
-          enumerable: true,
-          value: sanitizeLogValue(val, seen),
-          writable: true,
-        });
-      }
-    }
-    return output;
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, val]) => [
+        key,
+        isSensitiveKey(key)
+          ? (val === undefined ? undefined : '[REDACTED]')
+          : sanitizeLogValue(val, seen),
+      ]),
+    );
   }
 
   return value;

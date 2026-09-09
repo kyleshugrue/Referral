@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { storage } from '../storage';
 import { auth } from '../lib/firebase-admin';
 import { 
@@ -14,9 +14,21 @@ import { logger } from '../lib/logger';
 import { extractBearerToken } from '../lib/register-auth';
 import { toSelfUserDto } from '../lib/privacy-dto';
 import { isActiveAccount } from '../lib/account-status';
+import { z } from 'zod';
 
 const router = Router();
 const errorClass = (error: unknown) => error instanceof Error ? error.name : 'UnknownError';
+const bearerTokenSchema = z.string().min(1);
+
+function requireFirebaseBearerToken(req: Request, res: Response, next: NextFunction): void {
+  const parsed = bearerTokenSchema.safeParse(extractBearerToken(req.headers.authorization));
+  if (!parsed.success) {
+    res.status(401).json({ message: 'Authentication required' });
+    return;
+  }
+  res.locals.firebaseBearerToken = parsed.data;
+  next();
+}
 
 // Helper function to complete the auth response (JWT generation, re-fetch user, send response)
 // Used by both the already-authenticated path and the new-login path
@@ -162,18 +174,14 @@ async function completeAuthResponse(
 }
 
 // Process Firebase authentication tokens and sync with database
-router.post('/', async (req, res) => {
+router.post('/', requireFirebaseBearerToken, async (req, res) => {
   logger.debug("🔥 [FIREBASE-AUTH DEBUG] Starting Firebase auth processing...", {
     hasBearerToken: !!extractBearerToken(req.headers.authorization),
     timestamp: new Date().toISOString()
   });
 
   try {
-    const token = extractBearerToken(req.headers.authorization);
-    
-    if (!token) {
-      return res.status(401).json({ message: 'Authentication required' });
-    }
+    const token = res.locals.firebaseBearerToken as string;
     
     try {
       // Verify the Firebase token

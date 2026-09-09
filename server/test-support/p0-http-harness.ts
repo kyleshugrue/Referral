@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import session, { type SessionData } from "express-session";
 import { setupAuth } from "../auth";
 import { registerRoutes } from "../routes";
+import { publicLookupLimiter } from "../lib/rate-limits";
 
 export interface HarnessUser {
   id: number;
@@ -320,7 +321,7 @@ export async function createP0HttpHarness(
 
   // A tiny session-login endpoint gives cookie-authenticated tests a real
   // Passport session without adding a production login path or a real account.
-  app.get("/__p0/session/:userId", (req, res, next) => {
+  app.get("/__p0/session/:userId", publicLookupLimiter, (req, res, next) => {
     const user = state.users.get(Number(req.params.userId));
     if (!user) return res.sendStatus(404);
     req.login(user, (error) => {

@@ -90,7 +90,9 @@ const PRIVACY_DATE_METADATA = PRIVACY_LAST_MODIFIED
 
 const uploadRoot = path.resolve(process.cwd(), 'uploads');
 const trustedUploadPrincipal: unique symbol = Symbol('trustedUploadPrincipal');
+const managedUploadPath: unique symbol = Symbol('managedUploadPath');
 type UploadRequest = express.Request & { [trustedUploadPrincipal]?: true };
+type ManagedUploadRequest = UploadRequest & { [managedUploadPath]?: string };
 
 function resolveLegacyUploadPath(reference: unknown): string | null {
   if (typeof reference !== 'string' || !reference.startsWith('/uploads/')) return null;
@@ -1437,7 +1439,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   // Legacy local media is authorized against the authenticated user's current
   // database references before the file is served. Unknown or another user's
   // path returns the same 404 to avoid an existence oracle.
-  app.get('/uploads/*', requireAuthJWT, async (req, res) => {
+  app.get('/uploads/*', apiBaselineLimiter, requireAuthJWT, async (req, res) => {
     try {
       const rawRelativePath = req.params[0];
       if (typeof rawRelativePath !== 'string' || rawRelativePath.length === 0) {
@@ -1652,19 +1654,23 @@ export async function registerRoutes(app: Express): Promise<void> {
     return requireVerifiedFirebaseUser(req, res, next);
   };
 
-  app.post('/api/upload/resume', uploadLimiter, authenticateUploadPrincipal, requireTrustedOriginForSessionMutation, requireUploadPrincipal, uploadResume.single('resume'), async (req, res) => {
+  const requireManagedUploadFile = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+    const resolvedPath = resolveManagedUploadPath(req.file.path);
+    if (!resolvedPath) return res.status(400).json({ message: 'Invalid managed upload path' });
+    Object.defineProperty(req, managedUploadPath, { value: resolvedPath });
+    return next();
+  };
+
+  app.post('/api/upload/resume', uploadLimiter, authenticateUploadPrincipal, requireTrustedOriginForSessionMutation, requireUploadPrincipal, uploadResume.single('resume'), requireManagedUploadFile, async (req, res) => {
     let temporaryPath: string | undefined;
     let preserveLocalFallback = false;
     let savedUser: User | null = null;
     const remoteReferences: string[] = [];
     try {
-      if (!req.file) {
-        return res.status(400).json({ message: 'No file uploaded' });
-      }
-       temporaryPath = resolveManagedUploadPath(req.file.path) ?? undefined;
-       if (!temporaryPath) {
-         return res.status(400).json({ message: 'Invalid managed upload path' });
-       }
+       const uploadRequest = req as ManagedUploadRequest;
+       temporaryPath = uploadRequest[managedUploadPath] as string;
+       const uploadedFile = req.file!;
 
        const userId = (req as UploadRequest)[trustedUploadPrincipal]
          ? req.user?.id
@@ -1675,17 +1681,15 @@ export async function registerRoutes(app: Express): Promise<void> {
          authenticated: Boolean(userId),
        });
 
-      logger.debug(`[Resume Upload] File received (${req.file.mimetype}, ${req.file.size} bytes)`);
+      logger.debug(`[Resume Upload] File received (${uploadedFile.mimetype}, ${uploadedFile.size} bytes)`);
 
       // Verify file contents match the extension (magic-byte check)
-       if (temporaryPath) {
-        try {
-           await verifyUploadedFile(temporaryPath);
-        } catch (verifyError) {
-          return res.status(400).json({
-            message: verifyError instanceof Error ? verifyError.message : 'Invalid file contents'
-          });
-        }
+       try {
+          await verifyUploadedFile(temporaryPath);
+       } catch (verifyError) {
+         return res.status(400).json({
+           message: verifyError instanceof Error ? verifyError.message : 'Invalid file contents'
+         });
       }
 
       // Import Firebase Storage service
@@ -1698,12 +1702,12 @@ export async function registerRoutes(app: Express): Promise<void> {
         logger.debug('[Resume Upload] Uploading to Firebase Storage...');
         
         // Read file buffer
-         const fileBuffer = req.file.buffer || fs.readFileSync(temporaryPath);
+         const fileBuffer = uploadedFile.buffer || fs.readFileSync(temporaryPath);
         
         // Upload to Firebase Storage
         const firebaseResult = await firebaseStorageService.uploadResume(
           fileBuffer,
-          req.file.originalname,
+           uploadedFile.originalname,
            userId,
            firebaseUid
         );
@@ -1722,7 +1726,7 @@ export async function registerRoutes(app: Express): Promise<void> {
          preserveLocalFallback = true;
         logger.debug('[Resume Upload] Firebase Storage not available, using local processing');
         // Fallback to local processing
-        result = await processResumeUpload(req.file);
+         result = await processResumeUpload(uploadedFile);
          logger.debug('[Resume Upload] Local processing complete');
       }
       
@@ -1778,7 +1782,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   });
 
   // Profile photo upload endpoint (two routes for backward compatibility)
-  app.post(['/api/upload/photo', '/api/upload/profile-photo'], uploadLimiter, authenticateUploadPrincipal, requireTrustedOriginForSessionMutation, requireUploadPrincipal, uploadPhoto.single('photo'), async (req, res) => {
+  app.post(['/api/upload/photo', '/api/upload/profile-photo'], uploadLimiter, authenticateUploadPrincipal, requireTrustedOriginForSessionMutation, requireUploadPrincipal, uploadPhoto.single('photo'), requireManagedUploadFile, async (req, res) => {
     // Accept photos even if not authenticated (for registration process)
      // Keep only bounded authentication metadata in logs.
     let temporaryPath: string | undefined;
@@ -1797,26 +1801,19 @@ export async function registerRoutes(app: Express): Promise<void> {
         hasFirebaseRegistrant: Boolean(firebaseUid),
       });
 
-      if (!req.file) {
-        logger.debug('[Photo Upload] No file in request');
-        return res.status(400).json({ message: 'No file uploaded' });
-      }
-       temporaryPath = resolveManagedUploadPath(req.file.path) ?? undefined;
-       if (!temporaryPath) {
-         return res.status(400).json({ message: 'Invalid managed upload path' });
-       }
+       const uploadRequest = req as ManagedUploadRequest;
+       temporaryPath = uploadRequest[managedUploadPath] as string;
+       const uploadedFile = req.file!;
 
-      logger.debug(`[Photo Upload] File received (${req.file.mimetype}, ${req.file.size} bytes)`);
+       logger.debug(`[Photo Upload] File received (${uploadedFile.mimetype}, ${uploadedFile.size} bytes)`);
 
       // Verify file contents match the extension (magic-byte check)
-       if (temporaryPath) {
         try {
            await verifyUploadedFile(temporaryPath);
         } catch (verifyError) {
           return res.status(400).json({
             message: verifyError instanceof Error ? verifyError.message : 'Invalid file contents'
           });
-        }
       }
 
       // Import Firebase Storage service
@@ -1829,12 +1826,12 @@ export async function registerRoutes(app: Express): Promise<void> {
         logger.debug('[Photo Upload] Uploading to Firebase Storage...');
         
         // Read file buffer
-         const fileBuffer = req.file.buffer || fs.readFileSync(temporaryPath);
+          const fileBuffer = uploadedFile.buffer || fs.readFileSync(temporaryPath);
         
         // Upload to Firebase Storage
         const result = await firebaseStorageService.uploadProfilePicture(
           fileBuffer,
-          req.file.originalname,
+          uploadedFile.originalname,
            userId,
            firebaseUid
         );
@@ -1849,7 +1846,7 @@ export async function registerRoutes(app: Express): Promise<void> {
           preserveLocalFallback = true;
          logger.debug('[Photo Upload] Firebase Storage not available, using local storage');
         // Fallback to local storage
-        fileUrl = `/uploads/${path.basename(req.file.path)}`.replace(/\\/g, '/');
+         fileUrl = `/uploads/${path.basename(temporaryPath)}`.replace(/\\/g, '/');
          logger.debug('[Photo Upload] Generated local media reference');
       }
       
