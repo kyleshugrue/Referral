@@ -90,6 +90,38 @@ const DATABASE_URL_PATTERN = /\bpostgres(?:ql)?:\/\/[^\s"']+/gi;
 const COOKIE_PATTERN = /\b(?:set-cookie|cookie)\s*:\s*[^\r\n]+/gi;
 const DATABASE_ERROR_PATTERN = /\b(?:failed query|query failed|database query failed|error executing query)\b/i;
 
+// Operational events must opt into a small structural vocabulary. This is
+// intentionally separate from the legacy key scrubber: profile-shaped objects
+// can contain user-written values under arbitrary aliases that a blacklist
+// cannot anticipate.
+const OPERATIONAL_LOG_KEYS = new Set([
+  'action', 'attempt', 'cacheHit', 'completed', 'count', 'durationMs',
+  'errorClass', 'event', 'hasCoordinates', 'hasLocation', 'hasMore',
+  'isAuthenticated', 'limit', 'messageId', 'operationId', 'platform',
+  'profileVersion', 'queueDepth', 'reasonCode', 'requestId', 'status',
+  'success', 'userId', 'validLocationCount', 'conversationId',
+]);
+
+export function sanitizeOperationalLogValue(value: unknown): unknown {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value === null) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean' || item === null)
+      .map((item) => sanitizeOperationalLogValue(item));
+  }
+  if (!value || typeof value !== 'object') return undefined;
+
+  const output: Record<string, unknown> = {};
+  for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+    if (OPERATIONAL_LOG_KEYS.has(key)) {
+      output[key] = sanitizeOperationalLogValue(nestedValue);
+    }
+  }
+  return output;
+}
+
 /**
  * Scrub a plain string for embedded sensitive patterns. Used for bare string
  * log arguments, nested string values, and Error messages - anywhere a

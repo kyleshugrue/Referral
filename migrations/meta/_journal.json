@@ -71,6 +71,20 @@
       "when": 1788879681002,
       "tag": "0009_message_delivery_status",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788962647000,
+      "tag": "0010_authorization_revocation",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788962648000,
+      "tag": "0011_account_erasure_leases",
+      "breakpoints": true
     }
   ]
 }

@@ -79,14 +79,9 @@ router.get("/:userId", async (req, res) => {
     });
 
     const serializedMessages = page.items.map(toMessageDto);
-    // Preserve the legacy array response for existing web and native clients.
-    // Callers that opt into cursor pagination receive metadata alongside the
-    // bounded page.
-    if (!req.query.cursor && req.query.limit === undefined) {
-      return res.json(serializedMessages);
-    }
     return res.json({
       messages: serializedMessages,
+      hasMore: page.hasMore,
       ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
     });
 

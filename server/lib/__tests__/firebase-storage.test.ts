@@ -40,4 +40,10 @@ describe('managed media object boundary', () => {
       'https://storage.googleapis.com/bucket/resumes/user-7-resume.pdf',
     )).toBe('resumes/user-7-resume.pdf');
   });
+
+  it('rejects traversal when erasing legacy local media references', async () => {
+    await expect(firebaseStorageService.deleteLegacyLocalMediaForUser([
+      '/uploads/../outside.txt',
+    ])).rejects.toThrow('Invalid legacy media reference');
+  });
 });

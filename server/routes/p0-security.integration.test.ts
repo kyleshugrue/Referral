@@ -56,6 +56,7 @@ vi.mock("../lib/logger", () => {
       info: noop,
       warn: noop,
       error: noop,
+      operational: noop,
     },
   };
 });

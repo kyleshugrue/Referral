@@ -12,6 +12,7 @@ import { sql, eq, or, and, lte } from 'drizzle-orm';
 import { snapshotService, type ProfileData } from './profile-snapshot-service';
 import { logger } from '../lib/logger';
 import { recordQueueEvent } from '../lib/operational-metrics';
+import { isActiveAccount } from '../lib/account-status';
 
 import type { JobStatus } from '../../shared/schema';
 import {
@@ -293,6 +294,9 @@ export class BackgroundJobQueue {
     try {
       const user = await this.storage.getUser(userId);
       if (user) {
+        if (!isActiveAccount(user)) {
+          throw new Error(`Cannot queue ${jobType}: user ${userId} is not active`);
+        }
         if (user.profileVersion == null) {
           throw new Error(`Cannot queue ${jobType}: user ${userId} has no profile version`);
         }
@@ -337,6 +341,9 @@ export class BackgroundJobQueue {
       try {
         const targetUser = await this.storage.getUser(metadata.targetUserId);
         if (targetUser) {
+          if (!isActiveAccount(targetUser)) {
+            throw new Error(`Cannot queue ${jobType}: target user ${metadata.targetUserId} is not active`);
+          }
           if (targetUser.profileVersion == null) {
             throw new Error(`Cannot queue ${jobType}: target user ${metadata.targetUserId} has no profile version`);
           }
@@ -778,7 +785,9 @@ export class BackgroundJobQueue {
       if (result.success) {
         await this.updateJobStatus(job.id, 'COMPLETED', result, 'PROCESSING');
         
-        await this.checkAndNotifyMatchesReady(job.userId);
+        if (job.jobType !== 'MATCH_DESCRIPTION' || (result.data as { finalized?: boolean } | undefined)?.finalized === true) {
+          await this.checkAndNotifyMatchesReady(job.userId);
+        }
       } else {
         await this.failJob(job.id, result.error || 'Processing failed');
       }

@@ -20,6 +20,7 @@ import { logger } from "@/lib/logger";
 import { waitForTokensReady, onAccessTokenChange } from "@/lib/token-manager";
 import { openAuthenticatedWebSocket } from "@/lib/websocket-ticket";
 import { AlwaysVisibleBackButton } from "@/components/chat-back-button";
+import { mergeMessages, type MessagePage } from "@/lib/message-history";
 
 export default function ChatPage() {
   const [location, navigate] = useLocation();
@@ -348,10 +349,10 @@ export default function ChatPage() {
 
                 // If we have a confirmed message ID, update its status to 'delivered'
                 if (data.message && data.message.id) {
-                  const currentMessages = queryClient.getQueryData<ExtendedMessage[]>(["/api/messages", Number(userId)]);
-                  if (currentMessages) {
+                    const currentPage = queryClient.getQueryData<MessagePage>(["/api/messages", Number(userId)]);
+                    if (currentPage) {
                     // Find any temporary or sending messages and update them to delivered
-                    const updatedMessages = currentMessages.map(msg => {
+                      const updatedMessages = currentPage.messages.map(msg => {
                       // If this is the confirmed message OR a temporary message with matching content
                       if ((msg.id === data.message.id) || 
                           (msg.isTemporary && msg.content === data.message.content)) {
@@ -366,7 +367,10 @@ export default function ChatPage() {
                     });
                     
                     // Update the messages cache
-                    queryClient.setQueryData(["/api/messages", Number(userId)], updatedMessages);
+                    queryClient.setQueryData(["/api/messages", Number(userId)], {
+                      ...currentPage,
+                      messages: mergeMessages([], updatedMessages),
+                    });
                   }
                 }
 
@@ -555,11 +559,14 @@ export default function ChatPage() {
     };
 
     // Optimistically update the UI with the message
-    const currentData = queryClient.getQueryData<ExtendedMessage[]>(["/api/messages", Number(userId)]);
+    const currentData = queryClient.getQueryData<MessagePage>(["/api/messages", Number(userId)]);
     
     if (currentData) {
       // Add the temporary message to the existing messages list
-      queryClient.setQueryData(["/api/messages", Number(userId)], [...currentData, tempMessage]);
+      queryClient.setQueryData(["/api/messages", Number(userId)], {
+        ...currentData,
+        messages: mergeMessages(currentData.messages, [tempMessage]),
+      });
     }
 
     try {
@@ -618,12 +625,12 @@ export default function ChatPage() {
       // After a timeout, if the message isn't acknowledged, show an error
       setTimeout(() => {
         // Check if the message with this temporary ID is still in the cache
-        const currentMessages = queryClient.getQueryData<ExtendedMessage[]>(["/api/messages", Number(userId)]);
-        const messageStillTemp = currentMessages?.some(msg => msg.id === tempMessage.id);
+        const currentPage = queryClient.getQueryData<MessagePage>(["/api/messages", Number(userId)]);
+        const messageStillTemp = currentPage?.messages.some(msg => msg.id === tempMessage.id);
         
         if (messageStillTemp) {
           // Mark message as failed
-          const updatedMessages = currentMessages?.map(msg => {
+          const updatedMessages = currentPage?.messages.map(msg => {
             if (msg.id === tempMessage.id) {
               return { ...msg, status: 'failed' as const };
             }
@@ -632,7 +639,10 @@ export default function ChatPage() {
           
           // Update the query cache with failed status
           if (updatedMessages) {
-            queryClient.setQueryData(["/api/messages", Number(userId)], updatedMessages);
+            queryClient.setQueryData(["/api/messages", Number(userId)], {
+              ...currentPage,
+              messages: updatedMessages,
+            });
           }
           
           // Show error toast
@@ -656,19 +666,19 @@ export default function ChatPage() {
       });
       
       // Mark the message as failed rather than removing it
-      const currentMessages = queryClient.getQueryData<ExtendedMessage[]>(["/api/messages", Number(userId)]);
-      if (currentMessages) {
-        const updatedMessages = currentMessages.map(msg => {
+      const currentPage = queryClient.getQueryData<MessagePage>(["/api/messages", Number(userId)]);
+      if (currentPage) {
+        const updatedMessages = currentPage.messages.map(msg => {
           if (msg.id === tempMessage.id) {
             return { ...msg, status: 'failed' as const };
           }
           return msg;
         });
         
-        queryClient.setQueryData(
-          ["/api/messages", Number(userId)], 
-          updatedMessages
-        );
+        queryClient.setQueryData(["/api/messages", Number(userId)], {
+          ...currentPage,
+          messages: updatedMessages,
+        });
       }
       
       // Don't restore the message content as we're showing it as failed

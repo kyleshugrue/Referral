@@ -46,6 +46,7 @@ describe('database readiness safeguards', () => {
           { table_name: 'account_erasure_jobs' },
           { table_name: 'fcm_tokens' },
           { table_name: 'match_generation_jobs' },
+          { table_name: 'refresh_tokens' },
           { table_name: 'session' },
           { table_name: 'users' },
           { table_name: 'websocket_tickets' },
@@ -54,6 +55,7 @@ describe('database readiness safeguards', () => {
       .mockResolvedValueOnce({
         rows: [
           { table_name: 'users', column_name: 'account_status' },
+          { table_name: 'users', column_name: 'auth_epoch' },
           { table_name: 'users', column_name: 'deletion_requested_at' },
           { table_name: 'users', column_name: 'deletion_completed_at' },
           { table_name: 'callback_notification_queue', column_name: 'dedupe_key' },
@@ -70,10 +72,17 @@ describe('database readiness safeguards', () => {
           { table_name: 'account_erasure_jobs', column_name: 'user_id' },
           { table_name: 'account_erasure_jobs', column_name: 'status' },
           { table_name: 'account_erasure_jobs', column_name: 'attempt_count' },
+          { table_name: 'account_erasure_jobs', column_name: 'max_attempts' },
           { table_name: 'account_erasure_jobs', column_name: 'next_attempt_at' },
           { table_name: 'account_erasure_jobs', column_name: 'last_error_code' },
+          { table_name: 'account_erasure_jobs', column_name: 'last_error_class' },
+          { table_name: 'account_erasure_jobs', column_name: 'last_error_at' },
           { table_name: 'account_erasure_jobs', column_name: 'requested_at' },
           { table_name: 'account_erasure_jobs', column_name: 'started_at' },
+          { table_name: 'account_erasure_jobs', column_name: 'lease_expires_at' },
+          { table_name: 'account_erasure_jobs', column_name: 'claim_token' },
+          { table_name: 'account_erasure_jobs', column_name: 'firebase_deleted_at' },
+          { table_name: 'account_erasure_jobs', column_name: 'media_deleted_at' },
           { table_name: 'account_erasure_jobs', column_name: 'completed_at' },
           ...[
             'id',
@@ -113,6 +122,10 @@ describe('database readiness safeguards', () => {
             'initial_match_jobs_queued',
             'initial_match_jobs_queued_at',
           ].map((column_name) => ({ table_name: 'users', column_name })),
+          ...[
+            'auth_session_id',
+            'revoked_at',
+          ].map((column_name) => ({ table_name: 'refresh_tokens', column_name })),
         ],
       })
       .mockResolvedValueOnce({
@@ -121,6 +134,7 @@ describe('database readiness safeguards', () => {
           { indexname: 'delivery_obligations_pending_idx' },
           { indexname: 'account_erasure_jobs_user_id_idx' },
           { indexname: 'account_erasure_jobs_status_attempt_idx' },
+          { indexname: 'account_erasure_jobs_lease_expiry_idx' },
         ],
       })
       .mockResolvedValueOnce({
@@ -160,6 +174,7 @@ describe('database readiness safeguards', () => {
          'account_erasure_jobs',
          'fcm_tokens',
          'match_generation_jobs',
+         'refresh_tokens',
          'users',
          'websocket_tickets',
        ],

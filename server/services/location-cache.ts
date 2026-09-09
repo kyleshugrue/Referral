@@ -2,6 +2,7 @@ import { db } from '../db';
 import { locationCoordinates, users } from '@shared/schema';
 import { eq, sql } from 'drizzle-orm';
 import { geocodingService } from './geocoding';
+import { logger } from '../lib/logger';
 
 export interface CachedLocation {
   locationName: string;
@@ -28,7 +29,9 @@ export class LocationCacheService {
     const normalizedLocation = locationName.trim().toLowerCase();
 
     try {
-      console.log(`[LocationCache] Looking up coordinates for: ${locationName}`);
+      logger.operational('[LocationCache] Looking up coordinates', {
+        action: 'lookup',
+      });
 
       // First, check cache
       const cachedLocation = await db
@@ -39,7 +42,7 @@ export class LocationCacheService {
 
       if (cachedLocation.length > 0) {
         const location = cachedLocation[0];
-        console.log(`[LocationCache] Found cached coordinates for ${locationName}: (${location.latitude}, ${location.longitude})`);
+        logger.operational('[LocationCache] Cache hit', { action: 'lookup', cacheHit: true });
         
         // Update last used timestamp
         await this.updateLastUsed(normalizedLocation);
@@ -52,7 +55,10 @@ export class LocationCacheService {
       }
 
       // Not in cache, use geocoding API
-      console.log(`[LocationCache] Location not cached, using geocoding API for: ${locationName}`);
+      logger.operational('[LocationCache] Cache miss; using geocoding API', {
+        action: 'lookup',
+        cacheHit: false,
+      });
       const geocodeResult = await geocodingService.geocodeLocation(locationName);
 
       if (geocodeResult) {
@@ -73,7 +79,9 @@ export class LocationCacheService {
       };
 
     } catch (error) {
-      console.error(`[LocationCache] Error getting coordinates for ${locationName}:`, error);
+      logger.error('[LocationCache] Error getting coordinates', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
       return {
         success: false,
         fromCache: false,
@@ -107,9 +115,11 @@ export class LocationCacheService {
           }
         });
 
-      console.log(`[LocationCache] Cached coordinates for ${locationName}: (${latitude}, ${longitude})`);
+      logger.operational('[LocationCache] Coordinates cached', { action: 'cache-write' });
     } catch (error) {
-      console.error(`[LocationCache] Error caching location ${locationName}:`, error);
+      logger.error('[LocationCache] Error caching coordinates', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
     }
   }
 
@@ -123,7 +133,9 @@ export class LocationCacheService {
         .set({ lastUsed: new Date().toISOString() })
         .where(eq(locationCoordinates.locationName, locationName));
     } catch (error) {
-      console.error(`[LocationCache] Error updating last used for ${locationName}:`, error);
+      logger.error('[LocationCache] Error updating location cache timestamp', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
     }
   }
 
@@ -143,10 +155,16 @@ export class LocationCacheService {
           })
           .where(eq(users.id, userId));
 
-        console.log(`[LocationCache] Cleared current location for user ${userId}`);
+        logger.operational('[LocationCache] Cleared current location', {
+          userId,
+          hasLocation: false,
+        });
         return { success: true, fromCache: false };
       } catch (error) {
-        console.error(`[LocationCache] Error clearing current location for user ${userId}:`, error);
+        logger.error('[LocationCache] Error clearing current location', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
+          userId,
+        });
         return { success: false, fromCache: false, error: 'Failed to clear location' };
       }
     }
@@ -167,10 +185,17 @@ export class LocationCacheService {
         })
         .where(eq(users.id, userId));
 
-      console.log(`[LocationCache] Updated current location for user ${userId}: ${locationName} (${coordinatesResult.coordinates!.lat}, ${coordinatesResult.coordinates!.lng})`);
+      logger.operational('[LocationCache] Updated current location', {
+        userId,
+        hasLocation: true,
+        hasCoordinates: Boolean(coordinatesResult.coordinates),
+      });
       return coordinatesResult;
     } catch (error) {
-      console.error(`[LocationCache] Error updating current location for user ${userId}:`, error);
+      logger.error('[LocationCache] Error updating current location', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+        userId,
+      });
       return { success: false, fromCache: coordinatesResult.fromCache, error: 'Failed to update user location' };
     }
   }
@@ -229,14 +254,20 @@ export class LocationCacheService {
         })
         .where(eq(users.id, userId));
 
-      console.log(`[LocationCache] Updated desired locations for user ${userId}: ${validLocations.length} valid locations`);
+      logger.operational('[LocationCache] Updated desired locations', {
+        userId,
+        validLocationCount: validLocations.length,
+      });
       
       return {
         success: true,
         results
       };
     } catch (error) {
-      console.error(`[LocationCache] Error updating desired locations for user ${userId}:`, error);
+      logger.error('[LocationCache] Error updating desired locations', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+        userId,
+      });
       return {
         success: false,
         results
@@ -275,7 +306,9 @@ export class LocationCacheService {
         newestEntry: stats[0]?.newestCreated || null
       };
     } catch (error) {
-      console.error('[LocationCache] Error getting cache statistics:', error);
+      logger.error('[LocationCache] Error getting cache statistics', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
       return {
         totalCachedLocations: 0,
         cacheHitRate: 0,
@@ -298,10 +331,12 @@ export class LocationCacheService {
         .where(sql`${locationCoordinates.lastUsed} < ${cutoffDate.toISOString()}`)
         .returning({ id: locationCoordinates.id });
 
-      console.log(`[LocationCache] Cleaned up ${deleted.length} old cache entries`);
+      logger.operational('[LocationCache] Cleaned up old cache entries', { count: deleted.length });
       return deleted.length;
     } catch (error) {
-      console.error('[LocationCache] Error cleaning up old entries:', error);
+      logger.error('[LocationCache] Error cleaning up old entries', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
       return 0;
     }
   }

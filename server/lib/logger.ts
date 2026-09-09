@@ -1,4 +1,4 @@
-import { sanitizeLogArgs } from '@shared/log-sanitizer';
+import { sanitizeLogArgs, sanitizeOperationalLogValue } from '@shared/log-sanitizer';
 
 const isDevelopment = process.env.NODE_ENV !== 'production';
 const consoleGuardKey = Symbol.for('referral.sanitized-console-guard');
@@ -38,5 +38,8 @@ export const logger = {
   },
   error: (...args: unknown[]) => {
     nativeConsole.error(...sanitizeLogArgs(args));
-  }
+  },
+  operational: (event: string, metadata: Record<string, unknown> = {}) => {
+    nativeConsole.info(event, sanitizeOperationalLogValue(metadata));
+  },
 };

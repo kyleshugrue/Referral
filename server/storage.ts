@@ -1,4 +1,4 @@
-import { users, connections, connectionRequests, messages, conversations, synergyMatches, notifications, userBlocks, matchGenerationJobs, matchGenerationDeadLetters, fcmTokens, callbackNotificationQueue, queuedPushNotifications, deliveryObligations, refreshTokens, refreshTokenReuseEvents, accountErasureJobs, type User, type Connection, type ConnectionRequest, type Message, type Conversation, type SynergyMatch, type InsertSynergyMatch, type Notification, type InsertNotification, type UserBlock, type MatchGenerationJob, type InsertMatchGenerationJob, type MatchGenerationDeadLetter, type InsertMatchGenerationDeadLetter, type CallbackNotification, type RefreshToken, type InsertRefreshToken, type InsertRefreshTokenReuseEvent, type InsertUser, type AccountErasureJob } from "@shared/schema";
+import { users, connections, connectionRequests, messages, conversations, synergyMatches, notifications, userBlocks, matchGenerationJobs, matchGenerationDeadLetters, fcmTokens, callbackNotificationQueue, queuedPushNotifications, deliveryObligations, refreshTokens, refreshTokenReuseEvents, accountErasureJobs, userProfileSnapshots, passwordResetTokens, type User, type Connection, type ConnectionRequest, type Message, type Conversation, type SynergyMatch, type InsertSynergyMatch, type Notification, type InsertNotification, type UserBlock, type MatchGenerationJob, type InsertMatchGenerationJob, type MatchGenerationDeadLetter, type InsertMatchGenerationDeadLetter, type CallbackNotification, type RefreshToken, type InsertRefreshToken, type InsertRefreshTokenReuseEvent, type InsertUser, type AccountErasureJob } from "@shared/schema";
 import { buildMatchGenerationIdempotencyKey, getMatchGenerationScope } from "@shared/match-generation-contract";
 import { db } from "./db";
 import { eq, or, and, not, inArray, desc, sql, asc, ilike, lte, lt, gt, isNull } from "drizzle-orm";
@@ -14,6 +14,7 @@ import {
   type DatabasePool,
 } from './lib/database-client';
 import { locationCacheService } from './services/location-cache';
+import { randomUUID } from 'node:crypto';
 import { broadcastMatchRefresh, broadcastMatchRefreshToUsers } from './websocket-utils';
 import { logger } from './lib/logger';
 import { parseServerEnvironment } from './lib/env';
@@ -21,7 +22,13 @@ import { isActiveAccount } from './lib/account-status';
 import { recordQueueEvent } from './lib/operational-metrics';
 import { discoverableUserCondition, matchableUserCondition } from './lib/discoverability-policy';
 import { hasRequiredFieldsForMatching } from './lib/profile-matching';
-import { DEFAULT_MESSAGE_PAGE_SIZE, MAX_MESSAGE_PAGE_SIZE, type MessageCursor } from './lib/message-pagination';
+import { DEFAULT_MESSAGE_PAGE_SIZE, MAX_MESSAGE_PAGE_SIZE, paginateMessages, type MessageCursor } from './lib/message-pagination';
+import {
+  ACCOUNT_ERASURE_LEASE_MS,
+  accountErasureRetryDelayMs,
+  type AccountErasureProviderStep,
+  type AccountErasureRetryClass,
+} from './lib/account-erasure-contract';
 import {
   type ConversationPageOptions,
   normalizeConversationPageOptions,
@@ -51,8 +58,15 @@ export interface IStorage {
   requestAccountErasure(id: number): Promise<AccountErasureJob>;
   destroyUserSessions(userId: number): Promise<void>;
   claimNextAccountErasureJob(): Promise<AccountErasureJob | undefined>;
-  completeAccountErasureJob(jobId: number, userId: number): Promise<void>;
-  failAccountErasureJob(jobId: number, errorCode: string, manualReview: boolean): Promise<void>;
+  recoverExpiredAccountErasureJobs(limit: number): Promise<number>;
+  markAccountErasureProviderStep(jobId: number, claimToken: string, step: AccountErasureProviderStep): Promise<boolean>;
+  completeAccountErasureJob(jobId: number, userId: number, claimToken: string): Promise<boolean>;
+  failAccountErasureJob(
+    jobId: number,
+    claimToken: string,
+    errorCode: string,
+    retryClass: AccountErasureRetryClass,
+  ): Promise<'retrying' | 'manual_review' | 'stale'>;
   createConnectionRequest(senderId: number, receiverId: number): Promise<ConnectionRequest>;
   getConnectionRequestById(requestId: number): Promise<ConnectionRequest | undefined>;
   getPendingRequestsReceived(userId: number): Promise<(ConnectionRequest & { sender: User })[]>;
@@ -94,6 +108,7 @@ export interface IStorage {
   ): Promise<{
     items: (Message & { sender: User, receiver: User })[];
     nextCursor?: string;
+    hasMore: boolean;
   }>;
   getConnectionBetweenUsers(userId: number, connectedUserId: number): Promise<Connection | undefined>;
   getOrCreateConversation(user1Id: number, user2Id: number): Promise<Conversation>;
@@ -185,8 +200,16 @@ export interface IStorage {
   getRefreshTokenByUserAndDevice(userId: number, deviceId: string): Promise<RefreshToken | null>;
   getRefreshTokensForUser(userId: number): Promise<Array<Pick<RefreshToken, 'id' | 'deviceId' | 'deviceInfo' | 'lastUsedAt' | 'expiresAt'>>>;
   deleteRefreshToken(tokenHash: string): Promise<void>;
+  revokeRefreshTokenSession(
+    tokenHash: string,
+    deviceId: string,
+  ): Promise<{ status: 'revoked' | 'not_found' | 'device_mismatch'; userId?: number; authSessionId?: string }>;
   deleteRefreshTokensByDevice(userId: number, deviceId: string): Promise<void>;
   deleteAllUserTokens(userId: number): Promise<void>;
+  revokeAuthSession(userId: number, authSessionId: string): Promise<void>;
+  isAccessTokenActive(userId: number, authSessionId: string, authEpoch: number): Promise<boolean>;
+  isAuthSessionActive(userId: number, authSessionId: string): Promise<boolean>;
+  isWebSessionActive(userId: number, sessionId: string): Promise<boolean>;
   updateRefreshTokenLastUsed(tokenHash: string): Promise<void>;
   cleanupExpiredTokens(): Promise<number>;
   logRefreshTokenReuse(reuseEvent: InsertRefreshTokenReuseEvent): Promise<void>;
@@ -971,7 +994,10 @@ export class DatabaseStorage implements IStorage {
               const newValue = finalData[field];
               const isDifferent = valuesAreDifferent(oldValue, newValue);
               if (isDifferent) {
-                logger.debug(`[updateUser] Background: Match-relevant field '${field}' changed from '${JSON.stringify(oldValue)}' to '${JSON.stringify(newValue)}'`);
+                logger.operational('[updateUser] Match-relevant profile field changed', {
+                  action: 'profile-field-changed',
+                  userId: id,
+                });
               }
               return isDifferent;
             }) : false;
@@ -1083,7 +1109,10 @@ export class DatabaseStorage implements IStorage {
         hasMinimumMatchData: false,
         deletionRequestedAt: user.deletionRequestedAt || now,
       }).where(eq(users.id, id));
-      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, id));
+      await tx.update(refreshTokens).set({ revokedAt: now }).where(eq(refreshTokens.userId, id));
+      await tx.update(users)
+        .set({ authEpoch: sql`${users.authEpoch} + 1` })
+        .where(eq(users.id, id));
       await tx.delete(fcmTokens).where(eq(fcmTokens.userId, id));
       const [existingJob] = await tx.select().from(accountErasureJobs)
         .where(eq(accountErasureJobs.userId, id))
@@ -1095,7 +1124,12 @@ export class DatabaseStorage implements IStorage {
         requestedAt: user.deletionRequestedAt || now,
       }).onConflictDoUpdate({
         target: accountErasureJobs.userId,
-        set: { status: 'pending', nextAttemptAt: now },
+        set: {
+          status: 'pending',
+          nextAttemptAt: now,
+          claimToken: null,
+          leaseExpiresAt: null,
+        },
       }).returning();
       if (!job) throw new Error('Unable to create account-erasure job');
       logger.info('[Storage] Account-erasure job requested', { jobId: job.id });
@@ -1132,27 +1166,206 @@ export class DatabaseStorage implements IStorage {
 
   async claimNextAccountErasureJob(): Promise<AccountErasureJob | undefined> {
     return db.transaction(async (tx) => {
+      const now = new Date().toISOString();
+      await tx.update(accountErasureJobs).set({
+        status: sql`CASE WHEN ${accountErasureJobs.attemptCount} >= ${accountErasureJobs.maxAttempts} THEN 'manual_review' ELSE 'retrying' END`,
+        nextAttemptAt: now,
+        lastErrorCode: 'LeaseExpired',
+        lastErrorClass: 'transient',
+        lastErrorAt: now,
+        claimToken: null,
+        leaseExpiresAt: null,
+      }).where(and(
+        eq(accountErasureJobs.status, 'processing'),
+        lte(accountErasureJobs.leaseExpiresAt, sql`now()`),
+      ));
+
       const [job] = await tx.select().from(accountErasureJobs)
         .where(and(
           inArray(accountErasureJobs.status, ['pending', 'retrying']),
           lte(accountErasureJobs.nextAttemptAt, sql`now()`),
+          lt(accountErasureJobs.attemptCount, accountErasureJobs.maxAttempts),
         ))
         .orderBy(asc(accountErasureJobs.nextAttemptAt), asc(accountErasureJobs.id))
         .limit(1)
         .for('update', { skipLocked: true });
       if (!job) return undefined;
+      const claimToken = randomUUID();
+      const leaseExpiresAt = new Date(Date.now() + ACCOUNT_ERASURE_LEASE_MS).toISOString();
       const [claimed] = await tx.update(accountErasureJobs).set({
         status: 'processing',
         attemptCount: sql`${accountErasureJobs.attemptCount} + 1`,
-        startedAt: new Date().toISOString(),
-      }).where(and(eq(accountErasureJobs.id, job.id), inArray(accountErasureJobs.status, ['pending', 'retrying']))).returning();
+        startedAt: now,
+        claimToken,
+        leaseExpiresAt,
+      }).where(and(
+        eq(accountErasureJobs.id, job.id),
+        inArray(accountErasureJobs.status, ['pending', 'retrying']),
+        lt(accountErasureJobs.attemptCount, accountErasureJobs.maxAttempts),
+      )).returning();
       return claimed;
     });
   }
 
-  async completeAccountErasureJob(jobId: number, userId: number): Promise<void> {
-    await db.transaction(async (tx) => {
+  async recoverExpiredAccountErasureJobs(limit: number): Promise<number> {
+    if (limit <= 0) return 0;
+    return db.transaction(async (tx) => {
+      const expiredJobs = await tx.select({
+        id: accountErasureJobs.id,
+        attemptCount: accountErasureJobs.attemptCount,
+        maxAttempts: accountErasureJobs.maxAttempts,
+      }).from(accountErasureJobs)
+        .where(and(
+          eq(accountErasureJobs.status, 'processing'),
+          lte(accountErasureJobs.leaseExpiresAt, sql`now()`),
+        ))
+        .orderBy(asc(accountErasureJobs.leaseExpiresAt), asc(accountErasureJobs.id))
+        .limit(limit)
+        .for('update', { skipLocked: true });
       const now = new Date().toISOString();
+      for (const job of expiredJobs) {
+        await tx.update(accountErasureJobs).set({
+          status: job.attemptCount >= job.maxAttempts ? 'manual_review' : 'retrying',
+          nextAttemptAt: now,
+          lastErrorCode: 'LeaseExpired',
+          lastErrorClass: 'transient',
+          lastErrorAt: now,
+          claimToken: null,
+          leaseExpiresAt: null,
+        }).where(and(
+          eq(accountErasureJobs.id, job.id),
+          eq(accountErasureJobs.status, 'processing'),
+        ));
+      }
+      return expiredJobs.length;
+    });
+  }
+
+  async markAccountErasureProviderStep(
+    jobId: number,
+    claimToken: string,
+    step: AccountErasureProviderStep,
+  ): Promise<boolean> {
+    const now = new Date().toISOString();
+    const updates = step === 'firebase'
+      ? { firebaseDeletedAt: now }
+      : { mediaDeletedAt: now };
+    const [updated] = await db.update(accountErasureJobs).set(updates).where(and(
+      eq(accountErasureJobs.id, jobId),
+      eq(accountErasureJobs.status, 'processing'),
+      eq(accountErasureJobs.claimToken, claimToken),
+    )).returning({ id: accountErasureJobs.id });
+    return Boolean(updated);
+  }
+
+  async completeAccountErasureJob(jobId: number, userId: number, claimToken: string): Promise<boolean> {
+    return db.transaction(async (tx) => {
+      const now = new Date().toISOString();
+      const [claimed] = await tx.select({
+        id: accountErasureJobs.id,
+        firebaseDeletedAt: accountErasureJobs.firebaseDeletedAt,
+        mediaDeletedAt: accountErasureJobs.mediaDeletedAt,
+      })
+        .from(accountErasureJobs)
+        .where(and(
+          eq(accountErasureJobs.id, jobId),
+          eq(accountErasureJobs.userId, userId),
+          eq(accountErasureJobs.status, 'processing'),
+          eq(accountErasureJobs.claimToken, claimToken),
+        ))
+        .limit(1)
+        .for('update');
+      if (!claimed) return false;
+
+      // Provider checkpoints are part of the completion contract. A database
+      // write must never report erasure complete while identity/media cleanup
+      // is still unavailable or only partially attempted.
+      if (!claimed.firebaseDeletedAt || !claimed.mediaDeletedAt) {
+        throw new Error('Account-erasure provider cleanup is incomplete');
+      }
+
+      const [user] = await tx.select({
+        email: users.email,
+        photo: users.photo,
+        resumeUrl: users.resumeUrl,
+        resumePreviewUrls: users.resumePreviewUrls,
+      }).from(users).where(eq(users.id, userId)).limit(1).for('update');
+      if (!user) {
+        throw new Error('Account-erasure owner record is unavailable');
+      }
+
+      // Erase rows that contain either a direct account reference or derived
+      // content generated from the account. The erasure journal is deliberately
+      // retained as a minimal operational/legal record without payloads.
+      const ownedMessageRows = await tx.select({ id: messages.id }).from(messages).where(or(
+        eq(messages.senderId, userId),
+        eq(messages.receiverId, userId),
+      ));
+      const ownedRequestRows = await tx.select({ id: connectionRequests.id }).from(connectionRequests).where(or(
+        eq(connectionRequests.senderId, userId),
+        eq(connectionRequests.receiverId, userId),
+      ));
+      const ownedConnectionRows = await tx.select({ id: connections.id }).from(connections).where(or(
+        eq(connections.user1Id, userId),
+        eq(connections.user2Id, userId),
+      ));
+      const relatedNotificationConditions = [
+        eq(notifications.userId, userId),
+        ...(ownedMessageRows.length > 0
+          ? [and(eq(notifications.type, 'message'), inArray(notifications.relatedId, ownedMessageRows.map(({ id }) => id)))]
+          : []),
+        ...(ownedRequestRows.length > 0
+          ? [and(eq(notifications.type, 'connection_request'), inArray(notifications.relatedId, ownedRequestRows.map(({ id }) => id)))]
+          : []),
+        ...(ownedConnectionRows.length > 0
+          ? [and(eq(notifications.type, 'new_connection'), inArray(notifications.relatedId, ownedConnectionRows.map(({ id }) => id)))]
+          : []),
+      ];
+      await tx.delete(messages).where(or(
+        eq(messages.senderId, userId),
+        eq(messages.receiverId, userId),
+      ));
+      await tx.delete(conversations).where(or(
+        eq(conversations.user1Id, userId),
+        eq(conversations.user2Id, userId),
+      ));
+      await tx.delete(connections).where(or(
+        eq(connections.user1Id, userId),
+        eq(connections.user2Id, userId),
+      ));
+      await tx.delete(connectionRequests).where(or(
+        eq(connectionRequests.senderId, userId),
+        eq(connectionRequests.receiverId, userId),
+      ));
+      await tx.delete(userBlocks).where(or(
+        eq(userBlocks.userId, userId),
+        eq(userBlocks.blockedUserId, userId),
+      ));
+      await tx.delete(notifications).where(or(...relatedNotificationConditions));
+      await tx.delete(synergyMatches).where(or(
+        eq(synergyMatches.userId, userId),
+        eq(synergyMatches.matchedUserId, userId),
+      ));
+      await tx.delete(matchGenerationJobs).where(or(
+        eq(matchGenerationJobs.userId, userId),
+        eq(matchGenerationJobs.targetUserId, userId),
+      ));
+      await tx.delete(matchGenerationDeadLetters).where(or(
+        eq(matchGenerationDeadLetters.userId, userId),
+        sql`${matchGenerationDeadLetters.metadata} ~ ${`"targetUserId"\\s*:\\s*${userId}(\\D|$)`}`,
+      ));
+      await tx.delete(userProfileSnapshots).where(eq(userProfileSnapshots.userId, userId));
+      await tx.delete(fcmTokens).where(eq(fcmTokens.userId, userId));
+      await tx.delete(queuedPushNotifications).where(eq(queuedPushNotifications.userId, userId));
+      await tx.delete(callbackNotificationQueue).where(eq(callbackNotificationQueue.userId, userId));
+      await tx.delete(deliveryObligations).where(eq(deliveryObligations.userId, userId));
+      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
+      await tx.delete(refreshTokenReuseEvents).where(eq(refreshTokenReuseEvents.userId, userId));
+      await tx.delete(passwordResetTokens).where(eq(passwordResetTokens.email, user.email));
+
+      // Keep only an inert tombstone so old identifiers cannot be reused and
+      // authorization checks remain fail-closed. All user-authored/profile
+      // fields and provider identity are removed from the retained row.
       await tx.update(users).set({
         accountStatus: 'erased',
         email: `erased-${userId}@invalid.local`,
@@ -1180,17 +1393,52 @@ export class DatabaseStorage implements IStorage {
         deletionCompletedAt: now,
       }).where(eq(users.id, userId));
       await tx.update(accountErasureJobs).set({ status: 'completed', completedAt: now, lastErrorCode: null })
-        .where(eq(accountErasureJobs.id, jobId));
+        .where(and(
+          eq(accountErasureJobs.id, jobId),
+          eq(accountErasureJobs.status, 'processing'),
+          eq(accountErasureJobs.claimToken, claimToken),
+        ));
+      return true;
     });
   }
 
-  async failAccountErasureJob(jobId: number, errorCode: string, manualReview: boolean): Promise<void> {
-    const nextAttemptAt = new Date(Date.now() + 5 * 60_000).toISOString();
-    await db.update(accountErasureJobs).set({
-      status: manualReview ? 'manual_review' : 'retrying',
-      nextAttemptAt,
-      lastErrorCode: errorCode.slice(0, 120),
-    }).where(eq(accountErasureJobs.id, jobId));
+  async failAccountErasureJob(
+    jobId: number,
+    claimToken: string,
+    errorCode: string,
+    retryClass: AccountErasureRetryClass,
+  ): Promise<'retrying' | 'manual_review' | 'stale'> {
+    return db.transaction(async (tx) => {
+      const [job] = await tx.select({
+        attemptCount: accountErasureJobs.attemptCount,
+        maxAttempts: accountErasureJobs.maxAttempts,
+      }).from(accountErasureJobs).where(and(
+        eq(accountErasureJobs.id, jobId),
+        eq(accountErasureJobs.status, 'processing'),
+        eq(accountErasureJobs.claimToken, claimToken),
+      )).limit(1).for('update');
+      if (!job) return 'stale';
+
+      const manualReview = retryClass === 'manual_review' || job.attemptCount >= job.maxAttempts;
+      const status = manualReview ? 'manual_review' : 'retrying';
+      const now = new Date().toISOString();
+      await tx.update(accountErasureJobs).set({
+        status,
+        nextAttemptAt: manualReview
+          ? now
+          : new Date(Date.now() + accountErasureRetryDelayMs(job.attemptCount)).toISOString(),
+        lastErrorCode: errorCode.slice(0, 120),
+        lastErrorClass: retryClass,
+        lastErrorAt: now,
+        claimToken: null,
+        leaseExpiresAt: null,
+      }).where(and(
+        eq(accountErasureJobs.id, jobId),
+        eq(accountErasureJobs.status, 'processing'),
+        eq(accountErasureJobs.claimToken, claimToken),
+      ));
+      return status;
+    });
   }
 
   async createConnectionRequest(senderId: number, receiverId: number): Promise<ConnectionRequest> {
@@ -1760,6 +2008,7 @@ export class DatabaseStorage implements IStorage {
   ): Promise<{
     items: (Message & { sender: User, receiver: User })[];
     nextCursor?: string;
+    hasMore: boolean;
   }> {
     try {
       // Input validation
@@ -1792,8 +2041,8 @@ export class DatabaseStorage implements IStorage {
       const cursor = options.cursor;
       const cursorCondition = cursor
         ? or(
-            gt(messages.createdAt, cursor.createdAt),
-            and(eq(messages.createdAt, cursor.createdAt), gt(messages.id, cursor.id)),
+            lt(messages.createdAt, cursor.createdAt),
+            and(eq(messages.createdAt, cursor.createdAt), lt(messages.id, cursor.id)),
           )
         : undefined;
 
@@ -1803,23 +2052,22 @@ export class DatabaseStorage implements IStorage {
         .where(cursorCondition
           ? and(eq(messages.conversationId, conversation.id), cursorCondition)
           : eq(messages.conversationId, conversation.id))
-        .orderBy(asc(messages.createdAt), asc(messages.id))
+        .orderBy(desc(messages.createdAt), desc(messages.id))
         .limit(limit + 1);
 
       // If no messages, return empty array
       if (messagesList.length === 0) {
         logger.debug(`[Storage] No messages found in conversation ${conversation.id}`);
-        return { items: [] };
+        return { items: [], hasMore: false };
       }
 
       logger.debug(`[Storage] Found ${messagesList.length} messages in conversation ${conversation.id}`);
-      const hasMore = messagesList.length > limit;
-      const pageMessages = hasMore ? messagesList.slice(0, limit) : messagesList;
-      const userIds = [...new Set(pageMessages.flatMap((message) => [message.senderId, message.receiverId]))];
+      const page = paginateMessages(messagesList, limit);
+      const userIds = [...new Set(page.items.flatMap((message) => [message.senderId, message.receiverId]))];
       const participantRows = await db.select().from(users).where(inArray(users.id, userIds));
       const participants = new Map(participantRows.map((participant) => [participant.id, participant]));
 
-      const messagesWithUsers = pageMessages.map((message) => ({
+      const messagesWithUsers = page.items.map((message) => ({
         ...message,
         sender: participants.get(message.senderId)!,
         receiver: participants.get(message.receiverId)!,
@@ -1827,10 +2075,8 @@ export class DatabaseStorage implements IStorage {
 
       return {
         items: messagesWithUsers,
-        ...(hasMore ? { nextCursor: Buffer.from(JSON.stringify({
-          id: pageMessages[pageMessages.length - 1].id,
-          createdAt: pageMessages[pageMessages.length - 1].createdAt,
-        }), 'utf8').toString('base64url') } : {}),
+        hasMore: page.hasMore,
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
       };
 
     } catch (error) {
@@ -2328,6 +2574,17 @@ export class DatabaseStorage implements IStorage {
     match: InsertSynergyMatch & { generationJobKey: string }
   ): Promise<SynergyMatch | undefined> {
     const { userId, matchedUserId, generationJobKey, userProfileVersion, matchedUserProfileVersion } = match;
+    if (
+      userProfileVersion == null ||
+      matchedUserProfileVersion == null ||
+      !await this.isMatchGenerationEligibleForJob(userId, matchedUserId, {
+        userProfileVersion,
+        targetUserProfileVersion: matchedUserProfileVersion,
+      })
+    ) {
+      return undefined;
+    }
+
     const [created] = await db
       .insert(synergyMatches)
       .values(match)
@@ -2354,6 +2611,30 @@ export class DatabaseStorage implements IStorage {
           OR ${synergyMatches.userProfileVersion} IS DISTINCT FROM ${userProfileVersion ?? null}
           OR ${synergyMatches.matchedUserProfileVersion} IS DISTINCT FROM ${matchedUserProfileVersion ?? null}
         )`
+        ,
+        sql`EXISTS (
+          SELECT 1
+          FROM users AS source_user
+          JOIN users AS target_user ON target_user.id = ${matchedUserId}
+          WHERE source_user.id = ${userId}
+            AND source_user.profile_version = ${userProfileVersion}
+            AND target_user.profile_version = ${matchedUserProfileVersion}
+            AND source_user.account_status = 'active'
+            AND source_user.email_verified = true
+            AND source_user.registration_completed = true
+            AND source_user.has_minimum_match_data = true
+            AND target_user.account_status = 'active'
+            AND target_user.profile_visible = true
+            AND target_user.email_verified = true
+            AND target_user.registration_completed = true
+            AND target_user.has_minimum_match_data = true
+            AND NOT EXISTS (
+              SELECT 1
+              FROM user_blocks
+              WHERE (user_id = ${userId} AND blocked_user_id = ${matchedUserId})
+                 OR (user_id = ${matchedUserId} AND blocked_user_id = ${userId})
+            )
+        )`
       ))
       .returning();
 
@@ -2376,6 +2657,30 @@ export class DatabaseStorage implements IStorage {
     if (expectedVersions?.targetUserProfileVersion !== undefined) {
       predicates.push(eq(synergyMatches.matchedUserProfileVersion, expectedVersions.targetUserProfileVersion));
     }
+    predicates.push(eq(synergyMatches.generationStatus, 'GENERATING'));
+    predicates.push(sql`EXISTS (
+      SELECT 1
+      FROM users AS source_user
+      JOIN users AS target_user ON target_user.id = ${synergyMatches.matchedUserId}
+      WHERE source_user.id = ${synergyMatches.userId}
+        AND source_user.account_status = 'active'
+        AND source_user.email_verified = true
+        AND source_user.registration_completed = true
+        AND source_user.has_minimum_match_data = true
+        AND target_user.account_status = 'active'
+        AND target_user.profile_visible = true
+        AND target_user.email_verified = true
+        AND target_user.registration_completed = true
+        AND target_user.has_minimum_match_data = true
+        AND source_user.profile_version = ${synergyMatches.userProfileVersion}
+        AND target_user.profile_version = ${synergyMatches.matchedUserProfileVersion}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM user_blocks
+          WHERE (user_id = ${synergyMatches.userId} AND blocked_user_id = ${synergyMatches.matchedUserId})
+             OR (user_id = ${synergyMatches.matchedUserId} AND blocked_user_id = ${synergyMatches.userId})
+        )
+    )`);
     const updated = await db
       .update(synergyMatches)
       .set({
@@ -2386,6 +2691,44 @@ export class DatabaseStorage implements IStorage {
       .returning({ id: synergyMatches.id });
 
     return updated.length > 0;
+  }
+
+  private async isMatchGenerationEligibleForJob(
+    userId: number,
+    targetUserId: number,
+    expectedVersions: { userProfileVersion: number; targetUserProfileVersion: number },
+  ): Promise<boolean> {
+    try {
+      const result = await pool.query(
+        `SELECT 1
+           FROM users AS source_user
+           JOIN users AS target_user ON target_user.id = $2
+          WHERE source_user.id = $1
+            AND source_user.profile_version = $3
+            AND target_user.profile_version = $4
+            AND source_user.account_status = 'active'
+            AND source_user.email_verified = true
+            AND source_user.registration_completed = true
+            AND source_user.has_minimum_match_data = true
+            AND target_user.account_status = 'active'
+            AND target_user.profile_visible = true
+            AND target_user.email_verified = true
+            AND target_user.registration_completed = true
+            AND target_user.has_minimum_match_data = true
+            AND NOT EXISTS (
+              SELECT 1
+                FROM user_blocks
+               WHERE (user_id = $1 AND blocked_user_id = $2)
+                  OR (user_id = $2 AND blocked_user_id = $1)
+            )
+          LIMIT 1`,
+        [userId, targetUserId, expectedVersions.userProfileVersion, expectedVersions.targetUserProfileVersion],
+      );
+      return result.rows.length > 0;
+    } catch (error) {
+      logger.error('[isMatchGenerationEligibleForJob] Live fence query failed:', error);
+      return false;
+    }
   }
 
   async clearSynergyMatchesForUser(userId: number): Promise<void> {
@@ -3519,15 +3862,34 @@ export class DatabaseStorage implements IStorage {
   async createMatchGenerationJob(job: InsertMatchGenerationJob): Promise<MatchGenerationJob> {
     try {
       logger.debug(`[createMatchGenerationJob] Creating job for user ${job.userId}: ${job.jobType}`);
-      
-      const [newJob] = await db
-        .insert(matchGenerationJobs)
-        .values(job)
-        .onConflictDoNothing({ target: matchGenerationJobs.idempotencyKey })
-        .returning();
+      const newJob = await db.transaction(async (tx) => {
+        const [owner] = await tx.select({ accountStatus: users.accountStatus })
+          .from(users)
+          .where(eq(users.id, job.userId))
+          .limit(1)
+          .for('update');
+        if (!isActiveAccount(owner)) {
+          throw new Error(`Cannot queue ${job.jobType}: user ${job.userId} is not active`);
+        }
+        if (job.targetUserId != null) {
+          const [target] = await tx.select({ accountStatus: users.accountStatus })
+            .from(users)
+            .where(eq(users.id, job.targetUserId))
+            .limit(1)
+            .for('update');
+          if (!isActiveAccount(target)) {
+            throw new Error(`Cannot queue ${job.jobType}: target user ${job.targetUserId} is not active`);
+          }
+        }
 
-      if (!newJob) {
-        const [existingJob] = await db
+        const [created] = await tx
+          .insert(matchGenerationJobs)
+          .values(job)
+          .onConflictDoNothing({ target: matchGenerationJobs.idempotencyKey })
+          .returning();
+        if (created) return created;
+
+        const [existingJob] = await tx
           .select()
           .from(matchGenerationJobs)
           .where(eq(matchGenerationJobs.idempotencyKey, job.idempotencyKey));
@@ -3536,7 +3898,7 @@ export class DatabaseStorage implements IStorage {
         }
         logger.debug(`[createMatchGenerationJob] Reused existing job ${existingJob.id}`);
         return existingJob;
-      }
+      });
       
       // Emit PostgreSQL NOTIFY to wake worker instantly (<1ms latency)
       try {
@@ -4149,10 +4511,16 @@ export class DatabaseStorage implements IStorage {
     try {
       logger.debug(`[Queue Storage] Enqueueing push notification for user ${userId} with priority ${priority}`);
       
-      await db.execute(sql`
+      const result = await db.execute(sql`
         INSERT INTO queued_push_notifications (user_id, payload, priority, expires_at)
-        VALUES (${userId}, ${payload}, ${priority}, ${expiresAt})
+        SELECT ${userId}, ${payload}, ${priority}, ${expiresAt}
+        FROM users
+        WHERE id = ${userId}
+          AND (account_status IS NULL OR account_status = 'active')
       `);
+      if (result.rowCount !== 1) {
+        throw new Error(`Cannot enqueue push notification for inactive or missing user ${userId}`);
+      }
       
       logger.debug(`[Queue Storage] Successfully enqueued push notification for user ${userId}`);
     } catch (error) {
@@ -4447,20 +4815,29 @@ export class DatabaseStorage implements IStorage {
     if (payload.length > 32_768) {
       throw new Error('Callback notification payload is too large');
     }
-    const values = {
-      userId,
-      notificationType,
-      payload,
-      priority: Math.max(1, Math.min(10, Math.floor(priority))),
-      expiresAt,
-      status: 'pending' as const,
-      ...(dedupeKey ? { dedupeKey } : {}),
-    };
-    const [notification] = await db
-      .insert(callbackNotificationQueue)
-      .values(values)
-      .onConflictDoNothing()
-      .returning();
+    const [notification] = await db.transaction(async (tx) => {
+      const [recipient] = await tx.select({ accountStatus: users.accountStatus })
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1)
+        .for('update');
+      if (!isActiveAccount(recipient)) {
+        throw new Error(`Cannot enqueue callback notification for inactive or missing user ${userId}`);
+      }
+      return tx
+        .insert(callbackNotificationQueue)
+        .values({
+          userId,
+          notificationType,
+          payload,
+          priority: Math.max(1, Math.min(10, Math.floor(priority))),
+          expiresAt,
+          status: 'pending' as const,
+          ...(dedupeKey ? { dedupeKey } : {}),
+        })
+        .onConflictDoNothing()
+        .returning();
+    });
     if (!notification && dedupeKey) {
       const [existing] = await db
         .select()
@@ -4620,7 +4997,11 @@ export class DatabaseStorage implements IStorage {
     
     const [token] = await db
       .insert(refreshTokens)
-      .values(refreshTokenData)
+      .values({
+        ...refreshTokenData,
+        authSessionId: refreshTokenData.authSessionId ?? randomUUID(),
+        revokedAt: null,
+      })
       .returning();
     
     logger.debug('[Storage] Refresh token created with id:', token.id);
@@ -4646,7 +5027,7 @@ export class DatabaseStorage implements IStorage {
         .where(eq(refreshTokens.tokenHash, tokenHash))
         .for('update');
 
-      if (!token) return { status: 'not_found' as const };
+      if (!token || token.revokedAt) return { status: 'not_found' as const };
       if (new Date(token.expiresAt).getTime() <= Date.now()) {
         return { status: 'expired' as const, userId: token.userId };
       }
@@ -4676,7 +5057,12 @@ export class DatabaseStorage implements IStorage {
 
       const [created] = await tx
         .insert(refreshTokens)
-        .values({ ...successor, userId: token.userId })
+        .values({
+          ...successor,
+          userId: token.userId,
+          authSessionId: token.authSessionId,
+          revokedAt: null,
+        })
         .returning();
 
       return { status: 'rotated' as const, token: created, user };
@@ -4733,7 +5119,11 @@ export class DatabaseStorage implements IStorage {
         expiresAt: refreshTokens.expiresAt
       })
       .from(refreshTokens)
-      .where(eq(refreshTokens.userId, userId))
+      .where(and(
+        eq(refreshTokens.userId, userId),
+        isNull(refreshTokens.revokedAt),
+        gt(refreshTokens.expiresAt, sql`now()`),
+      ))
       .orderBy(desc(refreshTokens.lastUsedAt));
     
     logger.debug('[Storage] Found', tokens.length, 'active sessions for user:', userId);
@@ -4744,33 +5134,122 @@ export class DatabaseStorage implements IStorage {
     logger.debug('[Storage] Deleting refresh token by hash');
     
     await db
-      .delete(refreshTokens)
+      .update(refreshTokens)
+      .set({ revokedAt: new Date().toISOString() })
       .where(eq(refreshTokens.tokenHash, tokenHash));
     
     logger.debug('[Storage] Refresh token deleted');
+  }
+
+  async revokeRefreshTokenSession(
+    tokenHash: string,
+    deviceId: string,
+  ): Promise<{ status: 'revoked' | 'not_found' | 'device_mismatch'; userId?: number; authSessionId?: string }> {
+    return db.transaction(async (tx) => {
+      const [token] = await tx.select({
+        userId: refreshTokens.userId,
+        deviceId: refreshTokens.deviceId,
+        authSessionId: refreshTokens.authSessionId,
+        revokedAt: refreshTokens.revokedAt,
+      }).from(refreshTokens).where(eq(refreshTokens.tokenHash, tokenHash)).for('update');
+      if (!token || token.revokedAt) return { status: 'not_found' as const };
+      if (token.deviceId !== deviceId) return { status: 'device_mismatch' as const };
+      await tx.update(refreshTokens).set({ revokedAt: new Date().toISOString() }).where(and(
+        eq(refreshTokens.userId, token.userId),
+        eq(refreshTokens.authSessionId, token.authSessionId),
+      ));
+      return {
+        status: 'revoked' as const,
+        userId: token.userId,
+        authSessionId: token.authSessionId,
+      };
+    });
   }
 
   async deleteRefreshTokensByDevice(userId: number, deviceId: string): Promise<void> {
     logger.debug('[Storage] Deleting all refresh tokens for user:', userId, 'device:', deviceId);
     
     await db
-      .delete(refreshTokens)
+      .update(refreshTokens)
+      .set({ revokedAt: new Date().toISOString() })
       .where(and(
         eq(refreshTokens.userId, userId),
-        eq(refreshTokens.deviceId, deviceId)
+        eq(refreshTokens.deviceId, deviceId),
+        isNull(refreshTokens.revokedAt),
       ));
     
     logger.debug('[Storage] Deleted tokens for device');
   }
 
   async deleteAllUserTokens(userId: number): Promise<void> {
-    logger.debug('[Storage] Deleting all refresh tokens for user:', userId);
+    logger.debug('[Storage] Revoking all authorization sessions for user:', userId);
+    await db.transaction(async (tx) => {
+      const now = new Date().toISOString();
+      await tx.update(refreshTokens)
+        .set({ revokedAt: now })
+        .where(and(eq(refreshTokens.userId, userId), isNull(refreshTokens.revokedAt)));
+      await tx.update(users)
+        .set({ authEpoch: sql`${users.authEpoch} + 1` })
+        .where(eq(users.id, userId));
+    });
     
-    await db
-      .delete(refreshTokens)
-      .where(eq(refreshTokens.userId, userId));
-    
-    logger.debug('[Storage] All user tokens deleted');
+    logger.debug('[Storage] All user authorization sessions revoked');
+  }
+
+  async revokeAuthSession(userId: number, authSessionId: string): Promise<void> {
+    await db.update(refreshTokens)
+      .set({ revokedAt: new Date().toISOString() })
+      .where(and(
+        eq(refreshTokens.userId, userId),
+        eq(refreshTokens.authSessionId, authSessionId),
+        isNull(refreshTokens.revokedAt),
+      ));
+  }
+
+  async isAccessTokenActive(userId: number, authSessionId: string, authEpoch: number): Promise<boolean> {
+    const [user] = await db.select({
+      accountStatus: users.accountStatus,
+      authEpoch: users.authEpoch,
+    }).from(users).where(eq(users.id, userId)).limit(1);
+    if (!user || !isActiveAccount(user) || user.authEpoch !== authEpoch) return false;
+    return this.isAuthSessionActive(userId, authSessionId);
+  }
+
+  async isAuthSessionActive(userId: number, authSessionId: string): Promise<boolean> {
+    const [user] = await db.select({
+      accountStatus: users.accountStatus,
+    }).from(users).where(eq(users.id, userId)).limit(1);
+    if (!isActiveAccount(user)) return false;
+    const [session] = await db.select({ id: refreshTokens.id })
+      .from(refreshTokens)
+      .where(and(
+        eq(refreshTokens.userId, userId),
+        eq(refreshTokens.authSessionId, authSessionId),
+        isNull(refreshTokens.revokedAt),
+        gt(refreshTokens.expiresAt, sql`now()`),
+      ))
+      .limit(1);
+    return Boolean(session);
+  }
+
+  async isWebSessionActive(userId: number, sessionId: string): Promise<boolean> {
+    const result = await queryDatabase(
+      pool,
+      `SELECT 1
+       FROM "session" s
+       JOIN users u ON u.id = $2::integer
+       WHERE s.sid = $1
+         AND s.expire > NOW()
+         AND u.account_status = 'active'
+         AND (
+           s.sess->'passport'->>'user' = $2
+           OR s.sess->>'userId' = $2
+         )
+         AND s.sess->>'authEpoch' = u.auth_epoch::text
+       LIMIT 1`,
+      [sessionId, String(userId)],
+    );
+    return result.rows.length > 0;
   }
 
   async updateRefreshTokenLastUsed(tokenHash: string): Promise<void> {

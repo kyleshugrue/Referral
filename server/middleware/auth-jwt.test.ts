@@ -3,6 +3,7 @@ import { describe, expect, test, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   verifyAccessToken: vi.fn(),
   getUser: vi.fn(),
+  isAccessTokenActive: vi.fn(async () => true),
   next: vi.fn(),
   logger: {
     debug: vi.fn(),
@@ -13,7 +14,12 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../lib/jwt-service", () => ({ verifyAccessToken: mocks.verifyAccessToken }));
-vi.mock("../storage", () => ({ storage: { getUser: mocks.getUser } }));
+vi.mock("../storage", () => ({
+  storage: {
+    getUser: mocks.getUser,
+    isAccessTokenActive: mocks.isAccessTokenActive,
+  },
+}));
 vi.mock("../lib/logger", () => ({ logger: mocks.logger }));
 vi.mock("../lib/security-logger", () => ({
   logSecurityEvent: vi.fn(),
@@ -29,7 +35,7 @@ const makeRequest = (authorization?: string) => ({
   headers: authorization ? { authorization } : {},
   path: "/api/user",
   method: "GET",
-  session: { id: "session-id" },
+  session: { id: "session-id", authEpoch: 0 },
   user: { id: 2 },
   isAuthenticated: () => true,
 });
@@ -54,7 +60,7 @@ describe("requireAuthJWT authentication precedence", () => {
 
   test("uses the session when no bearer credential is supplied", async () => {
     mocks.next.mockReset();
-    mocks.getUser.mockResolvedValue({ id: 2, accountStatus: "active" });
+    mocks.getUser.mockResolvedValue({ id: 2, accountStatus: "active", authEpoch: 0 });
     const request = makeRequest();
     const response = makeResponse();
 
@@ -63,13 +69,48 @@ describe("requireAuthJWT authentication precedence", () => {
     expect(mocks.next).toHaveBeenCalledOnce();
     expect(response.status).not.toHaveBeenCalled();
   });
+
+  test("rejects an access token after its authorization family is revoked", async () => {
+    mocks.next.mockReset();
+    mocks.verifyAccessToken.mockReturnValue({
+      userId: 7,
+      authSessionId: "device-session-7",
+      authEpoch: 0,
+    });
+    mocks.getUser.mockResolvedValue({ id: 7, accountStatus: "active", authEpoch: 0 });
+    mocks.isAccessTokenActive.mockResolvedValue(false);
+    const response = makeResponse();
+
+    await requireAuthJWT(makeRequest("Bearer revoked-token") as never, response as never, mocks.next);
+
+    expect(response.status).toHaveBeenCalledWith(401);
+    expect(mocks.next).not.toHaveBeenCalled();
+  });
+
+  test("fails closed when authorization-state lookup is unavailable", async () => {
+    mocks.next.mockReset();
+    mocks.verifyAccessToken.mockReturnValue({
+      userId: 7,
+      authSessionId: "device-session-7",
+      authEpoch: 0,
+    });
+    mocks.getUser.mockResolvedValue({ id: 7, accountStatus: "active", authEpoch: 0 });
+    mocks.isAccessTokenActive.mockRejectedValue(new Error("database unavailable"));
+    const response = makeResponse();
+
+    await requireAuthJWT(makeRequest("Bearer unavailable-token") as never, response as never, mocks.next);
+
+    expect(response.status).toHaveBeenCalledWith(401);
+    expect(mocks.next).not.toHaveBeenCalled();
+  });
 });
 
 describe("upload authentication compatibility", () => {
   test("attaches an application JWT user for upload routes", async () => {
     mocks.next.mockReset();
+    mocks.isAccessTokenActive.mockResolvedValue(true);
     mocks.verifyAccessToken.mockReturnValue({ userId: 7 });
-    mocks.getUser.mockResolvedValue({ id: 7 });
+    mocks.getUser.mockResolvedValue({ id: 7, accountStatus: "active" });
     const request = makeRequest("Bearer app-token") as unknown as {
       user?: { id: number };
       authMethod?: string;
@@ -79,7 +120,7 @@ describe("upload authentication compatibility", () => {
 
     await authenticateUploadPrincipal(request as never, response as never, mocks.next);
 
-    expect(request.user).toEqual({ id: 7 });
+    expect(request.user).toMatchObject({ id: 7, accountStatus: "active" });
     expect(request.authMethod).toBe("jwt");
     expect(mocks.next).toHaveBeenCalledOnce();
   });

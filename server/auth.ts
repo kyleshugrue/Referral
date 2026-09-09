@@ -20,6 +20,8 @@ import { toSelfUserDto } from './lib/privacy-dto';
 import { requireTrustedOriginForSessionMutation } from './lib/http-security';
 import { parseServerEnvironment } from './lib/env';
 import { isActiveAccount } from './lib/account-status';
+import { closeUserConnections } from './websocket-utils';
+import { requireAuthJWT } from './middleware/auth-jwt';
 
 // Export session middleware for WebSocket authentication
 export let sessionMiddleware: ReturnType<typeof session>;
@@ -193,7 +195,23 @@ export function setupAuth(app: Express) {
   // The local strategy was removed during Firebase migration (Oct 21, 2025)
   // All login functionality now uses Firebase Authentication via /api/firebase-auth
 
-  app.post("/api/logout", requireTrustedOriginForSessionMutation, (req, res, next) => {
+  app.post("/api/logout", requireAuthJWT, async (req, res, next) => {
+    try {
+      const authRequest = req as Request & { authMethod?: 'jwt' | 'session'; authSessionId?: string };
+      if (req.user && authRequest.authMethod === 'jwt' && authRequest.authSessionId) {
+        await storage.revokeAuthSession(req.user.id, authRequest.authSessionId);
+        closeUserConnections(req.user.id, { kind: 'jwt', authSessionId: authRequest.authSessionId });
+      } else if (req.user && authRequest.authMethod === 'session') {
+        closeUserConnections(req.user.id, { kind: 'session', sessionId: req.sessionID });
+      }
+    } catch (error) {
+      logger.error('[Logout] Authorization revocation failed', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+      res.status(503).json({ message: 'Authentication service temporarily unavailable' });
+      return;
+    }
+
     req.logout((err) => {
       if (err) {
         return next(err);
@@ -243,6 +261,7 @@ export function setupAuth(app: Express) {
           logger.error('[Firebase register] Session regeneration failed:', regenerateErr);
           return res.status(500).json({ error: 'Session regeneration failed' });
         }
+        req.session.authEpoch = user.authEpoch;
         req.login(user, (loginErr) => {
           if (loginErr) return next(loginErr);
           req.session.save((saveErr) => {

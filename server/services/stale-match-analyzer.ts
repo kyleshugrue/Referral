@@ -1,5 +1,6 @@
 import { User, SynergyMatch } from '@shared/schema';
 import type { IStorage } from '../storage';
+import { logger } from '../lib/logger';
 
 export interface ProfileChanges {
   oldProfile: Partial<User>;
@@ -19,8 +20,10 @@ export async function analyzeStaleMatches(
   changes: ProfileChanges,
   storage: IStorage
 ): Promise<StaleMatchAnalysis> {
-  console.log(`[StaleMatchAnalyzer] Analyzing stale matches for user ${userId}`);
-  console.log(`[StaleMatchAnalyzer] Changed fields:`, changes.changedFields);
+  logger.operational('[StaleMatchAnalyzer] Profile change analysis started', {
+    userId,
+    count: changes.changedFields.length,
+  });
   
   const result: StaleMatchAnalysis = {
     validMatches: [],
@@ -182,7 +185,10 @@ function isCompanyMatchStale(
       const matchedUserDesiredCompanies = (matchedUser.desiredCompanies || []).map(c => c.toLowerCase().trim());
       
       if (newCompany && !matchedUserDesiredCompanies.includes(newCompany)) {
-        console.log(`[StaleMatchAnalyzer] User's new company "${newCompany}" is not in matched user's desired companies`);
+        logger.operational('[StaleMatchAnalyzer] Company match became stale', {
+          action: 'company-mismatch',
+          userId: user.id,
+        });
         return true;
       }
     }
@@ -198,7 +204,10 @@ function isCompanyMatchStale(
       const stillWantsMatchedCompany = newDesiredCompanies.includes(matchedUserCompany);
 
       if (previouslyWantedMatchedCompany && !stillWantsMatchedCompany) {
-        console.log(`[StaleMatchAnalyzer] User no longer wants matched user's company "${matchedUserCompany}"`);
+        logger.operational('[StaleMatchAnalyzer] Company match became stale', {
+          action: 'desired-company-removed',
+          userId: user.id,
+        });
         return true;
       }
     }
@@ -229,7 +238,10 @@ function isLocationMatchStale(
       const matchedUserDesiredLocations = (matchedUser.desiredLocations || []).map(l => l.toLowerCase().trim());
       
       if (newLocation && !matchedUserDesiredLocations.includes(newLocation)) {
-        console.log(`[StaleMatchAnalyzer] User's new location "${newLocation}" is not in matched user's desired locations`);
+        logger.operational('[StaleMatchAnalyzer] Location match became stale', {
+          action: 'location-mismatch',
+          userId: user.id,
+        });
         return true;
       }
     }
@@ -245,7 +257,10 @@ function isLocationMatchStale(
       const stillWantsMatchedLocation = newDesiredLocations.includes(matchedUserLocation);
 
       if (previouslyWantedMatchedLocation && !stillWantsMatchedLocation) {
-        console.log(`[StaleMatchAnalyzer] User no longer wants matched user's location "${matchedUserLocation}"`);
+        logger.operational('[StaleMatchAnalyzer] Location match became stale', {
+          action: 'desired-location-removed',
+          userId: user.id,
+        });
         return true;
       }
     }
@@ -277,7 +292,10 @@ function isIndustryMatchStale(
     if (oldIndustry && matchedUserIndustry && 
         oldIndustry === matchedUserIndustry && 
         newIndustry !== matchedUserIndustry) {
-      console.log(`[StaleMatchAnalyzer] User changed industry from "${oldIndustry}" to "${newIndustry}", no longer matches "${matchedUserIndustry}"`);
+      logger.operational('[StaleMatchAnalyzer] Industry match became stale', {
+        action: 'industry-mismatch',
+        userId: user.id,
+      });
       return true;
     }
   }
@@ -363,7 +381,10 @@ function needsDescriptionUpdate(changedFields: string[]): boolean {
 
   if (hasDescriptionFieldChange) {
     const changedDescriptionFields = changedFields.filter(f => descriptionFields.includes(f));
-    console.log(`[StaleMatchAnalyzer] Match needs description update due to changed fields:`, changedDescriptionFields);
+      logger.operational('[StaleMatchAnalyzer] Match description needs refresh', {
+        action: 'profile-description-change',
+        count: changedDescriptionFields.length,
+      });
     return true;
   }
 

@@ -18,7 +18,10 @@ const router = Router();
 router.post('/ws-ticket', requireAuthJWT, async (req, res) => {
   try {
     if (!req.user?.id) return res.sendStatus(401);
-    const ticket = await issueWebSocketTicket(req.user.id, req.sessionID);
+    const ticket = await issueWebSocketTicket(req.user.id, {
+      authSessionId: req.authMethod === 'jwt' ? req.authSessionId : undefined,
+      sessionId: req.authMethod === 'session' ? req.sessionID : undefined,
+    });
     return res.json({ ticket, expiresInSeconds: 60 });
   } catch (error) {
     logger.error('[Auth] WebSocket ticket issuance failed', {
@@ -139,7 +142,12 @@ router.post('/refresh', async (req, res) => {
       });
     }
 
-    const newAccessToken = generateAccessToken(rotation.user.id, rotation.user.email);
+    const newAccessToken = generateAccessToken(
+      rotation.user.id,
+      rotation.user.email,
+      rotation.token.authSessionId,
+      rotation.user.authEpoch,
+    );
 
     logSecurityEvent('info', 'Token Refresh - Success', {
       action: 'token_rotated',
@@ -195,11 +203,22 @@ router.post('/revoke', async (req, res) => {
 
     logger.debug('[Token Revoke] Revoking token');
 
+    if (!normalizedDeviceId) {
+      return res.status(400).json({ message: 'Device ID is required' });
+    }
+
     // Hash the refresh token
     const hashedToken = hashRefreshToken(normalizedRefreshToken);
 
-    // Delete the token from database
-    await storage.deleteRefreshToken(hashedToken);
+    const revocation = await storage.revokeRefreshTokenSession(hashedToken, normalizedDeviceId);
+    if (revocation.status === 'not_found' || revocation.status === 'device_mismatch') {
+      return res.status(401).json({ message: 'Invalid or expired refresh token' });
+    }
+    const { closeUserConnections } = await import('../websocket-utils');
+    closeUserConnections(revocation.userId!, {
+      kind: 'jwt',
+      authSessionId: revocation.authSessionId,
+    });
 
     logSecurityEvent('info', 'Token Revoke - Success', {
       action: 'token_revoked',
@@ -242,6 +261,12 @@ router.post('/revoke-all', requireAuthJWT, async (req, res) => {
 
     // Delete all tokens for this authenticated user
     await storage.deleteAllUserTokens(userId);
+    const { closeUserConnections } = await import('../websocket-utils');
+    try {
+      await storage.destroyUserSessions(userId);
+    } finally {
+      closeUserConnections(userId);
+    }
 
     logSecurityEvent('info', 'Token Revoke All - Success', {
       action: 'all_tokens_revoked',

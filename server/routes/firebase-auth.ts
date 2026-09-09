@@ -58,12 +58,13 @@ async function completeAuthResponse(
         sessionPreserved: originalSessionId === req.session?.id ? '✅ YES' : '⚠️ Changed'
       });
       
+      req.session.authEpoch = user.authEpoch;
+
       // Generate JWT tokens for dual-mode authentication (session + JWT)
       try {
         logger.debug('🔑 [FIREBASE-AUTH DEBUG] Generating JWT tokens...');
         
         // Generate access and refresh tokens
-        const accessToken = generateAccessToken(user.id, user.email);
         const refreshToken = generateRefreshToken();
         const tokenHash = hashRefreshToken(refreshToken);
         
@@ -83,13 +84,19 @@ async function completeAuthResponse(
         const expiresAt = getRefreshTokenExpiry();
         
         // Store refresh token in database
-        await storage.createRefreshToken({
+        const refreshTokenRecord = await storage.createRefreshToken({
           userId: user.id,
           tokenHash,
           deviceId,
           deviceInfo: deviceInfoJson,
           expiresAt
         });
+        const accessToken = generateAccessToken(
+          user.id,
+          user.email,
+          refreshTokenRecord.authSessionId,
+          user.authEpoch,
+        );
         
         logger.debug('✅ [FIREBASE-AUTH DEBUG] JWT tokens generated and stored successfully', {
           deviceId,

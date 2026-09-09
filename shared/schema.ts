@@ -152,6 +152,7 @@ export const users = pgTable("users", {
   initialMatchJobsQueued: boolean("initial_match_jobs_queued").notNull().default(false),
   initialMatchJobsQueuedAt: timestamp("initial_match_jobs_queued_at", { withTimezone: true, mode: "string" }),
   accountStatus: text("account_status").notNull().default("active"),
+  authEpoch: integer("auth_epoch").notNull().default(0),
   deletionRequestedAt: timestamp("deletion_requested_at", { withTimezone: true, mode: "string" }),
   deletionCompletedAt: timestamp("deletion_completed_at", { withTimezone: true, mode: "string" }),
 }, (table) => ({
@@ -165,14 +166,22 @@ export const accountErasureJobs = pgTable("account_erasure_jobs", {
   userId: integer("user_id").notNull(),
   status: text("status").notNull().default("pending"),
   attemptCount: integer("attempt_count").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(5),
   nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
   lastErrorCode: text("last_error_code"),
+  lastErrorClass: text("last_error_class"),
+  lastErrorAt: timestamp("last_error_at", { withTimezone: true, mode: "string" }),
   requestedAt: timestamp("requested_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
   startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "string" }),
+  claimToken: text("claim_token"),
+  firebaseDeletedAt: timestamp("firebase_deleted_at", { withTimezone: true, mode: "string" }),
+  mediaDeletedAt: timestamp("media_deleted_at", { withTimezone: true, mode: "string" }),
   completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
 }, (table) => ({
   userIdUniqueIdx: uniqueIndex("account_erasure_jobs_user_id_idx").on(table.userId),
   statusAttemptIdx: index("account_erasure_jobs_status_attempt_idx").on(table.status, table.nextAttemptAt),
+  leaseExpiryIdx: index("account_erasure_jobs_lease_expiry_idx").on(table.status, table.leaseExpiresAt),
 }));
 
 // Immutable profile snapshots for rollback-proof job processing
@@ -741,10 +750,12 @@ export const refreshTokens = pgTable("refresh_tokens", {
     .references(() => users.id, { onDelete: "cascade" }),
   tokenHash: text("token_hash").notNull().unique(), // SHA-256 hash of the refresh token
   deviceId: text("device_id").notNull(), // Unique device identifier
+  authSessionId: text("auth_session_id").notNull(), // Stable revocation marker for one device token family
   deviceInfo: text("device_info").notNull(), // JSON string with IP, user-agent, platform info
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
   expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
   lastUsedAt: timestamp("last_used_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
+  revokedAt: timestamp("revoked_at", { withTimezone: true, mode: "string" }),
 }, (table) => ({
   userIdDeviceIdIdx: index("refresh_tokens_user_id_device_id_idx").on(table.userId, table.deviceId),
   tokenHashIdx: index("refresh_tokens_token_hash_idx").on(table.tokenHash),
@@ -816,6 +827,7 @@ export const insertRefreshTokenSchema = createInsertSchema(refreshTokens)
     userId: z.number(),
     tokenHash: z.string().min(1),
     deviceId: z.string().min(1),
+    authSessionId: z.string().min(1).optional(),
     deviceInfo: z.string().min(1), // JSON string
     expiresAt: z.string()
   });

@@ -16,6 +16,8 @@ import { MessageList } from "@/components/message-list";
 import { useToast } from "@/hooks/use-toast";
 import { ExtendedMessage } from "@/types/message";
 import { useGlobalWebSocket, CONNECTION_STATES } from "@/hooks/use-global-websocket";
+import { type MessagePage } from "@/lib/message-history";
+import { logger } from "@/lib/logger";
 
 // Define the type for connection data
 interface Connection {
@@ -228,8 +230,11 @@ export default function ConnectionsPage() {
     };
     
     // Add to query cache
-    const existingMessages = queryClient.getQueryData<ExtendedMessage[]>(["/api/messages", activeConversationId]) || [];
-    queryClient.setQueryData(["/api/messages", activeConversationId], [...existingMessages, optimisticMessage]);
+    const existingPage = queryClient.getQueryData<MessagePage>(["/api/messages", activeConversationId]);
+    queryClient.setQueryData(["/api/messages", activeConversationId], {
+      ...(existingPage ?? { hasMore: false }),
+      messages: [...(existingPage?.messages ?? []), optimisticMessage],
+    });
     
     // Clear the input
     setNewMessage("");
@@ -273,15 +278,18 @@ export default function ConnectionsPage() {
       console.error('Error sending message:', error);
       
       // Update the message status to failed
-      const existingMessages = queryClient.getQueryData<ExtendedMessage[]>(["/api/messages", activeConversationId]) || [];
+      const existingPage = queryClient.getQueryData<MessagePage>(["/api/messages", activeConversationId]);
       queryClient.setQueryData(
         ["/api/messages", activeConversationId],
-        existingMessages.map((msg) => {
+        {
+          ...(existingPage ?? { hasMore: false }),
+          messages: (existingPage?.messages ?? []).map((msg) => {
           // Check if this is our temporary message that failed
           const isTempMsg = msg.isTemporary && 
             msg.id.toString() === parseInt(tempId.replace('temp-', ''), 10).toString();
           return isTempMsg ? { ...msg, status: 'failed' as const } : msg;
-        })
+          }),
+        }
       );
       
       toast({
@@ -351,20 +359,13 @@ export default function ConnectionsPage() {
         }) 
     : [];
 
-  // Debug logging to understand data availability
+  // Keep search diagnostics structural; never log names or message previews.
   if (searchQuery) {
-    console.log(`[Search Debug] Search Query: "${searchQuery}"`);
-    console.log(`[Search Debug] Total connections:`, safeConnections.length);
-    console.log(`[Search Debug] Total conversations:`, safeConversations.length);
-    console.log(`[Search Debug] Connections data:`, safeConnections.map(conn => ({
-      id: conn.otherUser.id,
-      name: conn.otherUser.fullName
-    })));
-    console.log(`[Search Debug] Conversations data:`, safeConversations.map(conv => ({
-      userId: conv.otherUser.id,
-      userName: conv.otherUser.fullName,
-      lastMessage: conv.lastMessage?.content || 'No content'
-    })));
+    logger.debug('[Search Debug] Search evaluated', {
+      queryLength: searchQuery.length,
+      connectionCount: safeConnections.length,
+      conversationCount: safeConversations.length,
+    });
   }
 
   // Filter connections based on search query

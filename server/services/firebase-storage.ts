@@ -9,6 +9,7 @@ import { execFile } from 'child_process';
 import { logger } from '../lib/logger';
 import { UPLOAD_LIMITS } from '../lib/upload-validation';
 const execFileAsync = promisify(execFile);
+const LOCAL_UPLOAD_ROOT = path.resolve(process.cwd(), 'uploads');
 
 const MANAGED_MEDIA_PREFIXES = [
   'profile-pictures/',
@@ -241,7 +242,9 @@ export class FirebaseStorageService {
   }
 
   async deleteOwnedMediaForUser(userId: number, firebaseUid?: string | null): Promise<void> {
-    if (!this.bucket) return;
+    if (!this.bucket) {
+      throw new Error('Firebase Storage is not available for managed media erasure');
+    }
     // Uploads created by this service are namespaced by database user ID.
     // Never enumerate an entire shared bucket during an erasure request.
     const prefixes = [
@@ -260,6 +263,27 @@ export class FirebaseStorageService {
       }
     }
     logger.info('[Firebase Storage] Deleted owned media for account-erasure job');
+  }
+
+  async deleteLegacyLocalMediaForUser(references: Array<string | null | undefined>): Promise<void> {
+    const localReferences = references.filter(
+      (reference): reference is string => typeof reference === 'string' && reference.startsWith('/uploads/'),
+    );
+    for (const reference of localReferences) {
+      const relativePath = decodeURIComponent(reference.slice('/uploads/'.length));
+      const candidate = path.resolve(LOCAL_UPLOAD_ROOT, relativePath);
+      const relativeToRoot = path.relative(LOCAL_UPLOAD_ROOT, candidate);
+      if (!relativeToRoot || relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) {
+        throw new Error('Invalid legacy media reference');
+      }
+      try {
+        await fs.promises.unlink(candidate);
+      } catch (error) {
+        if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')) {
+          throw error;
+        }
+      }
+    }
   }
 
   // Extract filename from Firebase Storage URL for deletion

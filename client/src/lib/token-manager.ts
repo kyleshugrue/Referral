@@ -25,6 +25,12 @@ export interface TokenData {
 // In-Memory State
 let currentAccessToken: string | null = null;
 let tokenExpiresAt: number | null = null;
+let authGeneration = 0;
+
+// SecureStorage transitions are serialized so a logout remove cannot race a
+// login/refresh write. Rejections are isolated so a failed operation does not
+// permanently poison the queue.
+let storageTransition: Promise<void> = Promise.resolve();
 
 // Token Loading State (prevents race condition on app startup)
 let isLoadingTokens: boolean = false;
@@ -51,6 +57,49 @@ let retryTimer: NodeJS.Timeout | null = null; // Track retry timer for network/t
 const REFRESH_TOKEN_KEY = 'refresh_token';
 const REFRESH_BUFFER_MS = 60000; // Refresh 1 minute before expiry
 const INIT_TIMEOUT_MS = 3000; // Maximum time to wait for token initialization (3 seconds)
+
+export type RefreshOutcome =
+  | 'success'
+  | 'not_applicable'
+  | 'missing_storage'
+  | 'unauthorized'
+  | 'forbidden'
+  | 'server_error'
+  | 'http_error'
+  | 'malformed_response'
+  | 'offline'
+  | 'network_error'
+  | 'stale';
+
+let lastRefreshOutcome: RefreshOutcome = 'not_applicable';
+
+function enqueueStorageTransition(operation: () => Promise<void>): Promise<void> {
+  const next = storageTransition.then(operation, operation);
+  storageTransition = next.then(() => undefined, () => undefined);
+  return next;
+}
+
+function isCurrentGeneration(generation: number): boolean {
+  return generation === authGeneration;
+}
+
+export function getAuthGeneration(): number {
+  return authGeneration;
+}
+
+/**
+ * Starts a new login/restore generation. Any delayed work from the previous
+ * account is rejected before it can write tokens, timers, or listeners.
+ */
+export function beginAuthSession(): number {
+  authGeneration += 1;
+  clearRefreshTimer();
+  return authGeneration;
+}
+
+export function getLastRefreshOutcome(): RefreshOutcome {
+  return lastRefreshOutcome;
+}
 
 /**
  * Platform Detection
@@ -97,7 +146,7 @@ function clearRefreshTimer() {
  * Schedule Refresh
  * Schedules automatic token refresh before expiration
  */
-function scheduleRefresh(expiresAt: number) {
+function scheduleRefresh(expiresAt: number, generation = authGeneration) {
   clearRefreshTimer();
   
   const now = Date.now();
@@ -111,8 +160,9 @@ function scheduleRefresh(expiresAt: number) {
   });
   
   refreshTimer = setTimeout(() => {
+    if (!isCurrentGeneration(generation)) return;
     logger.debug('[TokenManager] Auto-refresh triggered');
-    refreshAccessToken();
+    void refreshAccessToken(generation);
   }, delay);
 }
 
@@ -204,10 +254,12 @@ export function getIsLoadingTokens(): boolean {
  * CRITICAL: Never clears tokens due to network failures (prevents offline lockout)
  */
 export async function loadTokens(): Promise<TokenData | null> {
+  const generation = authGeneration;
   try {
     // Only load tokens on iOS native platform
     if (!isNativeiOS()) {
       logger.debug('[TokenManager] Not iOS native, skipping token load (web uses session cookies)');
+      lastRefreshOutcome = 'not_applicable';
       markTokensReady(); // Mark ready immediately for web
       return null;
     }
@@ -222,7 +274,16 @@ export async function loadTokens(): Promise<TokenData | null> {
     logger.debug('[TokenManager] Loading tokens from SecureStorage');
     
     // Load refresh token from SecureStorage
-    const result = await SecureStorage.get(REFRESH_TOKEN_KEY);
+    let result: string | null = null;
+    await enqueueStorageTransition(async () => {
+      const stored = await SecureStorage.get(REFRESH_TOKEN_KEY);
+      result = typeof stored === 'string' ? stored : null;
+    });
+    if (!isCurrentGeneration(generation)) {
+      lastRefreshOutcome = 'stale';
+      markTokensReady();
+      return null;
+    }
     
     if (!result || typeof result !== 'string') {
       logger.debug('[TokenManager] No refresh token found in SecureStorage');
@@ -231,7 +292,16 @@ export async function loadTokens(): Promise<TokenData | null> {
     }
     
     // Parse the stored token data
-    const tokenData = JSON.parse(result) as TokenData;
+    let tokenData: TokenData;
+    try {
+      tokenData = JSON.parse(result) as TokenData;
+    } catch {
+      lastRefreshOutcome = 'malformed_response';
+      logger.warn('[TokenManager] Invalid token data in SecureStorage');
+      await clearTokens();
+      markTokensReady();
+      return null;
+    }
     
     // Validate token data
     if (!tokenData.refreshToken) {
@@ -245,7 +315,7 @@ export async function loadTokens(): Promise<TokenData | null> {
     
     // Attempt to refresh immediately to get fresh access token
     // BUT: Don't clear tokens if refresh fails (could be network issue)
-    const accessToken = await refreshAccessToken();
+    const accessToken = await refreshAccessToken(generation);
     
     if (accessToken) {
       // SUCCESS: Return loaded tokens with fresh access token
@@ -253,13 +323,18 @@ export async function loadTokens(): Promise<TokenData | null> {
       const expiresAt = decoded.exp ? decoded.exp * 1000 : Date.now() + 15 * 60 * 1000;
       
       // CRITICAL: Schedule next refresh
-      scheduleRefresh(expiresAt);
+      scheduleRefresh(expiresAt, generation);
       
       logger.debug('[TokenManager] Tokens loaded successfully with fresh access token:', {
         expiresAt: new Date(expiresAt).toISOString(),
         refreshScheduled: new Date(expiresAt - REFRESH_BUFFER_MS).toISOString()
       });
       
+      if (!isCurrentGeneration(generation)) {
+        lastRefreshOutcome = 'stale';
+        markTokensReady();
+        return null;
+      }
       markTokensReady();
       
       return {
@@ -276,11 +351,16 @@ export async function loadTokens(): Promise<TokenData | null> {
       const expiresAt = decoded.exp ? decoded.exp * 1000 : Date.now();
       
       // CRITICAL: Update in-memory state to prevent logout
+      if (!isCurrentGeneration(generation)) {
+        lastRefreshOutcome = 'stale';
+        markTokensReady();
+        return null;
+      }
       currentAccessToken = tokenData.accessToken;
       tokenExpiresAt = expiresAt;
       
       // Schedule immediate refresh (will retry when online)
-      scheduleRefresh(Date.now());
+      scheduleRefresh(Date.now(), generation);
       
       logger.debug('[TokenManager] Using stored access token for offline access:', {
         expiresAt: new Date(expiresAt).toISOString(),
@@ -313,6 +393,10 @@ export async function loadTokens(): Promise<TokenData | null> {
  * Stores tokens in SecureStorage (iOS) and memory
  */
 export async function setTokens(data: TokenData): Promise<void> {
+  return setTokensForGeneration(data, authGeneration);
+}
+
+export async function setTokensForGeneration(data: TokenData, generation: number): Promise<void> {
   try {
     // Validate token data
     if (!data.accessToken) {
@@ -333,12 +417,17 @@ export async function setTokens(data: TokenData): Promise<void> {
       }
     }
     
+    if (!isCurrentGeneration(generation)) {
+      lastRefreshOutcome = 'stale';
+      return;
+    }
+
     // Store in memory
     currentAccessToken = data.accessToken;
     tokenExpiresAt = expiresAt;
     
     // CRITICAL: Always schedule refresh timer
-    scheduleRefresh(expiresAt);
+    scheduleRefresh(expiresAt, generation);
     
     // Store refresh token in SecureStorage only on iOS
     if (isNativeiOS() && data.refreshToken) {
@@ -351,7 +440,14 @@ export async function setTokens(data: TokenData): Promise<void> {
         expiresAt
       };
       
-      await SecureStorage.set(REFRESH_TOKEN_KEY, JSON.stringify(tokenData));
+      await enqueueStorageTransition(async () => {
+        if (!isCurrentGeneration(generation)) return;
+        await SecureStorage.set(REFRESH_TOKEN_KEY, JSON.stringify(tokenData));
+      });
+      if (!isCurrentGeneration(generation)) {
+        lastRefreshOutcome = 'stale';
+        return;
+      }
       
       logger.debug('[TokenManager] Refresh token stored successfully', { hasDeviceId: !!data.deviceId });
     } else if (isNativeiOS()) {
@@ -378,6 +474,8 @@ export async function setTokens(data: TokenData): Promise<void> {
  * Removes all tokens from SecureStorage and memory
  */
 export async function clearTokens(): Promise<void> {
+  // Invalidate delayed loads/refreshes before touching asynchronous storage.
+  authGeneration += 1;
   try {
     logger.debug('[TokenManager] Clearing tokens');
     
@@ -392,13 +490,12 @@ export async function clearTokens(): Promise<void> {
     if (isNativeiOS()) {
       logger.debug('[TokenManager] Removing refresh token from SecureStorage');
       
-      try {
+      void enqueueStorageTransition(async () => {
         await SecureStorage.remove(REFRESH_TOKEN_KEY);
-        logger.debug('[TokenManager] Refresh token removed from SecureStorage');
-      } catch {
-        // Ignore errors if key doesn't exist
-        logger.debug('[TokenManager] Refresh token not found in SecureStorage (may already be cleared)');
-      }
+      }).then(
+        () => logger.debug('[TokenManager] Refresh token removed from SecureStorage'),
+        () => logger.debug('[TokenManager] Refresh token not found in SecureStorage (may already be cleared)'),
+      );
     }
     
     // Notify listeners
@@ -451,21 +548,31 @@ export function getCurrentAccessToken(): string | null {
  * CRITICAL: Differentiates between auth failures and network/transient errors
  * Only clears tokens on definitive auth failures (401/403)
  */
-async function performRefresh(): Promise<string | null> {
+async function performRefresh(generation: number): Promise<string | null> {
   try {
     logger.debug('[TokenManager] Performing token refresh');
     
     // Only refresh on iOS native platform
     if (!isNativeiOS()) {
       logger.debug('[TokenManager] Not iOS native, skipping refresh (web uses session cookies)');
+      lastRefreshOutcome = 'not_applicable';
       return null;
     }
     
     // Load refresh token from storage
-    const result = await SecureStorage.get(REFRESH_TOKEN_KEY);
+    let result: string | null = null;
+    await enqueueStorageTransition(async () => {
+      const stored = await SecureStorage.get(REFRESH_TOKEN_KEY);
+      result = typeof stored === 'string' ? stored : null;
+    });
+    if (!isCurrentGeneration(generation)) {
+      lastRefreshOutcome = 'stale';
+      return null;
+    }
     
     if (!result || typeof result !== 'string') {
       logger.warn('[TokenManager] No refresh token available');
+      lastRefreshOutcome = 'missing_storage';
       
       toast({
         title: 'Session Expired',
@@ -477,10 +584,19 @@ async function performRefresh(): Promise<string | null> {
       return null;
     }
     
-    const tokenData = JSON.parse(result) as TokenData;
+    let tokenData: TokenData;
+    try {
+      tokenData = JSON.parse(result) as TokenData;
+    } catch {
+      lastRefreshOutcome = 'malformed_response';
+      logger.warn('[TokenManager] Invalid refresh token data in SecureStorage');
+      await clearTokens();
+      return null;
+    }
     
     if (!tokenData.refreshToken) {
       logger.warn('[TokenManager] No refresh token in stored data');
+      lastRefreshOutcome = 'malformed_response';
       
       toast({
         title: 'Session Expired',
@@ -495,6 +611,7 @@ async function performRefresh(): Promise<string | null> {
     // Validate deviceId is present (required by server)
     if (!tokenData.deviceId) {
       logger.error('[TokenManager] No deviceId in stored data - cannot refresh token');
+      lastRefreshOutcome = 'malformed_response';
       
       toast({
         title: 'Session Expired',
@@ -521,11 +638,16 @@ async function performRefresh(): Promise<string | null> {
       }),
       credentials: 'include'
     });
+    if (!isCurrentGeneration(generation)) {
+      lastRefreshOutcome = 'stale';
+      return null;
+    }
     
     // CRITICAL: Differentiate error types
     if (response.status === 401 || response.status === 403) {
       // DEFINITIVE AUTH FAILURE: Clear tokens and logout
       logger.error('[TokenManager] Refresh token is invalid or expired (401/403)');
+      lastRefreshOutcome = response.status === 401 ? 'unauthorized' : 'forbidden';
       
       toast({
         title: 'Session Expired',
@@ -539,6 +661,7 @@ async function performRefresh(): Promise<string | null> {
     
     if (!response.ok) {
       // TRANSIENT ERROR (network, 500, etc.): Don't clear tokens, allow retry
+      lastRefreshOutcome = response.status >= 500 ? 'server_error' : 'http_error';
       logger.error('[TokenManager] Token refresh failed (transient error):', response.status);
       
       toast({
@@ -549,8 +672,9 @@ async function performRefresh(): Promise<string | null> {
       
       // Schedule retry in 30 seconds
       retryTimer = setTimeout(() => {
+         if (!isCurrentGeneration(generation)) return;
         logger.debug('[TokenManager] Retrying token refresh after transient error');
-        refreshAccessToken();
+        void refreshAccessToken(generation);
       }, 30000);
       
       // DON'T clear tokens - user stays authenticated
@@ -558,10 +682,18 @@ async function performRefresh(): Promise<string | null> {
     }
     
     // SUCCESS: Process new tokens
-    const newTokenData = await response.json();
+    let newTokenData: Partial<TokenData>;
+    try {
+      newTokenData = await response.json() as Partial<TokenData>;
+    } catch {
+      lastRefreshOutcome = 'malformed_response';
+      logger.error('[TokenManager] Token refresh returned malformed JSON');
+      return null;
+    }
     
     if (!newTokenData.accessToken || !newTokenData.refreshToken) {
-      logger.error('[TokenManager] Invalid refresh response:', newTokenData);
+      lastRefreshOutcome = 'malformed_response';
+      logger.error('[TokenManager] Token refresh response was missing required fields');
       return null;
     }
     
@@ -569,21 +701,29 @@ async function performRefresh(): Promise<string | null> {
     const decoded = decodeJWT(newTokenData.accessToken);
     const expiresAt = decoded.exp ? decoded.exp * 1000 : Date.now() + 15 * 60 * 1000;
     
-    await setTokens({
+    await setTokensForGeneration({
       accessToken: newTokenData.accessToken,
       refreshToken: newTokenData.refreshToken,
       deviceId: tokenData.deviceId, // Preserve deviceId for future refreshes
       expiresAt,
-    });
+    }, generation);
+    if (!isCurrentGeneration(generation)) {
+      lastRefreshOutcome = 'stale';
+      return null;
+    }
+    lastRefreshOutcome = 'success';
     
     logger.debug('[TokenManager] Token refresh successful, expires at:', new Date(expiresAt).toISOString());
     
     // Return new access token
     return newTokenData.accessToken;
     
-  } catch (error) {
+  } catch {
     // NETWORK ERROR (fetch failed, offline, etc.): Don't clear tokens
-    logger.error('[TokenManager] Token refresh network error:', error);
+    lastRefreshOutcome = (typeof navigator !== 'undefined' && navigator.onLine === false)
+      ? 'offline'
+      : 'network_error';
+    logger.error('[TokenManager] Token refresh network error');
     
     toast({
       title: 'Connection Error',
@@ -593,8 +733,9 @@ async function performRefresh(): Promise<string | null> {
     
     // Schedule retry in 30 seconds
     retryTimer = setTimeout(() => {
+      if (!isCurrentGeneration(generation)) return;
       logger.debug('[TokenManager] Retrying token refresh after network error');
-      refreshAccessToken();
+      void refreshAccessToken(generation);
     }, 30000);
     
     // DON'T clear tokens - user stays authenticated
@@ -616,11 +757,12 @@ export function isRefreshInProgress(): boolean {
  * CRITICAL: This is the main entry point for callers to get the latest token after a 401
  * CRITICAL: After waiting, callers MUST re-read the token via getCurrentAccessToken()
  */
-export async function waitForRefreshComplete(): Promise<string | null> {
+export async function waitForRefreshComplete(expectedGeneration = authGeneration): Promise<string | null> {
   // Check synchronous lock flag
   if (refreshLock && refreshDeferred) {
     logger.debug('[TokenManager] Refresh locked, waiting for existing refresh to complete');
     await refreshDeferred;
+    if (!isCurrentGeneration(expectedGeneration)) return null;
     // CRITICAL: After refresh completes, return the fresh token from memory
     // This ensures all callers get the same, most recent token
     const freshToken = getCurrentAccessToken();
@@ -638,12 +780,20 @@ export async function waitForRefreshComplete(): Promise<string | null> {
  * CRITICAL: Lock is set BEFORE any async work to prevent race conditions
  * CRITICAL: Promise is ALWAYS resolved in finally block to prevent deadlocks
  */
-export async function refreshAccessToken(): Promise<string | null> {
+export async function refreshAccessToken(expectedGeneration = authGeneration): Promise<string | null> {
+  if (!isCurrentGeneration(expectedGeneration)) {
+    lastRefreshOutcome = 'stale';
+    return null;
+  }
   // CRITICAL: Check synchronous lock FIRST - this prevents the race condition
   // where multiple callers pass the check before any sets the promise
   if (refreshLock && refreshDeferred) {
     logger.debug('[TokenManager] Refresh already locked, waiting for existing refresh');
     await refreshDeferred;
+    if (!isCurrentGeneration(expectedGeneration)) {
+      lastRefreshOutcome = 'stale';
+      return null;
+    }
     // After existing refresh completes, return the FRESH token from memory
     const freshToken = getCurrentAccessToken();
     logger.debug('[TokenManager] Existing refresh completed, returning fresh token from memory');
@@ -666,7 +816,7 @@ export async function refreshAccessToken(): Promise<string | null> {
   });
   
   try {
-    refreshResult = await performRefresh();
+    refreshResult = await performRefresh(expectedGeneration);
     return refreshResult;
   } catch (error) {
     logger.error('[TokenManager] Token refresh error:', error);

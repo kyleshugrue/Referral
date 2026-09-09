@@ -7,6 +7,8 @@ import ErrorMessage from "@/components/error-message";
 import { getInitials } from "@/lib/avatar-utils";
 import { ExtendedMessage } from "@/types/message";
 import { useToast } from "@/hooks/use-toast";
+import { apiRequest } from "@/lib/queryClient";
+import { EMPTY_MESSAGE_PAGE, mergeMessages, updateMessagePage, type MessagePage } from "@/lib/message-history";
 
 interface Props {
   conversationId: number;
@@ -61,7 +63,8 @@ export function MessageList({ conversationId, recipientId, otherUser, onProfileC
     console.log('[MessageList] Retrying failed message:', failedMessage);
     
     // Mark the message as sending while we retry
-    const currentMessages = queryClient.getQueryData<ExtendedMessage[]>(["/api/messages", recipientId]);
+    const currentPage = queryClient.getQueryData<MessagePage>(["/api/messages", recipientId]);
+    const currentMessages = currentPage?.messages;
     if (currentMessages) {
       const updatedMessages = currentMessages.map(msg => {
         if (msg.id === failedMessage.id) {
@@ -70,7 +73,7 @@ export function MessageList({ conversationId, recipientId, otherUser, onProfileC
         return msg;
       });
       
-      queryClient.setQueryData(["/api/messages", recipientId], updatedMessages);
+      queryClient.setQueryData(["/api/messages", recipientId], updateMessagePage(currentPage, updatedMessages));
     }
     
     try {
@@ -103,7 +106,8 @@ export function MessageList({ conversationId, recipientId, otherUser, onProfileC
       console.error('[MessageList] Error retrying message:', error);
       
       // Mark the message as failed again
-      const currentMessages = queryClient.getQueryData<ExtendedMessage[]>(["/api/messages", recipientId]);
+      const currentPage = queryClient.getQueryData<MessagePage>(["/api/messages", recipientId]);
+      const currentMessages = currentPage?.messages;
       if (currentMessages) {
         const updatedMessages = currentMessages.map(msg => {
           if (msg.id === failedMessage.id) {
@@ -112,7 +116,7 @@ export function MessageList({ conversationId, recipientId, otherUser, onProfileC
           return msg;
         });
         
-        queryClient.setQueryData(["/api/messages", recipientId], updatedMessages);
+        queryClient.setQueryData(["/api/messages", recipientId], updateMessagePage(currentPage, updatedMessages));
       }
       
       toast({
@@ -127,11 +131,11 @@ export function MessageList({ conversationId, recipientId, otherUser, onProfileC
   console.log('[MessageList] Setting up query with key:', ["/api/messages", recipientId]);
   
   const {
-    data: messages = [],
+    data: messagePage = EMPTY_MESSAGE_PAGE,
     isLoading,
     refetch,
     error
-  } = useQuery<ExtendedMessage[]>({
+  } = useQuery<MessagePage>({
     queryKey: ["/api/messages", recipientId],
     refetchInterval: 3000, // Poll for new messages every 3 seconds as a fallback
     enabled: !!recipientId && !!currentUser?.id,
@@ -141,6 +145,47 @@ export function MessageList({ conversationId, recipientId, otherUser, onProfileC
     refetchOnWindowFocus: true, // Refetch on window focus
     refetchOnReconnect: true // Refetch on network reconnect
   });
+  const messages = messagePage.messages;
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  const olderScrollRef = useRef<{ height: number; top: number } | null>(null);
+
+  const loadOlderMessages = async () => {
+    if (!messagePage.hasMore || !messagePage.nextCursor || isLoadingOlder) return;
+    const container = containerRef.current;
+    olderScrollRef.current = container
+      ? { height: container.scrollHeight, top: container.scrollTop }
+      : null;
+    setIsLoadingOlder(true);
+    try {
+      const response = await apiRequest(
+        'GET',
+        `/api/messages/${recipientId}?limit=50&cursor=${encodeURIComponent(messagePage.nextCursor)}`,
+      );
+      const olderPage = await response.json() as MessagePage;
+      queryClient.setQueryData(
+        ["/api/messages", recipientId],
+        updateMessagePage(olderPage, mergeMessages(olderPage.messages, messagePage.messages)),
+      );
+    } catch (loadError) {
+      console.error('[MessageList] Error loading older messages:', loadError);
+      toast({ variant: "destructive", title: "Unable to load older messages" });
+    } finally {
+      setIsLoadingOlder(false);
+    }
+  };
+
+  useEffect(() => {
+    const previous = olderScrollRef.current;
+    const container = containerRef.current;
+    if (!previous || !container) return;
+    requestAnimationFrame(() => {
+      if (containerRef.current) {
+        containerRef.current.scrollTop =
+          previous.top + (containerRef.current.scrollHeight - previous.height);
+      }
+      olderScrollRef.current = null;
+    });
+  }, [messages]);
   
   // Enhanced debugging
   useEffect(() => {
@@ -464,6 +509,16 @@ export function MessageList({ conversationId, recipientId, otherUser, onProfileC
           paddingBottom: '5px' // Consistent padding at the bottom for all message groups
         }}
       >
+        {messagePage.hasMore && (
+          <button
+            type="button"
+            className="mx-auto mb-2 block text-sm text-primary underline disabled:opacity-50"
+            onClick={loadOlderMessages}
+            disabled={isLoadingOlder}
+          >
+            {isLoadingOlder ? 'Loading older messages…' : 'Load older messages'}
+          </button>
+        )}
         {groupedMessages.map(({ date, messages }) => (
           <div key={date} className="space-y-0.5">
             <div className="flex justify-center mt-0.5 mb-1">

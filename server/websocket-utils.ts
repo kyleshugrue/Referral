@@ -9,6 +9,9 @@ interface ConnectedClient {
   pingSentAt: number | null;
   pingTimeout?: NodeJS.Timeout;
   reconnectAttempts: number;
+  authSessionId?: string;
+  authKind?: 'jwt' | 'session' | 'ticket';
+  sessionId?: string;
 }
 
 // We'll need to reference external resources, so import from a getter function
@@ -17,6 +20,29 @@ let connectedClientsRef: Map<number, ConnectedClient> | null = null;
 // Function to set the reference to connected clients
 export function setConnectedClientsRef(clientsMap: Map<number, ConnectedClient>) {
   connectedClientsRef = clientsMap;
+}
+
+export function closeUserConnections(
+  userId: number,
+  selector?: { kind?: 'jwt' | 'session'; authSessionId?: string; sessionId?: string },
+): void {
+  const client = connectedClientsRef?.get(userId);
+  if (!client) return;
+  if (selector?.kind === 'jwt' && client.authKind !== 'jwt' && client.authKind !== 'ticket') return;
+  if (selector?.kind === 'session' && client.authKind !== 'session') return;
+  if (selector?.authSessionId && client.authSessionId !== selector.authSessionId) return;
+  if (selector?.sessionId && client.sessionId !== selector.sessionId) return;
+  connectedClientsRef?.delete(userId);
+  try {
+    if (client.ws.readyState === WebSocket.OPEN || client.ws.readyState === WebSocket.CONNECTING) {
+      client.ws.close(4001, 'Authorization revoked');
+    }
+  } catch (error) {
+    logger.warn('[WebSocket Utils] Failed to close revoked connection', {
+      userId,
+      errorClass: error instanceof Error ? error.name : 'UnknownError',
+    });
+  }
 }
 
 /**

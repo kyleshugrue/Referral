@@ -71,6 +71,7 @@ import {
   DISCOVERABILITY_POLICY_VERSION,
   getDiscoverabilityState,
 } from "./lib/discoverability-policy";
+import { closeUserConnections } from "./websocket-utils";
 
 const PRIVACY_LAST_MODIFIED = process.env.PRIVACY_LAST_MODIFIED?.trim() || "2026-09-05";
 const PRIVACY_LAST_MODIFIED_DISPLAY = PRIVACY_LAST_MODIFIED
@@ -1115,10 +1116,10 @@ export async function registerRoutes(app: Express): Promise<void> {
       // intentional clears and must not be replaced with old values.
       const updateData = { ...profileData };
       
-      logger.debug(`[User Update] Preserving AI matching preferences:`, {
-        desiredLocations: updateData.desiredLocations,
-        desiredCompanies: updateData.desiredCompanies
-      });
+       logger.operational('[User Update] Validated AI matching preferences', {
+         userId,
+         action: 'profile-preferences-validated',
+       });
       
       const updatedUser = await storage.updateUser(userId, updateData);
       
@@ -1149,19 +1150,25 @@ export async function registerRoutes(app: Express): Promise<void> {
             matchingRelatedFields.includes(key)
           );
           
-          logger.debug(`[User Update] Changed matching fields for user ${userId}:`, changedFields);
+           logger.operational('[User Update] Matching fields changed', {
+             userId,
+             count: changedFields.length,
+           });
           
           // Use CMDCC for comprehensive bidirectional match propagation
           const cmdccResult = await centralizedMatchDescriptionCommandCenter.processProfileUpdate(userId, changedFields);
           
           if (cmdccResult.success) {
-            logger.debug(`[User Update] CMDCC processing successful:`, {
-              deletedStaleContent: cmdccResult.deletedStaleContent,
-              processedMatches: cmdccResult.processedMatches,
-              errors: cmdccResult.errors
-            });
+             logger.operational('[User Update] CMDCC processing successful', {
+               userId,
+               success: true,
+               count: cmdccResult.processedMatches,
+             });
           } else {
-            logger.warn(`[User Update] CMDCC processing had issues:`, cmdccResult.errors);
+             logger.warn('[User Update] CMDCC processing had issues', {
+               userId,
+               status: 'partial',
+             });
           }
           
         } catch (syncError) {
@@ -1315,11 +1322,7 @@ export async function registerRoutes(app: Express): Promise<void> {
       // refresh credentials are revoked in the same transaction that queues
       // the provider/media cleanup job.
       const erasureJob = await storage.requestAccountErasure(userId);
-      void import("./services/account-erasure")
-        .then(({ processAccountErasureJobs }) => processAccountErasureJobs(1))
-        .catch((error) => logger.error('Account-erasure worker start failed', {
-          errorClass: error instanceof Error ? error.name : 'UnknownError',
-        }));
+      closeUserConnections(userId);
 
       req.logout(function(err) {
         if (err) {

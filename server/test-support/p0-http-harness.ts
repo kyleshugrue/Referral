@@ -39,6 +39,7 @@ export interface HarnessUser {
   initialMatchJobsQueued: boolean;
   initialMatchJobsQueuedAt: string | null;
   firebaseUid: string | null;
+  authEpoch: number;
 }
 
 export interface HarnessState {
@@ -128,6 +129,9 @@ function makeStorage(state: HarnessState) {
       state.refreshTokens.push(data);
       return data;
     },
+    isAccessTokenActive: async () => true,
+    isAuthSessionActive: async () => true,
+    isWebSessionActive: async () => true,
     getOutgoingRequests: async (senderId: number) =>
       [...state.connectionRequests.values()].filter(
         (request) => request.senderId === senderId && request.status === "requested",
@@ -270,6 +274,7 @@ export function makeUser(overrides: Partial<HarnessUser> = {}): HarnessUser {
     initialMatchJobsQueued: true,
     initialMatchJobsQueuedAt: null,
     firebaseUid: null,
+    authEpoch: 0,
     ...overrides,
   };
 }
@@ -320,6 +325,7 @@ export async function createP0HttpHarness(
     if (!user) return res.sendStatus(404);
     req.login(user, (error) => {
       if (error) return next(error);
+      req.session.authEpoch = user.authEpoch;
       res.sendStatus(204);
     });
   });

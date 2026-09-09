@@ -40,6 +40,14 @@
     {
       "file": "0009_message_delivery_status.sql",
       "sha256": "60bb781a2474ccf51098d81b9eccf9b8957b455f63cc586d6caea005b0f2931b"
+    },
+    {
+      "file": "0010_authorization_revocation.sql",
+      "sha256": "7df588d7c54a77146a116ddd43fc47c75242b1d81aa9dcbde5680ed59cafbb8c"
+    },
+    {
+      "file": "0011_account_erasure_leases.sql",
+      "sha256": "d60386ca1cc60a6384b2b9fbc66adb2661f0739755cdc33ca96131cf4a987368"
     }
   ]
 }

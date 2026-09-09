@@ -2,6 +2,7 @@ import { Capacitor } from '@capacitor/core';
 import type { ForwardOptions, ReverseOptions } from '@capgo/nativegeocoder';
 import { locationService } from '@/utils/location-service';
 import config from '@/lib/config';
+import { logger } from '@/lib/logger';
 
 export interface LocationCoordinates {
   latitude: number;
@@ -83,12 +84,11 @@ class HybridLocationService {
     this.isIOSNative = platform === 'ios' && isNativePlatform;
     this.isWebPlatform = !isNativePlatform; // Any non-native environment is web
     
-    console.log('[HybridLocationService] Initialized:', {
+    logger.debug('[HybridLocationService] Initialized:', {
       platform: Capacitor.getPlatform(),
       isNativePlatform: isNativePlatform,
       isIOSNative: this.isIOSNative,
       isWebPlatform: this.isWebPlatform,
-      userAgent: navigator.userAgent,
       usingAppleMaps: this.isIOSNative,
       usingGoogleMaps: this.isWebPlatform && Boolean(this.googleMapsApiKey)
     });
@@ -123,10 +123,12 @@ class HybridLocationService {
         this.autocompleteService = new window.google.maps.places.AutocompleteService();
         this.geocoder = new window.google.maps.Geocoder();
         this.googleMapsLoaded = true;
-        console.log('[HybridLocationService] Google Maps initialized successfully');
+        logger.debug('[HybridLocationService] Google Maps initialized successfully');
       }
     } catch (error) {
-      console.error('[HybridLocationService] Failed to initialize Google Maps:', error);
+       logger.error('[HybridLocationService] Failed to initialize Google Maps', {
+         errorClass: error instanceof Error ? error.name : 'UnknownError',
+       });
        throw new Error('Failed to initialize Google Maps services', { cause: error });
     }
   }
@@ -137,7 +139,7 @@ class HybridLocationService {
    */
   async getCurrentLocation(): Promise<LocationCoordinates> {
     const startTime = Date.now();
-    console.log('[HybridLocationService] getCurrentLocation called, platform:', {
+    logger.debug('[HybridLocationService] getCurrentLocation called, platform:', {
       isIOSNative: this.isIOSNative,
       isWebPlatform: this.isWebPlatform
     });
@@ -147,18 +149,25 @@ class HybridLocationService {
       ? IOS_NATIVE_CURRENT_LOCATION_OPTIONS 
       : WEB_CURRENT_LOCATION_OPTIONS;
     
-    console.log('[HybridLocationService] Using options:', options);
+    logger.debug('[HybridLocationService] Using location options', {
+      highAccuracy: options.enableHighAccuracy,
+      timeoutMs: options.timeout,
+      maximumAgeMs: options.maximumAge,
+    });
     
     try {
       const coordinates = await locationService.getCurrentPosition(options);
       const duration = Date.now() - startTime;
       
-      console.log(`[HybridLocationService] ✓ Location acquired in ${duration}ms`, coordinates);
+      logger.debug('[HybridLocationService] Location acquired', { durationMs: duration });
       
       return coordinates;
     } catch (error) {
       const duration = Date.now() - startTime;
-      console.error(`[HybridLocationService] ✗ Location failed after ${duration}ms:`, error);
+      logger.error('[HybridLocationService] Location failed', {
+        durationMs: duration,
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
       throw error;
     }
   }
@@ -168,11 +177,11 @@ class HybridLocationService {
    * Uses Apple MapKit for iOS, Google Maps for web
    */
   async reverseGeocode(coordinates: LocationCoordinates): Promise<GeocodingResult | null> {
-    console.log('[HybridLocationService] reverseGeocode called:', coordinates);
+    logger.debug('[HybridLocationService] Reverse geocoding requested');
 
     if (this.isIOSNative) {
       try {
-        console.log('[HybridLocationService] Using Apple MapKit for reverse geocoding');
+        logger.debug('[HybridLocationService] Using Apple MapKit for reverse geocoding');
         
         const options: ReverseOptions = {
           latitude: coordinates.latitude,
@@ -185,7 +194,7 @@ class HybridLocationService {
         
         if (response.addresses && response.addresses.length > 0) {
           const result = response.addresses[0];
-          console.log('[HybridLocationService] Apple MapKit result:', result);
+          logger.debug('[HybridLocationService] Apple MapKit reverse geocoding completed');
           
           return {
             city: result.locality || result.subAdministrativeArea,
@@ -198,8 +207,10 @@ class HybridLocationService {
         
         return null;
       } catch (error) {
-        console.error('[HybridLocationService] Apple MapKit reverse geocoding failed:', error);
-        console.log('[HybridLocationService] Falling back to Google Maps due to Apple MapKit error');
+        logger.error('[HybridLocationService] Apple MapKit reverse geocoding failed', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
+        });
+        logger.debug('[HybridLocationService] Falling back to Google Maps');
         return this.reverseGeocodeWithGoogleMaps(coordinates);
       }
     } else {
@@ -212,7 +223,7 @@ class HybridLocationService {
    * Dedicated Google Maps reverse geocoding method
    */
   private async reverseGeocodeWithGoogleMaps(coordinates: LocationCoordinates): Promise<GeocodingResult | null> {
-    console.log('[HybridLocationService] Using Google Maps for reverse geocoding');
+    logger.debug('[HybridLocationService] Using Google Maps for reverse geocoding');
     
     await this.initializeGoogleMaps();
     
@@ -227,7 +238,7 @@ class HybridLocationService {
 
       if (results.results.length > 0) {
         const result = results.results[0];
-        console.log('[HybridLocationService] Google Maps result:', result);
+        logger.debug('[HybridLocationService] Google Maps reverse geocoding completed');
         
         const cityComponent = result.address_components.find(
           component => component.types.includes('locality')
@@ -253,7 +264,9 @@ class HybridLocationService {
       
       return null;
     } catch (error) {
-      console.error('[HybridLocationService] Google Maps reverse geocoding failed:', error);
+      logger.error('[HybridLocationService] Google Maps reverse geocoding failed', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
       return null;
     }
   }
@@ -263,11 +276,11 @@ class HybridLocationService {
    * Uses Apple MapKit for iOS, Google Maps for web
    */
   async forwardGeocode(address: string): Promise<LocationCoordinates | null> {
-    console.log('[HybridLocationService] forwardGeocode called:', address);
+    logger.debug('[HybridLocationService] Forward geocoding requested');
 
     if (this.isIOSNative) {
       try {
-        console.log('[HybridLocationService] Using Apple MapKit for forward geocoding');
+        logger.debug('[HybridLocationService] Using Apple MapKit for forward geocoding');
         
         const options: ForwardOptions = {
           addressString: address
@@ -277,7 +290,7 @@ class HybridLocationService {
         
         if (response.addresses && response.addresses.length > 0) {
           const result = response.addresses[0];
-          console.log('[HybridLocationService] Apple MapKit result:', result);
+          logger.debug('[HybridLocationService] Apple MapKit forward geocoding completed');
           
           return {
             latitude: result.latitude,
@@ -287,8 +300,10 @@ class HybridLocationService {
         
         return null;
       } catch (error) {
-        console.error('[HybridLocationService] Apple MapKit forward geocoding failed:', error);
-        console.log('[HybridLocationService] Falling back to Google Maps due to Apple MapKit error');
+        logger.error('[HybridLocationService] Apple MapKit forward geocoding failed', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
+        });
+        logger.debug('[HybridLocationService] Falling back to Google Maps');
         return this.forwardGeocodeWithGoogleMaps(address);
       }
     } else {
@@ -301,7 +316,7 @@ class HybridLocationService {
    * Dedicated Google Maps forward geocoding method
    */
   private async forwardGeocodeWithGoogleMaps(address: string): Promise<LocationCoordinates | null> {
-    console.log('[HybridLocationService] Using Google Maps for forward geocoding');
+    logger.debug('[HybridLocationService] Using Google Maps for forward geocoding');
     
     await this.initializeGoogleMaps();
     
@@ -314,7 +329,7 @@ class HybridLocationService {
 
       if (results.results.length > 0) {
         const location = results.results[0].geometry.location;
-        console.log('[HybridLocationService] Google Maps result:', location);
+        logger.debug('[HybridLocationService] Google Maps forward geocoding completed');
         
         return {
           latitude: location.lat(),
@@ -324,7 +339,9 @@ class HybridLocationService {
       
       return null;
     } catch (error) {
-      console.error('[HybridLocationService] Google Maps forward geocoding failed:', error);
+      logger.error('[HybridLocationService] Google Maps forward geocoding failed', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
       return null;
     }
   }
@@ -334,7 +351,9 @@ class HybridLocationService {
    * Uses Apple MapKit for iOS, Google Maps for web
    */
   async searchPlaces(query: string, options?: { types?: string[]; country?: string }): Promise<LocationSearchResult[]> {
-    console.log('[HybridLocationService] searchPlaces called:', query);
+    logger.debug('[HybridLocationService] Place search requested', {
+      queryLength: query.length,
+    });
 
     if (!query || query.trim().length < 2) {
       return [];
@@ -342,13 +361,15 @@ class HybridLocationService {
 
     if (this.isIOSNative) {
       try {
-        console.log('[HybridLocationService] Using server US cities API for iOS native place search');
+        logger.debug('[HybridLocationService] Using server US cities API for iOS native place search');
         
         // Use server API for US cities autocomplete on iOS native
         return await this.searchUSCitiesAPI(query);
       } catch (error) {
-        console.error('[HybridLocationService] Server US cities API failed:', error);
-        console.log('[HybridLocationService] Falling back to Google Places due to server API error');
+        logger.error('[HybridLocationService] Server US cities API failed', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
+        });
+        logger.debug('[HybridLocationService] Falling back to Google Places');
         return this.searchPlacesWithGoogleMaps(query, options);
       }
     } else {
@@ -363,7 +384,7 @@ class HybridLocationService {
   private async searchUSCitiesAPI(query: string): Promise<LocationSearchResult[]> {
     try {
       const apiUrl = `${config.apiBaseUrl}/api/locations/search?q=${encodeURIComponent(query)}`;
-      console.log('[HybridLocationService] Fetching from URL:', apiUrl);
+      logger.debug('[HybridLocationService] Fetching US cities search endpoint');
       
       const response = await fetch(apiUrl);
       
@@ -372,7 +393,7 @@ class HybridLocationService {
       }
       
       const results = await response.json();
-      console.log('[HybridLocationService] US cities API results:', results.length);
+      logger.debug('[HybridLocationService] US cities search completed', { count: results.length });
       
       // Convert server results to LocationSearchResult format
       return results.map((city: USCitySearchResult) => ({
@@ -387,7 +408,9 @@ class HybridLocationService {
         }
       }));
     } catch (error) {
-      console.error('[HybridLocationService] US cities API search failed:', error);
+      logger.error('[HybridLocationService] US cities API search failed', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
       throw error;
     }
   }
@@ -396,7 +419,7 @@ class HybridLocationService {
    * Dedicated Google Places search method
    */
   private async searchPlacesWithGoogleMaps(query: string, options?: { types?: string[]; country?: string }): Promise<LocationSearchResult[]> {
-    console.log('[HybridLocationService] Using Google Places API for search');
+    logger.debug('[HybridLocationService] Using Google Places API for search');
     
     await this.initializeGoogleMaps();
     
@@ -424,7 +447,7 @@ class HybridLocationService {
         );
       });
 
-      console.log('[HybridLocationService] Google Places results:', response.length);
+      logger.debug('[HybridLocationService] Google Places search completed', { count: response.length });
 
       return response.map(prediction => ({
         description: prediction.description,
@@ -435,7 +458,9 @@ class HybridLocationService {
         }
       }));
     } catch (error) {
-      console.error('[HybridLocationService] Google Places search failed:', error);
+      logger.error('[HybridLocationService] Google Places search failed', {
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
       return [];
     }
   }
@@ -470,7 +495,9 @@ class HybridLocationService {
             };
           }
         } catch (error) {
-          console.error('[HybridLocationService] Failed to get place coordinates:', error);
+          logger.error('[HybridLocationService] Failed to get place coordinates', {
+            errorClass: error instanceof Error ? error.name : 'UnknownError',
+          });
         }
       }
       

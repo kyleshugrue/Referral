@@ -14,6 +14,8 @@ import { config } from "@/lib/config";
 import { waitForTokensReady, onAccessTokenChange } from "@/lib/token-manager";
 import { openAuthenticatedWebSocket } from "@/lib/websocket-ticket";
 import { logger } from "@/lib/logger";
+import { apiRequest } from "@/lib/queryClient";
+import { mergeMessages } from "@/lib/message-history";
 
 interface MessageDialogProps {
   open: boolean;
@@ -87,21 +89,62 @@ export default function MessageDialog({ open, onOpenChange, otherUser }: Message
   isLoadingRef.current = isLoading;
   const [fetchError, setFetchError] = useState<Error | null>(null);
   const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  const nextCursorRef = useRef<string | undefined>();
+  const olderLoadRef = useRef(false);
+  const olderScrollRef = useRef<{ height: number; top: number } | null>(null);
   
   // Initialize iOS keyboard support
   const { isNativeIOSApp, keyboardHeight, isKeyboardVisible: isIOSKeyboardVisible } = useIOSKeyboard();
   
   // Function to load messages via WebSocket
-  const loadMessages = useCallback(() => {
+  const applyMessagePage = useCallback((page: { messages?: MessageWithUsers[]; nextCursor?: string; hasMore?: boolean }, older: boolean) => {
+    setMessages(previous => older
+      ? mergeMessages(page.messages ?? [], previous)
+      : mergeMessages(previous, page.messages ?? []));
+    nextCursorRef.current = page.nextCursor;
+    setHasMoreHistory(Boolean(page.hasMore && page.nextCursor));
+    setIsLoading(false);
+    setIsLoadingOlder(false);
+    setFetchError(null);
+    olderLoadRef.current = false;
+  }, []);
+
+  const loadMessagesFromRest = useCallback(async (cursor?: string) => {
+    try {
+      const query = cursor
+        ? `?limit=50&cursor=${encodeURIComponent(cursor)}`
+        : '?limit=50';
+      const response = await apiRequest('GET', `/api/messages/${otherUser.id}${query}`);
+      const page = await response.json() as { messages: MessageWithUsers[]; nextCursor?: string; hasMore?: boolean };
+      applyMessagePage(page, Boolean(cursor));
+    } catch (error) {
+      setIsLoading(false);
+      setIsLoadingOlder(false);
+      setFetchError(error instanceof Error ? error : new Error('Failed to load messages'));
+    }
+  }, [applyMessagePage, otherUser.id]);
+
+  const loadMessages = useCallback((cursor?: string) => {
     if (!open || !currentUser?.id || !otherUser?.id) return;
     
     logger.debug('[MessageDialog] Loading messages via WebSocket...');
-    setIsLoading(true);
+    const isOlder = Boolean(cursor);
+    if (isOlder) {
+      const container = scrollRef.current;
+      olderScrollRef.current = container
+        ? { height: container.scrollHeight, top: container.scrollTop }
+        : null;
+      olderLoadRef.current = true;
+      setIsLoadingOlder(true);
+    } else {
+      setIsLoading(true);
+    }
     setFetchError(null);
     
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      setFetchError(new Error('WebSocket not connected'));
-      setIsLoading(false);
+      void loadMessagesFromRest(cursor);
       return;
     }
     
@@ -109,7 +152,8 @@ export default function MessageDialog({ open, onOpenChange, otherUser }: Message
       // Send loadMessages request via WebSocket
       wsRef.current.send(JSON.stringify({
         type: 'loadMessages',
-        partnerId: otherUser.id
+        partnerId: otherUser.id,
+        ...(cursor ? { cursor } : {}),
       }));
       
       // Wait for response in onmessage handler
@@ -117,8 +161,22 @@ export default function MessageDialog({ open, onOpenChange, otherUser }: Message
       logger.error('[MessageDialog] Error sending loadMessages request:', error);
       setFetchError(error instanceof Error ? error : new Error('Failed to load messages'));
       setIsLoading(false);
+      setIsLoadingOlder(false);
     }
-  }, [currentUser?.id, otherUser.id, open]);
+  }, [currentUser?.id, loadMessagesFromRest, otherUser.id, open]);
+
+  useEffect(() => {
+    const previous = olderScrollRef.current;
+    const container = scrollRef.current;
+    if (!previous || !container) return;
+    requestAnimationFrame(() => {
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop =
+          previous.top + (scrollRef.current.scrollHeight - previous.height);
+      }
+      olderScrollRef.current = null;
+    });
+  }, [messages]);
 
   // Process message queue
   const processMessageQueue = useCallback(() => {
@@ -521,14 +579,15 @@ export default function MessageDialog({ open, onOpenChange, otherUser }: Message
               case 'messagesLoaded':
                 // Successfully loaded messages
                 logger.debug('[WebSocket] Messages loaded:', data.messages?.length || 0);
-                setMessages(data.messages || []);
-                setIsLoading(false);
-                setFetchError(null);
+                applyMessagePage(data, olderLoadRef.current);
+                olderLoadRef.current = false;
                 break;
 
               case 'messageConfirm': {
                 // Successfully sent message - remove from pending and queue
-                logger.debug('[WebSocket] Message confirmed by server:', data.message);
+                logger.debug('[WebSocket] Message confirmed by server', {
+                  messageId: data.message?.id,
+                });
                 
                 // Find matching queued message - could match by content
                 const queuedMsg = messageQueueRef.current.find(
@@ -682,7 +741,7 @@ export default function MessageDialog({ open, onOpenChange, otherUser }: Message
       setRetryCount(0);
       setConnectionState(CONNECTION_STATES.DISCONNECTED);
     };
-  }, [currentUser?.id, otherUser.id, open, retryCount, toast, loadMessages, processMessageQueue]);
+  }, [applyMessagePage, currentUser?.id, otherUser.id, open, retryCount, toast, loadMessages, processMessageQueue]);
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1015,6 +1074,16 @@ export default function MessageDialog({ open, onOpenChange, otherUser }: Message
               </div>
             ) : (
               <div className="space-y-2 pb-0 mb-0"> {/* Reduced vertical spacing between messages */}
+                {hasMoreHistory && nextCursorRef.current && (
+                  <button
+                    type="button"
+                    className="mx-auto mb-2 block text-sm text-primary underline disabled:opacity-50"
+                    onClick={() => loadMessages(nextCursorRef.current)}
+                    disabled={isLoadingOlder}
+                  >
+                    {isLoadingOlder ? 'Loading older messages…' : 'Load older messages'}
+                  </button>
+                )}
                 {/* Regular server-confirmed messages */}
                 {messages.map((message) => (
                   <div

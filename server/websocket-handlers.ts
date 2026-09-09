@@ -22,8 +22,12 @@ import { decodeMessageCursor, DEFAULT_MESSAGE_PAGE_SIZE } from './lib/message-pa
 import { toMessageDto } from './lib/privacy-dto';
 
 interface SessionRequest extends IncomingMessage {
-  session?: Session & { userId?: number };
+  session?: Session & { userId?: number; authEpoch?: number };
+  sessionID?: string;
   authenticatedUserId?: number; // Set by verifyClient after JWT or session authentication
+  authSessionId?: string;
+  authKind?: 'jwt' | 'session' | 'ticket';
+  webSessionId?: string;
 }
 
 interface ConnectedClient {
@@ -35,6 +39,9 @@ interface ConnectedClient {
   reconnectAttempts: number;
   firstConnectTime: number;
   platform?: string; // Track web vs native platform
+  authSessionId?: string;
+  authKind?: 'jwt' | 'session' | 'ticket';
+  sessionId?: string;
 }
 
 // Track connected users with additional metadata
@@ -98,6 +105,9 @@ export function setupWebSocketServer(server: HTTPServer) {
           if (ticketResult) {
             authenticatedUserId = ticketResult.userId;
             authMethod = 'ticket';
+            (info.req as SessionRequest).authSessionId = ticketResult.authSessionId;
+            (info.req as SessionRequest).webSessionId = ticketResult.sessionId ?? undefined;
+            (info.req as SessionRequest).authKind = ticketResult.authSessionId ? 'ticket' : 'session';
             (info.req as SessionRequest).authenticatedUserId = ticketResult.userId;
             logger.debug('[WebSocket] Ticket authentication successful');
           }
@@ -136,6 +146,9 @@ export function setupWebSocketServer(server: HTTPServer) {
           if (session && sessionUserId) {
             authenticatedUserId = sessionUserId;
             authMethod = 'session';
+            (info.req as SessionRequest).authSessionId = (info.req as SessionRequest).sessionID;
+            (info.req as SessionRequest).webSessionId = (info.req as SessionRequest).sessionID;
+            (info.req as SessionRequest).authKind = 'session';
             (info.req as SessionRequest).authenticatedUserId = sessionUserId;
             logger.debug('[WebSocket] Session authentication successful');
           }
@@ -174,6 +187,16 @@ export function setupWebSocketServer(server: HTTPServer) {
         const verificationDecision = decideWebSocketVerification(user, verificationError);
         if (verificationDecision.allowed && !isActiveAccount(user as { accountStatus?: string } | null)) {
           callback(false, 403, 'Account is not active');
+          return;
+        }
+        const sessionRequest = info.req as SessionRequest;
+        if (
+          verificationDecision.allowed &&
+          sessionRequest.authKind === 'session' &&
+          sessionRequest.session &&
+          sessionRequest.session.authEpoch !== (user as { authEpoch?: number }).authEpoch
+        ) {
+          callback(false, 401, 'Authorization revoked');
           return;
         }
         if (!verificationDecision.allowed) {
@@ -300,7 +323,10 @@ export function setupWebSocketServer(server: HTTPServer) {
         pingSentAt: null,
         reconnectAttempts: newReconnectAttempts,
         firstConnectTime: existingClient?.firstConnectTime || now,
-        platform
+        platform,
+        authSessionId: (request as SessionRequest).authSessionId,
+        authKind: (request as SessionRequest).authKind,
+        sessionId: (request as SessionRequest).webSessionId,
       });
 
       const client = connectedClients.get(userId);
@@ -347,6 +373,20 @@ export function setupWebSocketServer(server: HTTPServer) {
       const messageGuard = createWebSocketMessageGuard();
       ws.on('message', async (data) => {
         try {
+          const currentClient = connectedClients.get(userId!);
+          if (
+            !currentClient ||
+            currentClient.ws !== ws ||
+            (currentClient.authKind === 'ticket' && currentClient.authSessionId &&
+              !await storage.isAuthSessionActive(userId!, currentClient.authSessionId)) ||
+            (currentClient.authKind === 'session' && currentClient.authSessionId &&
+              !await storage.isWebSessionActive(userId!, currentClient.authSessionId))
+            || (currentClient.authKind === 'session' && currentClient.sessionId &&
+              !await storage.isWebSessionActive(userId!, currentClient.sessionId))
+          ) {
+            ws.close(4001, 'Authorization revoked');
+            return;
+          }
           const payload = Array.isArray(data)
             ? Buffer.concat(data)
             : Buffer.isBuffer(data)
@@ -414,6 +454,7 @@ export function setupWebSocketServer(server: HTTPServer) {
                   type: 'messagesLoaded',
                   messages: page.items.map(toMessageDto),
                   conversationId: conversation.id,
+                  hasMore: page.hasMore,
                   ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
                 }));
               } catch (error) {

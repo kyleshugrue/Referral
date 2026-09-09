@@ -45,6 +45,10 @@ import { createSchemaReadinessGate } from './lib/schema-readiness-gate';
 import { copyProxyResponseHeaders } from './lib/proxy-headers';
 import { verifyInternalAuth } from './lib/internal-auth';
 import { processAccountErasureJobs } from './services/account-erasure';
+import {
+  ACCOUNT_ERASURE_BATCH_SIZE,
+  ACCOUNT_ERASURE_SWEEP_INTERVAL_MS,
+} from './lib/account-erasure-contract';
 import { getPublicReadinessResponse } from './lib/readiness-contract';
 
 // Function to serve static files in production
@@ -191,11 +195,7 @@ async function main() {
           });
         }
         if (!wasReady && nextReadiness.ready) {
-          void processAccountErasureJobs(10).catch((error) => {
-            logger.error('[AccountErasure] Recovery sweep after readiness restoration failed', {
-              errorClass: error instanceof Error ? error.name : 'UnknownError',
-            });
-          });
+          void runAccountErasureSweep?.();
         }
         return nextReadiness;
       }).finally(() => {
@@ -223,6 +223,25 @@ async function main() {
       });
     }, 30_000);
     schemaReadinessInterval.unref?.();
+
+    let accountErasureSweepRunning = false;
+    const runAccountErasureSweep = async (): Promise<void> => {
+      if (!schemaReadiness.ready || accountErasureSweepRunning) return;
+      accountErasureSweepRunning = true;
+      try {
+        await processAccountErasureJobs(ACCOUNT_ERASURE_BATCH_SIZE);
+      } catch (error) {
+        logger.error('[AccountErasure] Scheduled recovery sweep failed', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
+        });
+      } finally {
+        accountErasureSweepRunning = false;
+      }
+    };
+    const accountErasureInterval = setInterval(() => {
+      void runAccountErasureSweep();
+    }, ACCOUNT_ERASURE_SWEEP_INTERVAL_MS);
+    accountErasureInterval.unref?.();
 
     // This is deliberately before setupAuth(), which installs
     // express-session and passport.session(). Health and readiness stay
@@ -305,11 +324,7 @@ async function main() {
 
     // Resume durable erasure work only when its full schema is present.
     if (schemaReadiness.ready) {
-      void processAccountErasureJobs(10).catch((error) => {
-        logger.error('[AccountErasure] Recovery sweep failed', {
-          errorClass: error instanceof Error ? error.name : 'UnknownError',
-        });
-      });
+      void runAccountErasureSweep();
     } else {
       logger.warn('[AccountErasure] Recovery sweep deferred until the schema contract is ready');
     }
@@ -566,6 +581,7 @@ async function main() {
         },
         () => clearInterval(queueRecoveryInterval),
         () => clearInterval(schemaReadinessInterval),
+         () => clearInterval(accountErasureInterval),
         () => {
           if (staleTokenCleanupInterval) clearInterval(staleTokenCleanupInterval);
         },
@@ -614,6 +630,7 @@ async function main() {
         },
         () => clearInterval(queueRecoveryInterval),
         () => clearInterval(schemaReadinessInterval),
+         () => clearInterval(accountErasureInterval),
         () => {
           if (staleTokenCleanupInterval) clearInterval(staleTokenCleanupInterval);
         },

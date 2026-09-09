@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeLogValue, sanitizeLogArgs, scrubSensitiveText } from '../log-sanitizer';
+import { sanitizeLogValue, sanitizeLogArgs, sanitizeOperationalLogValue, scrubSensitiveText } from '../log-sanitizer';
 
 describe('log-sanitizer', () => {
   describe('bare string arguments (not object properties)', () => {
@@ -164,5 +164,22 @@ describe('log-sanitizer', () => {
       expect(result).not.toContain('secret');
       expect(result).toContain('other=fine');
     });
+  });
+
+  it('drops profile-shaped and nested alias values from operational metadata', () => {
+    const result = sanitizeOperationalLogValue({
+      userId: 42,
+      operationId: 'op-1',
+      profile: {
+        bio: 'sentinel bio',
+        employer: 'sentinel employer',
+        targets: ['sentinel target'],
+        nestedProfile: { interests: ['sentinel interest'], fullName: 'sentinel name' },
+      },
+      safeCount: 3,
+    }) as Record<string, unknown>;
+
+    expect(result).toEqual({ userId: 42, operationId: 'op-1' });
+    expect(JSON.stringify(result)).not.toContain('sentinel');
   });
 });

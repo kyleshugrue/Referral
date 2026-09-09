@@ -6,6 +6,7 @@ export const REQUIRED_SCHEMA_TABLES = [
   'account_erasure_jobs',
   'fcm_tokens',
   'match_generation_jobs',
+  'refresh_tokens',
   'session',
   'users',
   'websocket_tickets',
@@ -191,6 +192,10 @@ export const REQUIRED_SCHEMA_COLUMNS: readonly RequiredSchemaColumn[] = [
   },
   {
     tableName: 'users',
+    columnName: 'auth_epoch',
+  },
+  {
+    tableName: 'users',
     columnName: 'deletion_requested_at',
   },
   {
@@ -217,16 +222,30 @@ export const REQUIRED_SCHEMA_COLUMNS: readonly RequiredSchemaColumn[] = [
     'user_id',
     'status',
     'attempt_count',
+    'max_attempts',
     'next_attempt_at',
     'last_error_code',
+    'last_error_class',
+    'last_error_at',
     'requested_at',
     'started_at',
+    'lease_expires_at',
+    'claim_token',
+    'firebase_deleted_at',
+    'media_deleted_at',
     'completed_at',
   ].map((columnName) => ({ tableName: 'account_erasure_jobs', columnName })),
+  ...[
+    'auth_session_id',
+    'revoked_at',
+  ].map((columnName) => ({ tableName: 'refresh_tokens', columnName })),
 ] as const;
 
 const REQUIRED_SCHEMA_COLUMN_SHAPES: readonly RequiredSchemaColumnShape[] = [
   { tableName: 'users', columnName: 'account_status', expectedDataType: 'text', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'users', columnName: 'auth_epoch', expectedDataType: 'integer', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'refresh_tokens', columnName: 'auth_session_id', expectedDataType: 'text', expectedNullable: 'NO' },
+  { tableName: 'refresh_tokens', columnName: 'revoked_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
   { tableName: 'users', columnName: 'deletion_requested_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
   { tableName: 'users', columnName: 'deletion_completed_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
   { tableName: 'callback_notification_queue', columnName: 'dedupe_key', expectedDataType: 'text', expectedNullable: 'YES' },
@@ -243,10 +262,17 @@ const REQUIRED_SCHEMA_COLUMN_SHAPES: readonly RequiredSchemaColumnShape[] = [
   { tableName: 'account_erasure_jobs', columnName: 'user_id', expectedDataType: 'integer', expectedNullable: 'NO' },
   { tableName: 'account_erasure_jobs', columnName: 'status', expectedDataType: 'text', expectedNullable: 'NO', requiresDefault: true },
   { tableName: 'account_erasure_jobs', columnName: 'attempt_count', expectedDataType: 'integer', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'account_erasure_jobs', columnName: 'max_attempts', expectedDataType: 'integer', expectedNullable: 'NO', requiresDefault: true },
   { tableName: 'account_erasure_jobs', columnName: 'next_attempt_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'NO', requiresDefault: true },
   { tableName: 'account_erasure_jobs', columnName: 'last_error_code', expectedDataType: 'text', expectedNullable: 'YES' },
+  { tableName: 'account_erasure_jobs', columnName: 'last_error_class', expectedDataType: 'text', expectedNullable: 'YES' },
+  { tableName: 'account_erasure_jobs', columnName: 'last_error_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
   { tableName: 'account_erasure_jobs', columnName: 'requested_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'NO', requiresDefault: true },
   { tableName: 'account_erasure_jobs', columnName: 'started_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
+  { tableName: 'account_erasure_jobs', columnName: 'lease_expires_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
+  { tableName: 'account_erasure_jobs', columnName: 'claim_token', expectedDataType: 'text', expectedNullable: 'YES' },
+  { tableName: 'account_erasure_jobs', columnName: 'firebase_deleted_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
+  { tableName: 'account_erasure_jobs', columnName: 'media_deleted_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
   { tableName: 'account_erasure_jobs', columnName: 'completed_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
 ];
 
@@ -255,6 +281,7 @@ export const REQUIRED_SCHEMA_INDEXES: readonly RequiredSchemaIndex[] = [
   { tableName: 'delivery_obligations', indexName: 'delivery_obligations_pending_idx' },
   { tableName: 'account_erasure_jobs', indexName: 'account_erasure_jobs_user_id_idx' },
   { tableName: 'account_erasure_jobs', indexName: 'account_erasure_jobs_status_attempt_idx' },
+  { tableName: 'account_erasure_jobs', indexName: 'account_erasure_jobs_lease_expiry_idx' },
 ];
 
 export const REQUIRED_SCHEMA_CONSTRAINTS: readonly RequiredSchemaConstraint[] = [

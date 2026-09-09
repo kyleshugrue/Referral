@@ -1,9 +1,10 @@
 import { db } from '../db';
-import { userProfileSnapshots } from '@shared/schema';
+import { userProfileSnapshots, users } from '@shared/schema';
 import type { UserProfileSnapshot } from '@shared/schema';
 import { eq, and, desc } from 'drizzle-orm';
 import crypto from 'crypto';
 import stringify from 'json-stable-stringify';
+import { isActiveAccount } from '../lib/account-status';
 
 export interface ProfileData {
   bio: string | null;
@@ -30,34 +31,45 @@ export class ProfileSnapshotService {
     const contentHash = this.generateContentHash(profileData);
     
     try {
-      const existing = await db
-        .select({ id: userProfileSnapshots.id, contentHash: userProfileSnapshots.contentHash })
-        .from(userProfileSnapshots)
-        .where(
-          and(
-            eq(userProfileSnapshots.userId, userId),
-            eq(userProfileSnapshots.contentHash, contentHash)
+      return await db.transaction(async (tx) => {
+        // Lock the owner row so account erasure cannot commit between the
+        // eligibility check and snapshot insertion.
+        const [owner] = await tx
+          .select({ accountStatus: users.accountStatus })
+          .from(users)
+          .where(eq(users.id, userId))
+          .limit(1)
+          .for('update');
+        if (!isActiveAccount(owner)) {
+          throw new Error('Cannot create a profile snapshot for an inactive account');
+        }
+
+        const existing = await tx
+          .select({ id: userProfileSnapshots.id, contentHash: userProfileSnapshots.contentHash })
+          .from(userProfileSnapshots)
+          .where(
+            and(
+              eq(userProfileSnapshots.userId, userId),
+              eq(userProfileSnapshots.contentHash, contentHash)
+            )
           )
-        )
-        .limit(1);
-      
-      if (existing.length > 0) {
-        console.log(`[ProfileSnapshotService] Reusing existing snapshot ${existing[0].id} for user ${userId}`);
-        return existing[0];
-      }
-      
-      const [snapshot] = await db
-        .insert(userProfileSnapshots)
-        .values({
-          userId,
-          contentHash,
-          profileData: JSON.stringify(profileData)
-        })
-        .returning({ id: userProfileSnapshots.id, contentHash: userProfileSnapshots.contentHash });
-      
-      console.log(`[ProfileSnapshotService] Created snapshot ${snapshot.id} for user ${userId} (hash: ${contentHash.substring(0, 12)}...)`);
-      
-      return snapshot;
+          .limit(1);
+
+        if (existing.length > 0) {
+          return existing[0];
+        }
+
+        const [snapshot] = await tx
+          .insert(userProfileSnapshots)
+          .values({
+            userId,
+            contentHash,
+            profileData: JSON.stringify(profileData)
+          })
+          .returning({ id: userProfileSnapshots.id, contentHash: userProfileSnapshots.contentHash });
+
+        return snapshot;
+      });
     } catch (error: unknown) {
       const errorCode = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
       if (errorCode === '23505') {

@@ -11,7 +11,15 @@ import * as firebaseLib from "../lib/firebase";
 import { User as FirebaseUser, onAuthStateChanged } from "firebase/auth";
 import { disconnectGlobalWebSocket } from "@/hooks/use-global-websocket";
 import { logger } from "@/lib/logger";
-import { loadTokens, setTokens, clearTokens, onAccessTokenChange } from "@/lib/token-manager";
+import {
+  loadTokens,
+  setTokensForGeneration,
+  clearTokens,
+  onAccessTokenChange,
+  beginAuthSession,
+  getAuthGeneration,
+} from "@/lib/token-manager";
+import { revokeNativeSession, RemoteRevocationResult } from "@/lib/native-auth";
 import { decidePostRegistrationFlow } from "@/lib/verification-ui-state";
 import { savePendingRegistrationData } from "@/lib/registration-helpers";
 import { Capacitor } from "@capacitor/core";
@@ -19,6 +27,13 @@ import { Capacitor } from "@capacitor/core";
 type LoginData = { email: string; password: string };
 
 type RegisterData = InsertUser & { password: string };
+type AuthenticatedUserData = SelectUser & {
+  accessToken?: string;
+  refreshToken?: string;
+  deviceId?: string;
+  expiresAt?: number;
+  authGeneration?: number;
+};
 
 type AuthContextType = {
   user: SelectUser | null;
@@ -28,7 +43,7 @@ type AuthContextType = {
   accessToken: string | null;
   loginMutation: UseMutationResult<SelectUser, Error, LoginData>;
   loginWithGoogleMutation: UseMutationResult<SelectUser, Error, void>;
-  logoutMutation: UseMutationResult<void, Error, void>;
+  logoutMutation: UseMutationResult<RemoteRevocationResult, Error, void>;
   registerMutation: UseMutationResult<SelectUser, Error, RegisterData>;
   resetPasswordMutation: UseMutationResult<void, Error, string>;
   sendPasswordResetEmail: (email: string) => Promise<void>;
@@ -94,6 +109,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   
   // Sync Firebase user with our backend
   const syncUserWithBackend = useCallback(async (fbUser: FirebaseUser) => {
+    const generation = beginAuthSession();
     logger.debug("🔄 [SYNC DEBUG] Starting syncUserWithBackend", {
       emailVerified: fbUser.emailVerified,
     });
@@ -193,12 +209,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (jwtAccessToken && jwtRefreshToken) {
         try {
           logger.debug("🔐 [SYNC DEBUG] Saving JWT tokens to SecureStorage...", { hasDeviceId: !!jwtDeviceId });
-          await setTokens({
+          await setTokensForGeneration({
             accessToken: jwtAccessToken,
             refreshToken: jwtRefreshToken,
             deviceId: jwtDeviceId, // Include deviceId for token refresh
             expiresAt: Date.now() + 15 * 60 * 1000 // Default 15 min, setTokens will extract from JWT
-          });
+          }, generation);
           
           // Update AuthContext state so API client uses JWT tokens
           setAccessToken(jwtAccessToken);
@@ -381,6 +397,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loginMutation = useMutation({
     mutationFn: async (credentials: LoginData) => {
       logger.debug("Attempting login");
+      const generation = beginAuthSession();
       
       // Login with Firebase
       try {
@@ -445,7 +462,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           throw new Error("Account not found. Please register first.");
         }
         
-        return userData;
+          if (userData.accessToken && userData.refreshToken) {
+            await setTokensForGeneration({
+              accessToken: userData.accessToken,
+              refreshToken: userData.refreshToken,
+              deviceId: userData.deviceId,
+              expiresAt: userData.expiresAt || Date.now() + 15 * 60 * 1000,
+            }, generation);
+          }
+
+          return { ...userData, authGeneration: generation };
       } catch (error: unknown) {
         logger.error("Login error:", error);
         
@@ -464,28 +490,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
          throw new Error(errorMessage, { cause: error });
       }
     },
-    onSuccess: async (userData: SelectUser & { accessToken?: string; refreshToken?: string; deviceId?: string; expiresAt?: number }) => {
-      logger.debug("Login successful for user, id:", userData.id);
-      
-      // Check if backend returned JWT tokens (mobile flow)
-      if (userData.accessToken && userData.refreshToken) {
-        logger.debug('[AuthProvider] JWT tokens received from backend (mobile flow)', { hasDeviceId: !!userData.deviceId });
-        
-        try {
-          await setTokens({
-            accessToken: userData.accessToken,
-            refreshToken: userData.refreshToken,
-            deviceId: userData.deviceId, // Include deviceId for token refresh
-            expiresAt: userData.expiresAt || Date.now() + 15 * 60 * 1000, // Default 15 min
-          });
-          setAccessToken(userData.accessToken);
-          logger.debug('[AuthProvider] JWT tokens stored successfully');
-        } catch (error) {
-          logger.error('[AuthProvider] Error storing JWT tokens:', error);
-        }
-      } else {
-        logger.debug('[AuthProvider] No JWT tokens in response (web session-only flow)');
+    onSuccess: async (userData: AuthenticatedUserData) => {
+      if (userData.authGeneration !== undefined && userData.authGeneration !== getAuthGeneration()) {
+        logger.debug('[AuthProvider] Ignoring stale login result');
+        return;
       }
+      logger.debug("Login successful for user, id:", userData.id);
       
       // BINARY SYSTEM: Registration completion is stored in database, not localStorage
       logger.debug("LOGIN: User authentication completed, registration status from database:", {
@@ -496,7 +506,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       
       // CRITICAL: Ensure the user data with registration status is properly cached
-      queryClient.setQueryData(["/api/user"], userData);
+      const { authGeneration: _authGeneration, ...cacheUserData } = userData;
+      void _authGeneration;
+      queryClient.setQueryData(["/api/user"], cacheUserData);
       
       // AUTO-CORRECTION: Fix inconsistent registration states
       
@@ -522,6 +534,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loginWithGoogleMutation = useMutation({
     mutationFn: async () => {
       logger.debug("Attempting Google login/signup");
+      const generation = beginAuthSession();
       
       // Check if it's a login from login page or signup from register page
       const isSignup = window.location.pathname.includes('register');
@@ -572,7 +585,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }, 1000);
             
             // Return simplified user data for the mutation result
-            return { email: googleResult?.email, id: 0 };
+            return { email: googleResult?.email, id: 0, authGeneration: generation };
           } catch (storageError) {
             logger.error("Error saving Google user data for registration:", storageError);
           }
@@ -583,15 +596,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!res.ok) {
           throw new Error("Failed to get user data from server");
         }
-        return await res.json();
+        return { ...(await res.json()), authGeneration: generation };
       } catch (error: unknown) {
         logger.error("Google login error:", error);
         throw new Error(error instanceof Error ? error.message : "Google login failed", { cause: error });
       }
     },
-    onSuccess: (user: SelectUser) => {
+    onSuccess: (user: SelectUser & { authGeneration?: number }) => {
+      if (user.authGeneration !== undefined && user.authGeneration !== getAuthGeneration()) {
+        logger.debug('[AuthProvider] Ignoring stale Google login result');
+        return;
+      }
       logger.debug("Google login successful for user, id:", user.id);
-      queryClient.setQueryData(["/api/user"], user);
+      const { authGeneration: _authGeneration, ...cacheUser } = user;
+      void _authGeneration;
+      queryClient.setQueryData(["/api/user"], cacheUser);
       
       // Check if this is a new user registration (id will be 0)
       if (user.id === 0) {
@@ -623,6 +642,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const registerMutation = useMutation({
     mutationFn: async (userData: RegisterData) => {
       logger.debug("Attempting registration");
+      beginAuthSession();
       
       // Register with Firebase
       try {
@@ -862,48 +882,50 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   const logoutMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (): Promise<RemoteRevocationResult> => {
       logger.debug("Attempting logout");
+
+      // Clear in-memory and local credentials before any remote await. Keep a
+      // private snapshot only long enough to authenticate revocation.
+      const tokenToRevoke = accessToken;
+      await clearTokens();
+      setAccessToken(null);
+
+      const remoteRevocation = await revokeNativeSession(tokenToRevoke);
+
       try {
-        // STEP 1: Revoke all refresh tokens on server (JWT mobile flow)
-        if (accessToken) {
-          try {
-            logger.debug('[Auth] Revoking all refresh tokens on server');
-            await fetch('/api/auth/revoke-all', {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${accessToken}`,
-              },
-              credentials: 'include',
-            });
-            logger.debug('[Auth] All refresh tokens revoked successfully');
-          } catch (error) {
-            logger.error('[Auth] Error revoking tokens:', error);
-            // Continue with logout even if revoke fails (e.g., network error)
-          }
-        }
-        
-        // STEP 2: Clear JWT tokens locally (mobile flow)
-        logger.debug('[AuthProvider] Clearing JWT tokens');
-        await clearTokens();
-        setAccessToken(null);
-        logger.debug('[AuthProvider] JWT tokens cleared');
-        
-        // STEP 3: Logout from Firebase
         await safeLogoutUser();
-        
-        // STEP 4: Logout from our backend session
-        const res = await apiRequest("POST", "/api/logout");
-        if (!res.ok) {
-          logger.warn("Backend logout failed, but Firebase logout succeeded");
-        }
       } catch (error) {
-        logger.error("Logout error:", error);
-        throw error;
+        logger.error("Firebase logout error:", error instanceof Error ? error.name : 'UnknownError');
       }
+
+      try {
+        const res = await apiRequest("POST", "/api/logout");
+        if (!res.ok) logger.warn("Backend logout returned a non-success status");
+      } catch (error) {
+        logger.error("Backend logout request failed:", error instanceof Error ? error.name : 'UnknownError');
+      }
+
+      return remoteRevocation;
     },
-    onSuccess: () => {
+    onSuccess: (result: RemoteRevocationResult) => {
       logger.debug("Logout successful");
+
+      if (!['confirmed', 'not_applicable'].includes(result.status)) {
+        const messageByStatus: Record<string, string> = {
+          unauthorized: 'The server did not confirm remote token revocation (401).',
+          forbidden: 'The server did not confirm remote token revocation (403).',
+          server_error: 'The server could not confirm remote token revocation. Try again when online.',
+          http_error: 'The server returned an unexpected revocation response.',
+          offline: 'You are offline. Local logout succeeded; remote revocation is unconfirmed.',
+          network_error: 'The server could not be reached. Local logout succeeded; remote revocation is unconfirmed.',
+        };
+        toast({
+          title: "Signed out locally",
+          description: messageByStatus[result.status] || 'Remote revocation is unconfirmed.',
+          variant: "destructive",
+        });
+      }
       
       // Clear all registration-related localStorage flags to prevent state mismatch on next login
       try {

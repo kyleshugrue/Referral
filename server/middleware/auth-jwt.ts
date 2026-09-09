@@ -31,7 +31,7 @@ import { isActiveAccount } from '../lib/account-status';
 type AuthRequest = Request & {
   id?: string;
   authMethod?: 'jwt' | 'session';
-  session: Request['session'] & { userId?: number; passport?: { user?: number } };
+  session: Request['session'] & { userId?: number; authEpoch?: number; passport?: { user?: number } };
 };
 
 /**
@@ -54,9 +54,14 @@ export async function authenticateUploadPrincipal(
       const payload = verifyAccessToken(authHeader!.substring(7));
       if (payload?.userId) {
         const user = await storage.getUser(payload.userId);
-        if (isActiveAccount(user)) {
+        if (isActiveAccount(user) && await storage.isAccessTokenActive(
+          payload.userId,
+          payload.authSessionId,
+          payload.authEpoch,
+        )) {
           req.user = user;
           authRequest.authMethod = 'jwt';
+          authRequest.authSessionId = payload.authSessionId;
           next();
           return;
         }
@@ -132,12 +137,21 @@ export async function requireAuthJWT(
         try {
           const user = await storage.getUser(payload.userId);
           
-          if (user && (!user.accountStatus || user.accountStatus === 'active')) {
+          if (
+            user &&
+            isActiveAccount(user) &&
+            await storage.isAccessTokenActive(
+              payload.userId,
+              payload.authSessionId,
+              payload.authEpoch,
+            )
+          ) {
             // SUCCESS: JWT authentication successful
             // Attach user to request object for downstream handlers
             req.user = user;
             // Set explicit flag for downstream middleware to verify JWT auth occurred
             authRequest.authMethod = 'jwt';
+            authRequest.authSessionId = payload.authSessionId;
             
             logger.debug('[JWT Auth] Valid token for user:', user.id);
             logger.debug(
@@ -214,11 +228,17 @@ export async function requireAuthJWT(
   if (isAuthenticated && req.user) {
     try {
       const currentUser = await storage.getUser(req.user.id);
-      if (currentUser && isActiveAccount(currentUser)) {
+      if (
+        currentUser &&
+        isActiveAccount(currentUser) &&
+        Number.isInteger(authRequest.session?.authEpoch) &&
+        currentUser.authEpoch === authRequest.session.authEpoch
+      ) {
         // SUCCESS: Session authentication successful
         // Set explicit flag for downstream middleware to verify session auth occurred
         req.user = currentUser;
         authRequest.authMethod = 'session';
+        authRequest.authSessionId = req.sessionID;
 
         logger.debug(
           `[Auth:JWT] [ReqID: ${requestId}] ✅ Session authentication successful ` +

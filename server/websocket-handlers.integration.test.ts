@@ -5,7 +5,8 @@ import {
   MAX_WEBSOCKET_PAYLOAD_BYTES,
 } from "./lib/websocket-security";
 
-const tickets = new Map<string, { userId: number; sessionId: string | null }>();
+const tickets = new Map<string, { userId: number; sessionId: string | null; authSessionId?: string }>();
+const authorizationActive = new Map<string, boolean>();
 const syntheticUser = {
   id: 7,
   fullName: "Synthetic WebSocket User",
@@ -22,6 +23,10 @@ vi.mock("./storage", () => ({
   storage: {
     getUser: vi.fn(async (userId: number) => userId === syntheticUser.id ? syntheticUser : undefined),
     getConnectionBetweenUsers: vi.fn(async () => undefined),
+    isAuthSessionActive: vi.fn(async (_userId: number, authSessionId: string) =>
+      authorizationActive.get(authSessionId) ?? true,
+    ),
+    isWebSessionActive: vi.fn(async () => true),
   },
 }));
 
@@ -131,6 +136,7 @@ describe("WebSocket handler integration", () => {
   beforeEach(async () => {
     process.env.NODE_ENV = "development";
     tickets.clear();
+    authorizationActive.clear();
     server = createServer();
     stopWebSocketServer = setupWebSocketServer(server);
     await new Promise<void>((resolve) => {
@@ -205,6 +211,24 @@ describe("WebSocket handler integration", () => {
       { origin: "https://attacker.invalid" },
     );
     expect(rejected.message).toContain("403");
+  });
+
+  it("closes an admitted socket before a protected message after revocation", async () => {
+    tickets.set("revocation-ticket", {
+      userId: syntheticUser.id,
+      sessionId: null,
+      authSessionId: "device-session-7",
+    });
+    authorizationActive.set("device-session-7", true);
+    const connection = await openSocket(port, ["referral-ws-ticket.revocation-ticket"]);
+    await waitForMessage(connection.socket, connection.messages, (message) => message.type === "connected");
+
+    authorizationActive.set("device-session-7", false);
+    const closed = waitForClose(connection.socket);
+    connection.socket.send(JSON.stringify({ type: "test", content: "must-not-run" }));
+
+    await expect(closed).resolves.toMatchObject({ code: 4001, reason: "Authorization revoked" });
+    expect(connection.messages).not.toContainEqual(expect.objectContaining({ type: "test-response" }));
   });
 
   it("closes active clients cleanly during server shutdown", async () => {

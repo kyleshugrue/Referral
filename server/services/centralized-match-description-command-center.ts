@@ -4,6 +4,7 @@ import { backgroundJobQueue } from './background-job-queue.js';
 import { analyzeStaleMatches } from './stale-match-analyzer.js';
 import { db } from '../db.js';
 import { eq } from 'drizzle-orm';
+import { logger } from '../lib/logger.js';
 
 /**
  * Centralized Match & Description Command Center (CMDCC)
@@ -715,7 +716,7 @@ class CentralizedMatchDescriptionCommandCenter {
     oldProfile: Partial<User>,
     newProfile: Partial<User>
   ): Promise<{ queuedJobId: number | null }> {
-    console.log(`[IncrementalUpdate] Starting incremental profile update for user ${userId}`);
+     logger.operational('[IncrementalUpdate] Profile update started', { userId });
     
     try {
       // Step 1: Detect changed fields
@@ -736,7 +737,10 @@ class CentralizedMatchDescriptionCommandCenter {
         }
       }
       
-      console.log(`[IncrementalUpdate] Changed fields:`, changedFields);
+      logger.operational('[IncrementalUpdate] Profile fields changed', {
+        userId,
+        count: changedFields.length,
+      });
       
       if (changedFields.length === 0) {
         console.log(`[IncrementalUpdate] No changes detected, skipping update`);

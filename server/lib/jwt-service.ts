@@ -12,10 +12,12 @@ import { logger } from './logger';
  * - Device-bound: Each device has its own refresh token for better security
  */
 
-interface AccessTokenPayload {
+export interface AccessTokenPayload {
   userId: number;
   email: string;
   type: 'access';
+  authSessionId: string;
+  authEpoch: number;
 }
 
 interface DeviceInfo {
@@ -38,7 +40,12 @@ const REFRESH_TOKEN_EXPIRY_MS = REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
  * @param email - User's email address
  * @returns Signed JWT access token (15 minute expiry)
  */
-export function generateAccessToken(userId: number, email: string): string {
+export function generateAccessToken(
+  userId: number,
+  email: string,
+  authSessionId = randomBytes(16).toString('hex'),
+  authEpoch = 0,
+): string {
   const secret = process.env.JWT_SECRET;
   if (!secret) {
     throw new Error('JWT_SECRET environment variable is not set');
@@ -47,7 +54,9 @@ export function generateAccessToken(userId: number, email: string): string {
   const payload: AccessTokenPayload = {
     userId,
     email,
-    type: 'access'
+    type: 'access',
+    authSessionId,
+    authEpoch,
   };
 
   return jwt.sign(payload, secret, {
@@ -78,6 +87,15 @@ export function verifyAccessToken(token: string): AccessTokenPayload | null {
     // Validate token type
     if (decoded.type !== 'access') {
       logger.warn('[JWT-Service] Token type mismatch - expected "access", got:', decoded.type);
+      return null;
+    }
+    if (
+      typeof decoded.authSessionId !== 'string' ||
+      decoded.authSessionId.length < 16 ||
+      !Number.isInteger(decoded.authEpoch) ||
+      decoded.authEpoch < 0
+    ) {
+      logger.warn('[JWT-Service] Missing or invalid authorization revocation claims');
       return null;
     }
 
