@@ -118,7 +118,7 @@
     "lodash": "^4.17.21",
     "lucide-react": "^0.453.0",
     "memorystore": "^1.6.7",
-    "multer": "^2.0.2",
+    "multer": "^2.3.0",
     "openid-client": "^6.5.0",
     "passport": "^0.7.0",
     "passport-local": "^1.0.0",
