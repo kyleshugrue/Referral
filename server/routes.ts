@@ -43,6 +43,7 @@ import {
   uploadLimiter,
   internalLimiter,
   publicLookupLimiter,
+  apiBaselineLimiter,
   expensiveRequestLimiter,
 } from "./lib/rate-limits";
 import { requireCompleteRegistration } from "./middleware/require-complete-registration";
@@ -88,6 +89,8 @@ const PRIVACY_DATE_METADATA = PRIVACY_LAST_MODIFIED
   : "";
 
 const uploadRoot = path.resolve(process.cwd(), 'uploads');
+const trustedUploadPrincipal: unique symbol = Symbol('trustedUploadPrincipal');
+type UploadRequest = express.Request & { [trustedUploadPrincipal]?: true };
 
 function resolveLegacyUploadPath(reference: unknown): string | null {
   if (typeof reference !== 'string' || !reference.startsWith('/uploads/')) return null;
@@ -273,6 +276,10 @@ export async function registerRoutes(app: Express): Promise<void> {
     res.setHeader('Content-Type', 'text/html');
     res.send(privacyPolicy);
   });
+
+  // Every API route gets a bounded baseline before nested routers and
+  // route-specific limiters apply their narrower budgets.
+  app.use('/api', apiBaselineLimiter);
 
   // Register the locations router first (before auth middleware)
   app.use('/api/locations', publicLookupLimiter, locationRouter);
@@ -1638,7 +1645,10 @@ export async function registerRoutes(app: Express): Promise<void> {
   // Resume upload endpoint (for both authenticated and unauthenticated users during registration)
   const requireUploadPrincipal = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     const authMethod = (req as express.Request & { authMethod?: 'jwt' | 'session' }).authMethod;
-    if ((authMethod === 'jwt' || authMethod === 'session') && req.user) return next();
+    if ((authMethod === 'jwt' || authMethod === 'session') && req.user) {
+      Object.defineProperty(req, trustedUploadPrincipal, { value: true });
+      return next();
+    }
     return requireVerifiedFirebaseUser(req, res, next);
   };
 
@@ -1656,7 +1666,7 @@ export async function registerRoutes(app: Express): Promise<void> {
          return res.status(400).json({ message: 'Invalid managed upload path' });
        }
 
-       const userId = (req as express.Request & { authMethod?: string }).authMethod
+       const userId = (req as UploadRequest)[trustedUploadPrincipal]
          ? req.user?.id
          : undefined;
        const firebaseUid = !userId ? getRegistrant(req).uid : undefined;
@@ -1668,9 +1678,9 @@ export async function registerRoutes(app: Express): Promise<void> {
       logger.debug(`[Resume Upload] File received (${req.file.mimetype}, ${req.file.size} bytes)`);
 
       // Verify file contents match the extension (magic-byte check)
-      if (req.file.path) {
+       if (temporaryPath) {
         try {
-          await verifyUploadedFile(req.file.path);
+           await verifyUploadedFile(temporaryPath);
         } catch (verifyError) {
           return res.status(400).json({
             message: verifyError instanceof Error ? verifyError.message : 'Invalid file contents'
@@ -1778,7 +1788,7 @@ export async function registerRoutes(app: Express): Promise<void> {
     let savedUser: User | null = null;
     const remoteReferences: string[] = [];
     try {
-      userId = (req as express.Request & { authMethod?: string }).authMethod
+       userId = (req as UploadRequest)[trustedUploadPrincipal]
         ? req.user?.id
         : undefined;
       firebaseUid = !userId ? getRegistrant(req).uid : undefined;
@@ -1799,9 +1809,9 @@ export async function registerRoutes(app: Express): Promise<void> {
       logger.debug(`[Photo Upload] File received (${req.file.mimetype}, ${req.file.size} bytes)`);
 
       // Verify file contents match the extension (magic-byte check)
-      if (req.file.path) {
+       if (temporaryPath) {
         try {
-          await verifyUploadedFile(req.file.path);
+           await verifyUploadedFile(temporaryPath);
         } catch (verifyError) {
           return res.status(400).json({
             message: verifyError instanceof Error ? verifyError.message : 'Invalid file contents'

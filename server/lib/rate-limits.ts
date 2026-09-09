@@ -95,6 +95,15 @@ export const publicLookupLimiter = rateLimit({
   message: jsonMessage('Too many lookup requests.'),
 });
 
+/** High-ceiling baseline for every API route; sensitive routers add narrower limits. */
+export const apiBaselineLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 1000,
+  ...standardLimiterOptions,
+  ...sharedStore('api-baseline'),
+  message: jsonMessage('Too many requests.'),
+});
+
 /** Expensive authenticated mutations and external-service lookups. */
 export const expensiveRequestLimiter = rateLimit({
   windowMs: 60 * 1000,

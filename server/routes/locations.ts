@@ -1,6 +1,7 @@
 import { Router } from "express";
 import citiesData from "cities.json" with { type: 'json' };
 import { boundedString, parseFiniteCoordinate } from "../lib/request-validation";
+import { logger } from "../lib/logger";
 
 const router = Router();
 
@@ -132,10 +133,12 @@ router.get("/search", (req, res) => {
       if (results.length >= 50) break;
     }
 
-    console.log(`Found ${results.length} matches for query "${query}"`);
+    logger.debug('[Locations] Search completed', { resultCount: results.length });
     res.json(results.slice(0, 50));
   } catch (error) {
-    console.error('Error in location search:', error);
+    logger.error('[Locations] Search failed', {
+      errorClass: error instanceof Error ? error.name : 'UnknownError',
+    });
     res.status(500).json({ error: 'Internal server error' });
   }
 });

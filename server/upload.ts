@@ -218,10 +218,12 @@ async function generatePdfPreviews(pdfPath: string): Promise<string[]> {
  * renamed/disguised files never persist on disk.
  */
 export async function verifyUploadedFile(filePath: string): Promise<void> {
-  const ext = path.extname(filePath).toLowerCase();
+  const managedPath = resolveManagedUploadPath(filePath);
+  if (!managedPath) throw new Error('Invalid managed upload path');
+  const ext = path.extname(managedPath).toLowerCase();
   const header = Buffer.alloc(16);
   try {
-    const fileHandle = await fs.promises.open(filePath, 'r');
+    const fileHandle = await fs.promises.open(managedPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     try {
       await fileHandle.read(header, 0, 16, 0);
     } finally {
@@ -234,7 +236,7 @@ export async function verifyUploadedFile(filePath: string): Promise<void> {
   } catch (error) {
     // Validation and filesystem failures must not leave an untrusted upload
     // behind for a later request to discover or serve.
-    await cleanupTemporaryUpload(filePath);
+    await cleanupTemporaryUpload(managedPath);
     throw error;
   }
 }

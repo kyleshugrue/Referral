@@ -10,6 +10,17 @@ const nativeConsole = {
   error: console.error.bind(console),
 };
 
+const formatLogArgs = (args: unknown[]): string =>
+  sanitizeLogArgs(args)
+    .map((value) => {
+      try {
+        return JSON.stringify(value) ?? '[undefined]';
+      } catch {
+        return '[unserializable]';
+      }
+    })
+    .join(' ');
+
 type GuardedGlobal = typeof globalThis & {
   [key: symbol]: boolean | undefined;
 };
@@ -20,24 +31,24 @@ type GuardedGlobal = typeof globalThis & {
 if (!(globalThis as GuardedGlobal)[consoleGuardKey]) {
   Object.defineProperty(globalThis, consoleGuardKey, { value: true, enumerable: false });
   for (const method of Object.keys(nativeConsole) as Array<keyof typeof nativeConsole>) {
-    console[method] = (...args: unknown[]) => nativeConsole[method](...sanitizeLogArgs(args));
+    console[method] = (...args: unknown[]) => nativeConsole[method](formatLogArgs(args));
   }
 }
 
 export const logger = {
   debug: (...args: unknown[]) => {
     if (isDevelopment) {
-      nativeConsole.log(...sanitizeLogArgs(args));
+      nativeConsole.log(formatLogArgs(args));
     }
   },
   info: (...args: unknown[]) => {
-    nativeConsole.info(...sanitizeLogArgs(args));
+    nativeConsole.info(formatLogArgs(args));
   },
   warn: (...args: unknown[]) => {
-    nativeConsole.warn(...sanitizeLogArgs(args));
+    nativeConsole.warn(formatLogArgs(args));
   },
   error: (...args: unknown[]) => {
-    nativeConsole.error(...sanitizeLogArgs(args));
+    nativeConsole.error(formatLogArgs(args));
   },
   operational: (event: string, metadata: Record<string, unknown> = {}) => {
     nativeConsole.info(event, sanitizeOperationalLogValue(metadata));

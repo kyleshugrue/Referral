@@ -286,7 +286,7 @@ export function formatFirebaseError(error: unknown): string {
   if (!error) return "An unknown error occurred";
   
   // Handle Firebase AuthError
-  if (typeof error === 'object' && error !== null && 'code' in error) {
+  if (typeof error === 'object' && 'code' in error) {
     const errorCode = (error as Record<string, unknown>).code;
     if (typeof errorCode !== 'string') {
       return "An unknown error occurred";

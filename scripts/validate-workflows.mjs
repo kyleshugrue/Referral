@@ -158,7 +158,7 @@ const readPackageScripts = async (packagePath) => {
 export const validatePublicWorkflowText = (text, filePath, scripts) => {
   for (const match of text.matchAll(NPM_RUN_PATTERN)) {
     const command = match[1].trim();
-    const scriptMatch = command.match(/^(?:--[A-Za-z0-9_-]+(?:\s+|$))*([A-Za-z0-9:_-]+)/);
+    const scriptMatch = command.match(/^(?:--[A-Za-z0-9_-]+\s+)*([A-Za-z0-9:_-]+)/);
     if (!scriptMatch) {
       fail(`${filePath}: public workflow npm run reference must name a literal script.`);
     }

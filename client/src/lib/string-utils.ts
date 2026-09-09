@@ -63,8 +63,11 @@ export function truncate(str: string, maxLength: number): string {
  */
 export function stripHtml(html: string): string {
   if (!html) return '';
-  
-  return html.replace(/<[^>]*>/g, '');
+
+  if (typeof DOMParser === 'undefined') return html.replace(/[<>]/g, '');
+  const document = new DOMParser().parseFromString(html, 'text/html');
+  document.querySelectorAll('script, style, iframe, object, embed').forEach((element) => element.remove());
+  return document.body.textContent ?? '';
 }
 
 /**

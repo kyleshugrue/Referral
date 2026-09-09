@@ -14,6 +14,7 @@ import {
 
 const router = express.Router();
 
+router.use(pushDiagnosticsLimiter);
 // Chain both middlewares: auth first, then registration check
 router.use(requireAuthJWT);
 router.use(requireCompleteRegistration);

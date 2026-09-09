@@ -233,8 +233,8 @@ class CentralizedMatchDescriptionCommandCenter {
    * Ensures instant staleness detection when user profiles change
    */
   async processProfileUpdate(userId: number, changes: string[] = []): Promise<CMDCCOperationResult> {
-    console.log(`[CMDCC] Processing profile update for user ${userId}`);
-    console.log(`[CMDCC] Profile changes:`, changes);
+    console.log('[CMDCC] Processing profile update', { userId });
+    console.log('[CMDCC] Profile change count', { changeCount: changes.length });
     
     const result: CMDCCOperationResult = {
       success: false,

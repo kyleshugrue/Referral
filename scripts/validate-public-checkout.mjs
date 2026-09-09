@@ -297,10 +297,9 @@ const sourceState = async (sourceRoot) => {
   const files = {};
   for (const relativePath of paths) {
     const filePath = path.join(sourceRoot, relativePath);
-    const info = await lstat(filePath).catch(() => fail("Tracked source file is unavailable."));
-    if (!info.isFile() || info.isSymbolicLink()) fail("Tracked source contains a non-regular file.");
+    const { info, bytes } = await readRegularFile(filePath, "Tracked source file");
     files[relativePath] = {
-      sha256: sha256(await readFile(filePath)),
+      sha256: sha256(bytes),
       mode: info.mode & 0o777,
     };
   }

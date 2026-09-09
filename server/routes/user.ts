@@ -19,6 +19,7 @@ import { expensiveRequestLimiter, profileMutationLimiter, profileReadLimiter } f
 import { normalizeStringArray } from '../lib/registration-input';
 
 const router = Router();
+router.use(profileReadLimiter);
 
 function parseExpectedProfileVersion(req: { headers: Record<string, unknown>; body?: unknown }): number | undefined {
   const header = req.headers['if-match'];

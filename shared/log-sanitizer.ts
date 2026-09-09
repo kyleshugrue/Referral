@@ -84,6 +84,7 @@ const SENSITIVE_URL_PARAM_PATTERN = new RegExp(
   `([?&](?:${SENSITIVE_URL_PARAMS.map((param) => param.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})=)[^&\\s]+`,
   'gi',
 );
+const CLOUD_URL_PARAM_PATTERN = /([?&](?:x-goog-[A-Za-z0-9_-]{1,80}|x-amz-[A-Za-z0-9_-]{1,80}|googleaccessid|signature|expires)=)[^&\s]{1,4096}/gi;
 
 // Matches email-address-shaped strings.
 const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
@@ -137,10 +138,7 @@ export function scrubSensitiveText(text: string): string {
   // Cloud storage signed URLs use several provider-specific credential
   // parameters. Keep the URL shape for diagnostics, but never retain the
   // credential-bearing values.
-  result = result.replace(
-    /([?&](?:x-goog-[^=&\s]+|x-amz-[^=&\s]+|googleaccessid|signature|expires)=)[^&\s]+/gi,
-    '$1[REDACTED]',
-  );
+  result = result.replace(CLOUD_URL_PARAM_PATTERN, '$1[REDACTED]');
 
   result = result.replace(SENSITIVE_URL_PARAM_PATTERN, '$1[REDACTED]');
 
@@ -188,12 +186,22 @@ export function sanitizeLogValue(value: unknown, seen: WeakSet<object> = new Wea
     }
     seen.add(value);
 
-    const output: Record<string, unknown> = {};
+    const output: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
       if (isSensitiveKey(key)) {
-        output[key] = val === undefined ? undefined : '[REDACTED]';
+        Object.defineProperty(output, key, {
+          configurable: true,
+          enumerable: true,
+          value: val === undefined ? undefined : '[REDACTED]',
+          writable: true,
+        });
       } else {
-        output[key] = sanitizeLogValue(val, seen);
+        Object.defineProperty(output, key, {
+          configurable: true,
+          enumerable: true,
+          value: sanitizeLogValue(val, seen),
+          writable: true,
+        });
       }
     }
     return output;
