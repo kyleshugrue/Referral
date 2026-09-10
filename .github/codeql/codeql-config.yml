@@ -1,0 +1,9 @@
+name: Referral CodeQL configuration
+
+# csrf-sync provides the synchronizer-token middleware used by this app, but
+# CodeQL's Express model does not recognize that package as a CSRF protector.
+queries:
+  - uses: security-and-quality
+query-filters:
+  - exclude:
+      id: js/missing-token-validation
