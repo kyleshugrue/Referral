@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState, useEffect } from "react";
 import { queryClient } from "@/lib/queryClient";
+import { fetchWithCsrf } from "@/lib/csrf";
 import { useToast } from "@/hooks/use-toast";
 import { config } from "@/lib/config";
 import { getCurrentAccessToken, refreshAccessToken, waitForTokensReady } from "@/lib/token-manager";
@@ -597,7 +598,7 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
       
       console.log(`[useProfileSave][${opId}] Request URL: ${requestUrl}, isIOSNative: ${isNativeiOS()}`);
       
-      let response = await fetch(requestUrl, {
+      let response = await fetchWithCsrf(requestUrl, {
         method: 'PATCH',
         headers: requestHeaders,
         body: JSON.stringify(cleanedData),
@@ -614,7 +615,7 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
         
         if (refreshedHeaders) {
           // Retry with refreshed token
-          response = await fetch(requestUrl, {
+          response = await fetchWithCsrf(requestUrl, {
             method: 'PATCH',
             headers: refreshedHeaders,
             body: JSON.stringify(cleanedData),
@@ -995,7 +996,7 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
       
       console.log(`[useProfileSave] uploadPhoto: URL=${requestUrl}, isIOSNative=${isNativeiOS()}`);
 
-      let uploadRes = await fetch(requestUrl, {
+      let uploadRes = await fetchWithCsrf(requestUrl, {
         method: 'POST',
         headers: requestHeaders,
         body: formData,
@@ -1008,7 +1009,7 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
         const refreshedHeaders = await handleIOSNative401(requestHeaders);
         
         if (refreshedHeaders) {
-          uploadRes = await fetch(requestUrl, {
+          uploadRes = await fetchWithCsrf(requestUrl, {
             method: 'POST',
             headers: refreshedHeaders,
             body: formData,
@@ -1049,7 +1050,7 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
     updateSaveStatus('saving');
     try {
       const headers = await buildIOSNativeHeaders({});
-      let response = await fetch(getAbsoluteUrl('/api/media/photo'), {
+      let response = await fetchWithCsrf(getAbsoluteUrl('/api/media/photo'), {
         method: 'DELETE',
         headers,
         credentials: 'include',
@@ -1057,7 +1058,7 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
       if (response.status === 401 && isNativeiOS()) {
         const refreshedHeaders = await handleIOSNative401(headers);
         if (refreshedHeaders) {
-          response = await fetch(getAbsoluteUrl('/api/media/photo'), {
+          response = await fetchWithCsrf(getAbsoluteUrl('/api/media/photo'), {
             method: 'DELETE',
             headers: refreshedHeaders,
             credentials: 'include',
@@ -1107,7 +1108,7 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
       
       console.log(`[useProfileSave] uploadResume: URL=${requestUrl}, isIOSNative=${isNativeiOS()}`);
 
-      let uploadRes = await fetch(requestUrl, {
+      let uploadRes = await fetchWithCsrf(requestUrl, {
         method: 'POST',
         headers: requestHeaders,
         body: formData,
@@ -1120,7 +1121,7 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
         const refreshedHeaders = await handleIOSNative401(requestHeaders);
         
         if (refreshedHeaders) {
-          uploadRes = await fetch(requestUrl, {
+          uploadRes = await fetchWithCsrf(requestUrl, {
             method: 'POST',
             headers: refreshedHeaders,
             body: formData,
@@ -1158,7 +1159,7 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
     updateSaveStatus('saving');
     try {
       const headers = await buildIOSNativeHeaders({});
-      let response = await fetch(getAbsoluteUrl('/api/media/resume'), {
+      let response = await fetchWithCsrf(getAbsoluteUrl('/api/media/resume'), {
         method: 'DELETE',
         headers,
         credentials: 'include',
@@ -1166,7 +1167,7 @@ export function useProfileSave(options: UseProfileSaveOptions = {}): UseProfileS
       if (response.status === 401 && isNativeiOS()) {
         const refreshedHeaders = await handleIOSNative401(headers);
         if (refreshedHeaders) {
-          response = await fetch(getAbsoluteUrl('/api/media/resume'), {
+          response = await fetchWithCsrf(getAbsoluteUrl('/api/media/resume'), {
             method: 'DELETE',
             headers: refreshedHeaders,
             credentials: 'include',

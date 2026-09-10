@@ -5,6 +5,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { getRegistrationData, clearRegistrationData } from "@/lib/registration-helpers";
 import * as firebaseLib from "@/lib/firebase";
 import { logger } from "@/lib/logger";
+import { fetchWithCsrf } from "@/lib/csrf";
 
 // Add type declaration for window property
 declare global {
@@ -191,7 +192,7 @@ export function RegisterLetGoButton({ parentHandleCreateAccount }: RegisterLetGo
             throw new Error("Your registration session expired. Please restart registration.");
           }
           logger.debug("DEBUG: Creating the verified Firebase user profile");
-          const response = await fetch('/api/register', {
+          const response = await fetchWithCsrf('/api/register', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',

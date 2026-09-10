@@ -5,6 +5,7 @@ import { useLocation } from "wouter";
 import ProfileDialog from "@/components/profile-dialog";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
+import { fetchWithCsrf } from "@/lib/csrf";
 import ConnectionsCarousel from "@/components/connections-carousel";
 import { Input } from "@/components/ui/input";
 import { getInitials } from "@/lib/avatar-utils";
@@ -105,7 +106,7 @@ export default function ConnectionsPage() {
       }
       
       // Call the API to mark notifications as read
-      await fetch(endpoint, {
+      await fetchWithCsrf(endpoint, {
         method: 'PATCH',
       });
       

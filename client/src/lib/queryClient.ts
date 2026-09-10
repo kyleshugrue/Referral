@@ -3,6 +3,7 @@ import * as firebaseLib from "./firebase";
 import { config } from "./config";
 import { getCurrentAccessToken, refreshAccessToken, waitForTokensReady, isRefreshInProgress, waitForRefreshComplete } from './token-manager';
 import { Capacitor } from "@capacitor/core";
+import { getCsrfHeaders } from './csrf';
 
 /**
  * Convert relative URLs to absolute URLs using the configured API base URL
@@ -115,6 +116,13 @@ export async function apiRequest(
 
     // Convert relative URL to absolute URL for native platforms
     const absoluteUrl = getAbsoluteUrl(url);
+    // Browser requests can carry both a bearer credential and an existing
+    // session cookie, so protect them whenever they use the web transport.
+    // Native Capacitor requests use bearer authentication without a browser
+    // session and must not make a relative web-only token request.
+    if (!Capacitor.isNativePlatform()) {
+      Object.assign(headers, await getCsrfHeaders(method));
+    }
 
     let res = await fetch(absoluteUrl, {
       method,

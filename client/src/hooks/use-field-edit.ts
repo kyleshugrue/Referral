@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
+import { fetchWithCsrf } from "@/lib/csrf";
 
 interface UseFieldEditOptions<T> {
   fieldName: string;
@@ -93,7 +94,7 @@ export function useFieldEdit<T>({
     setError(null);
 
     try {
-      const response = await fetch(`/api/users/${userId}`, {
+      const response = await fetchWithCsrf(`/api/users/${userId}`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",

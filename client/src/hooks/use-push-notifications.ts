@@ -4,6 +4,7 @@ import { PushNotifications } from '@capacitor/push-notifications';
 import { FirebaseMessaging } from '@capacitor-firebase/messaging';
 import { Device } from '@capacitor/device';
 import { logger } from '@/lib/logger';
+import { fetchWithCsrf } from '@/lib/csrf';
 
 declare global {
   interface Window {
@@ -376,7 +377,7 @@ export function usePushNotifications(): PushNotificationHookReturn {
         });
         logger.debug('[Push Notifications] Registering token with backend', { platform: 'ios-native' });
         
-        const response = await fetch('/api/push-notifications/register', {
+        const response = await fetchWithCsrf('/api/push-notifications/register', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

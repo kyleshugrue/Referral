@@ -50,6 +50,15 @@ export const tokenRefreshLimiter = rateLimit({
   message: jsonMessage('Too many token requests. Please try again in a few minutes.'),
 });
 
+/** Token revocation: stricter than refresh because invalid attempts are cheap to repeat. */
+export const tokenRevokeLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 30,
+  ...standardLimiterOptions,
+  ...sharedStore('token-revoke'),
+  message: jsonMessage('Too many token revocation attempts. Please try again in a few minutes.'),
+});
+
 /** Registration: 30 requests per hour per IP (registration is multi-step). */
 export const registerLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,

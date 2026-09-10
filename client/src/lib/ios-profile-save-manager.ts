@@ -19,6 +19,7 @@ import { config } from './config';
 import { getCurrentAccessToken, refreshAccessToken, waitForTokensReady } from './token-manager';
 import { queryClient } from './queryClient';
 import { logger } from './logger';
+import { fetchWithCsrf } from './csrf';
 import type { User } from '@shared/schema';
 
 const MAX_RETRIES = 3;
@@ -223,7 +224,7 @@ class IOSProfileSaveManager {
         
         headers['X-Operation-ID'] = operation.id;
         
-        let response = await fetch(requestUrl, {
+        let response = await fetchWithCsrf(requestUrl, {
           method: 'PATCH',
           headers,
           body: JSON.stringify(operation.data),
@@ -240,7 +241,7 @@ class IOSProfileSaveManager {
             headers = await this.buildHeaders();
             headers['X-Operation-ID'] = operation.id;
             
-            response = await fetch(requestUrl, {
+            response = await fetchWithCsrf(requestUrl, {
               method: 'PATCH',
               headers,
               body: JSON.stringify(operation.data),

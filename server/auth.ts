@@ -1,7 +1,6 @@
 import passport from "passport";
 import { Express, json, urlencoded } from "express";
 import session from "express-session";
-import csrf from "csurf";
 import { randomBytes } from "crypto";
 import { storage } from "./storage";
 import { User as SelectUser } from "@shared/schema";
@@ -24,7 +23,6 @@ import { isActiveAccount } from './lib/account-status';
 import { closeUserConnections } from './websocket-utils';
 import { requireAuthJWT } from './middleware/auth-jwt';
 import { csrfSync } from 'csrf-sync';
-import { isOriginAllowed } from './lib/http-security';
 
 // Export session middleware for WebSocket authentication
 export let sessionMiddleware: ReturnType<typeof session>;
@@ -100,18 +98,16 @@ export function setupAuth(app: Express) {
 
   // Create and export session middleware for WebSocket authentication.
   sessionMiddleware = session(sessionSettings);
-  const csrfProtection = csrf();
   const { csrfSynchronisedProtection } = csrfSync({
-    // Native bearer requests do not use the browser session. Browser requests
-    // from an allowlisted origin are already protected by the same-origin
-    // policy below; other unsafe requests must present a synchronizer token.
+    // Only an authenticated Passport session needs a synchronizer token.
+    // Native requests with a bearer credential and public endpoints do not
+    // authenticate with the browser session. A request carrying both a
+    // session and a bearer credential remains protected until the route's
+    // authentication middleware makes the credential choice explicit.
     skipCsrfProtection: (req) => {
       if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return true;
-      if (typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ')) {
-        return true;
-      }
-      const origin = req.get('origin');
-      return !origin || isOriginAllowed(origin, isProduction);
+      const hasAuthenticatedSession = req.isAuthenticated?.() ?? false;
+      return !hasAuthenticatedSession;
     },
   });
 
@@ -172,21 +168,18 @@ export function setupAuth(app: Express) {
   app.use(json({ limit: serverEnv.jsonBodyLimitBytes }));
   app.use(urlencoded({ extended: true, limit: serverEnv.urlencodedBodyLimitBytes }));
   app.use(sessionMiddleware);
-  app.use(csrfSynchronisedProtection);
-  app.use((req, res, next) => {
-    if (
-      ['GET', 'HEAD', 'OPTIONS'].includes(req.method) ||
-      (typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ')) ||
-      !req.get('origin') ||
-      isOriginAllowed(req.get('origin'), isProduction)
-    ) {
-      next();
-      return;
-    }
-    csrfProtection(req, res, next);
-  });
+  // Passport must restore the session before the CSRF policy decides whether
+  // this unsafe request is cookie-authenticated.
   app.use(passport.initialize());
   app.use(passport.session());
+  app.use(csrfSynchronisedProtection);
+  app.get('/api/csrf-token', (req, res) => {
+    if (!req.csrfToken) {
+      res.status(503).json({ message: 'CSRF protection is unavailable' });
+      return;
+    }
+    res.json({ csrfToken: req.csrfToken() });
+  });
 
   // LocalStrategy removed - Firebase handles all authentication
 

@@ -6,6 +6,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
 import * as firebaseLib from "../lib/firebase";
 import { logger } from "@/lib/logger";
+import { fetchWithCsrf } from "@/lib/csrf";
 import {
   getPendingRegistrationData,
   saveRegistrationData,
@@ -84,7 +85,7 @@ export default function VerifyEmailPage() {
           // Create the user in the backend now that email is verified
           logger.debug("Creating user in backend after email verification");
           
-          const response = await fetch('/api/register', {
+          const response = await fetchWithCsrf('/api/register', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',

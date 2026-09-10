@@ -1,6 +1,7 @@
 import { Capacitor } from '@capacitor/core';
 import { config } from './config';
 import { getCurrentAccessToken } from './token-manager';
+import { fetchWithCsrf } from './csrf';
 
 export async function openAuthenticatedWebSocket(url: string): Promise<WebSocket> {
   const endpoint = Capacitor.isNativePlatform()
@@ -11,7 +12,7 @@ export async function openAuthenticatedWebSocket(url: string): Promise<WebSocket
   if (accessToken && accessToken !== 'PENDING_REFRESH') {
     headers.Authorization = `Bearer ${accessToken}`;
   }
-  const response = await fetch(endpoint, {
+  const response = await fetchWithCsrf(endpoint, {
     method: 'POST',
     credentials: 'include',
     headers,

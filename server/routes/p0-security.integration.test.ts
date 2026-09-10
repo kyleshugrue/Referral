@@ -374,6 +374,80 @@ describe("P0 HTTP security regressions", () => {
       expect(response.status).toBe(403);
     });
 
+    it("requires a synchronizer token even for an allowed browser Origin", async () => {
+      const owner = makeUser({ id: 1 });
+      await startHarness([owner]);
+      const sessionResponse = await requestJson(port, "/__p0/session/1");
+      const cookie = sessionResponse.headers.get("set-cookie");
+      expect(cookie).toBeTruthy();
+
+      const response = await requestJson(port, "/api/user", {
+        method: "PATCH",
+        headers: {
+          cookie: cookie as string,
+          origin: "http://localhost",
+        },
+        body: JSON.stringify({ bio: "missing csrf token" }),
+      });
+
+      expect(response.status).toBe(403);
+      expect(state.updateCalls).toHaveLength(0);
+    });
+
+    it("accepts a synchronizer token with an allowed browser Origin", async () => {
+      const owner = makeUser({ id: 1 });
+      await startHarness([owner]);
+      const sessionResponse = await requestJson(port, "/__p0/session/1");
+      const cookie = sessionResponse.headers.get("set-cookie");
+      expect(cookie).toBeTruthy();
+
+      const tokenResponse = await requestJson(port, "/api/csrf-token", {
+        headers: { cookie: cookie as string },
+      });
+      const csrfToken = (tokenResponse.body as { csrfToken?: unknown }).csrfToken;
+      expect(tokenResponse.status).toBe(200);
+      expect(typeof csrfToken).toBe("string");
+
+      const response = await requestJson(port, "/api/user", {
+        method: "PATCH",
+        headers: {
+          cookie: cookie as string,
+          origin: "http://localhost",
+          "x-csrf-token": csrfToken as string,
+        },
+        body: JSON.stringify({ bio: "csrf protected update" }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(state.updateCalls).toHaveLength(1);
+    });
+
+    it("rejects a valid synchronizer token from an untrusted Origin", async () => {
+      const owner = makeUser({ id: 1 });
+      await startHarness([owner]);
+      const sessionResponse = await requestJson(port, "/__p0/session/1");
+      const cookie = sessionResponse.headers.get("set-cookie");
+      expect(cookie).toBeTruthy();
+
+      const tokenResponse = await requestJson(port, "/api/csrf-token", {
+        headers: { cookie: cookie as string },
+      });
+      const csrfToken = (tokenResponse.body as { csrfToken?: unknown }).csrfToken;
+
+      const response = await requestJson(port, "/api/user", {
+        method: "PATCH",
+        headers: {
+          cookie: cookie as string,
+          origin: "https://evil.example.invalid",
+          "x-csrf-token": csrfToken as string,
+        },
+        body: JSON.stringify({ bio: "cross-site update" }),
+      });
+
+      expect(response.status).toBe(403);
+      expect(state.updateCalls).toHaveLength(0);
+    });
+
     it("allows a valid native bearer request without an Origin header", async () => {
       const owner = makeUser({ id: 1 });
       await startHarness([owner]);
@@ -384,6 +458,28 @@ describe("P0 HTTP security regressions", () => {
       });
 
       expect(response.status).toBe(200);
+    });
+  });
+
+  describe("token endpoint abuse limits", () => {
+    it("rejects a revoke burst before token hashing or storage work", async () => {
+      await startHarness([makeUser({ id: 1 })]);
+
+      const responses = await Promise.all(
+        Array.from({ length: 31 }, () => requestJson(port, "/api/auth/revoke", {
+          method: "POST",
+          body: JSON.stringify({
+            refreshToken: "",
+            deviceId: "synthetic-device",
+          }),
+        })),
+      );
+
+      expect(responses.slice(0, 30).every((response) => response.status === 400)).toBe(true);
+      expect(responses[30].status).toBe(429);
+      expect(responses[30].body).toMatchObject({
+        message: "Too many token revocation attempts. Please try again in a few minutes.",
+      });
     });
   });
 

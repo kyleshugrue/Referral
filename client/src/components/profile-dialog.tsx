@@ -13,6 +13,7 @@ import { MapPin, Building2, Briefcase, Loader2, FileText, MessageSquare, UserPlu
 import { type User } from "@shared/schema";
 import { useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { fetchWithCsrf } from "@/lib/csrf";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/use-auth";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -456,7 +457,7 @@ export default function ProfileDialog({
           // Wait a moment then retry in the background
           setTimeout(() => {
             console.log("ProfileDialog - Background retry for connection request");
-            fetch(`/api/connections/request/${profile.id}`, {
+            fetchWithCsrf(`/api/connections/request/${profile.id}`, {
               method: 'POST',
               credentials: 'include'
             }).then(response => {

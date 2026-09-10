@@ -9,6 +9,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Loader2, CheckCircle } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { queryClient } from "@/lib/queryClient";
+import { fetchWithCsrf } from "@/lib/csrf";
 import { 
   markRegistrationComplete, 
   saveRegistrationData, 
@@ -364,7 +365,7 @@ function NewMultiStepRegisterPage() {
         return null;
       }
 
-      const response = await fetch("/api/user", {
+      const response = await fetchWithCsrf("/api/user", {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
@@ -526,7 +527,7 @@ function NewMultiStepRegisterPage() {
       uploadFormData.append('photo', file);
       
       logger.debug("[PHOTO UPLOAD] Making upload request to server...");
-      const uploadResponse = await fetch('/api/upload/photo', {
+      const uploadResponse = await fetchWithCsrf('/api/upload/photo', {
         method: 'POST',
         body: uploadFormData,
         credentials: 'include'
@@ -631,7 +632,7 @@ function NewMultiStepRegisterPage() {
         formData.append('resume', file);
         
         logger.debug("[REGISTRATION-RESUME] Making upload request to server...");
-        const uploadResponse = await fetch('/api/upload/resume', {
+        const uploadResponse = await fetchWithCsrf('/api/upload/resume', {
           method: 'POST',
           body: formData,
           credentials: 'include',
@@ -746,7 +747,7 @@ function NewMultiStepRegisterPage() {
       // Set registrationCompleted in database
       logger.debug("Setting registrationCompleted in database before redirect");
       
-      const updateResponse = await fetch('/api/user', {
+      const updateResponse = await fetchWithCsrf('/api/user', {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -873,7 +874,7 @@ function NewMultiStepRegisterPage() {
             const isIOSNative = Capacitor.getPlatform() === 'ios' && Capacitor.isNativePlatform();
             
             // Sync with backend to ensure session cookie is fresh
-            const syncResponse = await fetch('/api/firebase-auth', {
+            const syncResponse = await fetchWithCsrf('/api/firebase-auth', {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
@@ -982,7 +983,7 @@ function NewMultiStepRegisterPage() {
               const isIOSSync = Capacitor.getPlatform() === 'ios' && Capacitor.isNativePlatform();
               
               // Call our server endpoint to sync
-              const response = await fetch('/api/firebase-auth', {
+              const response = await fetchWithCsrf('/api/firebase-auth', {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
@@ -1026,7 +1027,7 @@ function NewMultiStepRegisterPage() {
           try {
             logger.debug("[REGISTRATION] Data persisted successfully, triggering synergy match calculation");
             // Trigger synergy match calculation in the background - don't wait for response
-            fetch('/api/matches/synergy/trigger', {
+            fetchWithCsrf('/api/matches/synergy/trigger', {
               method: 'POST',
               credentials: 'include',
             }).then(response => {

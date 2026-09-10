@@ -5,6 +5,7 @@
 import { logger } from './logger';
 import { auth } from './firebase';
 import { toast } from '@/hooks/use-toast';
+import { fetchWithCsrf } from './csrf';
 import type { User } from '@shared/schema';
 
 const REGISTRATION_STORAGE_VERSION = 2;
@@ -262,7 +263,7 @@ export async function savePartialRegistrationToServer(data: RegistrationData, sh
     });
     
     // Use the partial registration endpoint
-    const response = await fetch('/api/register/partial', {
+    const response = await fetchWithCsrf('/api/register/partial', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

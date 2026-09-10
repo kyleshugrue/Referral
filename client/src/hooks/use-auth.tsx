@@ -11,6 +11,7 @@ import * as firebaseLib from "../lib/firebase";
 import { User as FirebaseUser, onAuthStateChanged } from "firebase/auth";
 import { disconnectGlobalWebSocket } from "@/hooks/use-global-websocket";
 import { logger } from "@/lib/logger";
+import { clearCsrfToken, fetchWithCsrf } from "@/lib/csrf";
 import {
   loadTokens,
   setTokensForGeneration,
@@ -884,6 +885,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logoutMutation = useMutation({
     mutationFn: async (): Promise<RemoteRevocationResult> => {
       logger.debug("Attempting logout");
+      clearCsrfToken();
 
       // Clear in-memory and local credentials before any remote await. Keep a
       // private snapshot only long enough to authenticate revocation.
@@ -1067,7 +1069,7 @@ export function useAuth() {
           logger.debug("🔄 [REFRESH DEBUG] Calling /api/firebase-auth to sync session...");
           // Detect platform for JWT token flow
           const isIOSRefresh = Capacitor.getPlatform() === 'ios' && Capacitor.isNativePlatform();
-          const syncResponse = await fetch('/api/firebase-auth', {
+          const syncResponse = await fetchWithCsrf('/api/firebase-auth', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',

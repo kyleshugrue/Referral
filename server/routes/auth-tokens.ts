@@ -12,10 +12,11 @@ import { logger } from '../lib/logger';
 import { logSecurityEvent, extractRequestMetadata } from '../lib/security-logger';
 import { issueWebSocketTicket } from '../lib/websocket-tickets';
 import { boundedString } from '../lib/request-validation';
+import { authLimiter, tokenRefreshLimiter, tokenRevokeLimiter } from '../lib/rate-limits';
 
 const router = Router();
 
-router.post('/ws-ticket', requireAuthJWT, async (req, res) => {
+router.post('/ws-ticket', authLimiter, requireAuthJWT, async (req, res) => {
   try {
     if (!req.user?.id) return res.sendStatus(401);
     const ticket = await issueWebSocketTicket(req.user.id, {
@@ -39,7 +40,7 @@ router.post('/ws-ticket', requireAuthJWT, async (req, res) => {
  * Validates a refresh token, rotates it (deletes old, creates new),
  * and returns new access + refresh tokens
  */
-router.post('/refresh', async (req, res) => {
+router.post('/refresh', tokenRefreshLimiter, async (req, res) => {
   try {
     const { refreshToken, deviceId } = req.body;
 
@@ -182,7 +183,7 @@ router.post('/refresh', async (req, res) => {
  * 
  * Deletes a specific refresh token (device logout)
  */
-router.post('/revoke', async (req, res) => {
+router.post('/revoke', tokenRevokeLimiter, async (req, res) => {
   try {
     const { refreshToken, deviceId } = req.body;
 
@@ -252,7 +253,7 @@ router.post('/revoke', async (req, res) => {
  * SECURITY: Requires authentication - only authenticated users can revoke their own tokens
  * Deletes all refresh tokens for the authenticated user (full logout from all devices)
  */
-router.post('/revoke-all', requireAuthJWT, async (req, res) => {
+router.post('/revoke-all', tokenRevokeLimiter, requireAuthJWT, async (req, res) => {
   try {
     // Get userId from authenticated session instead of request body
     const userId = req.user!.id;

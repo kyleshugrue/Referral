@@ -64,12 +64,17 @@ async function createCurrentProfileSnapshot(user: User): Promise<{ id: number; c
 // Keep legacy diagnostics on the bounded logger boundary. These call sites
 // historically passed profile fields and Error objects to console directly;
 // the route now emits only fixed operational markers from those calls.
-const console = {
+// Keep legacy diagnostics behind a fixed-message boundary. Arguments are
+// intentionally ignored so profile values, validation objects, media
+// references, and errors cannot become log payloads during the remaining
+// route decomposition.
+const profileDiagnostics = {
   log: (...args: unknown[]) => { void args; logger.debug('[UserRoute] operation'); },
   info: (...args: unknown[]) => { void args; logger.debug('[UserRoute] operation'); },
   warn: (...args: unknown[]) => { void args; logger.debug('[UserRoute] warning'); },
   error: (...args: unknown[]) => { void args; logger.error('[UserRoute] operation failed'); },
 };
+const console = profileDiagnostics;
 
 // `hasRequiredFieldsForMatching` and `shouldQueueInitialMatchJobs` live in
 // ../lib/profile-matching so they can be unit tested without importing this

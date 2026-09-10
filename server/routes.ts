@@ -37,7 +37,6 @@ import { verifyInternalAuth } from "./lib/internal-auth";
 import { operationalMetricsSnapshot } from "./lib/operational-metrics";
 import {
   authLimiter,
-  tokenRefreshLimiter,
   registerLimiter,
   passwordResetLimiter,
   uploadLimiter,
@@ -305,7 +304,7 @@ export async function registerRoutes(app: Express): Promise<void> {
   app.use('/api/firebase-auth', authLimiter, firebaseAuthRouter);
   
   // Register JWT token management router (no auth required for token refresh, rate limited)
-  app.use('/api/auth', tokenRefreshLimiter, authTokensRouter);
+  app.use('/api/auth', authTokensRouter);
   
   // Register iOS native verification router (requires authentication, rate limited)
   app.use('/api/ios-native-verify', authLimiter, iosNativeVerifyRouter);

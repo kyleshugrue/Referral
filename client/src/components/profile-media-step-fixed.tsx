@@ -7,6 +7,7 @@ import ImageCropper from "./image-cropper";
 import { getRegistrationData, clearRegistrationData } from "@/lib/registration-helpers";
 import * as firebaseLib from "@/lib/firebase";
 import { logger } from "@/lib/logger";
+import { fetchWithCsrf } from "@/lib/csrf";
 import type { RegistrationFormData } from "./new-register-steps/registration-types";
 import type { UseFormReturn } from "react-hook-form";
 
@@ -67,7 +68,7 @@ export function ProfileMediaStepFixed({
       logger.debug("Submitting registration data...");
       
       // Make direct API request
-      const response = await fetch('/api/register', {
+      const response = await fetchWithCsrf('/api/register', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
