@@ -16,6 +16,7 @@ declare module '*.mjs' {
   export const buildProductionEnvironment: any;
   export const compareRuntimeOutputs: any;
   export const contentTypeFor: any;
+  export const classifyMediaReference: any;
   export const exportSelectedFiles: any;
   export const findingFingerprint: any;
   export const getCommittedSnapshot: any;
@@ -26,6 +27,7 @@ declare module '*.mjs' {
     errors: Array<Record<string, any>>;
   };
   export const localPathForReference: any;
+  export const objectKeyForStableMediaReference: any;
   export const parseCli: any;
   export const scanExport: any;
   export const scanText: (...args: any[]) => Array<Record<string, any>>;
