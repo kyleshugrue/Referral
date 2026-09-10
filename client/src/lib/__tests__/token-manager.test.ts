@@ -87,6 +87,7 @@ describe('native token lifecycle fencing', () => {
   });
 
   afterEach(() => {
+    vi.clearAllTimers();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -128,6 +129,66 @@ describe('native token lifecycle fencing', () => {
     vi.mocked(fetch).mockRejectedValueOnce(new TypeError('network'));
     await expect(manager.refreshAccessToken()).resolves.toBeNull();
     expect(manager.getLastRefreshOutcome()).toBe('network_error');
+  });
+
+  it('aborts a hung refresh request and releases the mutex', async () => {
+    const manager = await loadManager();
+    await seedTokens(manager);
+    vi.mocked(fetch).mockImplementation((_input, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('aborted', 'AbortError'));
+      });
+    }));
+
+    const refreshing = manager.refreshAccessToken();
+    await vi.advanceTimersByTimeAsync(15000);
+
+    await expect(refreshing).resolves.toBeNull();
+    expect(manager.getLastRefreshOutcome()).toBe('timeout');
+    expect(manager.isRefreshInProgress()).toBe(false);
+    expect(vi.mocked(fetch).mock.calls[0]?.[1]).toEqual(expect.objectContaining({
+      signal: expect.any(AbortSignal),
+    }));
+  });
+
+  it('retries malformed successful responses without clearing the stored session', async () => {
+    const manager = await loadManager();
+    await seedTokens(manager);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response('{}', { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        accessToken: jwt(),
+        ['refresh' + 'Token']: 'refresh-recovered',
+      }), { status: 200, headers: { 'content-type': 'application/json' } }));
+
+    await expect(manager.refreshAccessToken()).resolves.toBeNull();
+    expect(manager.getLastRefreshOutcome()).toBe('malformed_response');
+    expect(manager.getCurrentAccessToken()).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(30000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+    expect(manager.getLastRefreshOutcome()).toBe('success');
+    expect(manager.getCurrentAccessToken()).not.toBeNull();
+  });
+
+  it('shares one bounded refresh request across concurrent callers', async () => {
+    const manager = await loadManager();
+    await seedTokens(manager);
+    const response = deferred<Response>();
+    vi.mocked(fetch).mockReturnValueOnce(response.promise);
+
+    const first = manager.refreshAccessToken();
+    const second = manager.refreshAccessToken();
+    await vi.waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1));
+
+    response.resolve(new Response(JSON.stringify({
+      accessToken: jwt(),
+      ['refresh' + 'Token']: 'refresh-shared',
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    await expect(Promise.all([first, second])).resolves.toEqual([expect.any(String), expect.any(String)]);
   });
 
   it('does not let a delayed refresh resurrect credentials after logout', async () => {

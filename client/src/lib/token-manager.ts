@@ -52,11 +52,14 @@ let isRefreshing: boolean = false;
 // Auto-refresh timer
 let refreshTimer: NodeJS.Timeout | null = null;
 let retryTimer: NodeJS.Timeout | null = null; // Track retry timer for network/transient errors
+let activeRefreshAbortController: AbortController | null = null;
 
 // Constants
 const REFRESH_TOKEN_KEY = 'refresh_token';
 const REFRESH_BUFFER_MS = 60000; // Refresh 1 minute before expiry
 const INIT_TIMEOUT_MS = 3000; // Maximum time to wait for token initialization (3 seconds)
+const REFRESH_REQUEST_TIMEOUT_MS = 15000;
+const REFRESH_RETRY_DELAY_MS = 30000;
 
 export type RefreshOutcome =
   | 'success'
@@ -69,6 +72,7 @@ export type RefreshOutcome =
   | 'malformed_response'
   | 'offline'
   | 'network_error'
+  | 'timeout'
   | 'stale';
 
 let lastRefreshOutcome: RefreshOutcome = 'not_applicable';
@@ -94,6 +98,7 @@ export function getAuthGeneration(): number {
 export function beginAuthSession(): number {
   authGeneration += 1;
   clearRefreshTimer();
+  cancelActiveRefreshRequest();
   return authGeneration;
 }
 
@@ -140,6 +145,24 @@ function clearRefreshTimer() {
     retryTimer = null;
     logger.debug('[TokenManager] Retry timer cleared');
   }
+}
+
+function cancelActiveRefreshRequest() {
+  if (activeRefreshAbortController) {
+    activeRefreshAbortController.abort();
+    activeRefreshAbortController = null;
+    logger.debug('[TokenManager] Active refresh request cancelled');
+  }
+}
+
+function scheduleRefreshRetry(generation: number) {
+  if (!isCurrentGeneration(generation) || retryTimer) return;
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    if (!isCurrentGeneration(generation)) return;
+    logger.debug('[TokenManager] Retrying token refresh after transient failure');
+    void refreshAccessToken(generation);
+  }, REFRESH_RETRY_DELAY_MS);
 }
 
 /**
@@ -481,6 +504,7 @@ export async function clearTokens(): Promise<void> {
     
     // CRITICAL: Cancel refresh timer first
     clearRefreshTimer();
+    cancelActiveRefreshRequest();
     
     // Clear in-memory state
     currentAccessToken = null;
@@ -549,6 +573,7 @@ export function getCurrentAccessToken(): string | null {
  * Only clears tokens on definitive auth failures (401/403)
  */
 async function performRefresh(generation: number): Promise<string | null> {
+  let timedOut = false;
   try {
     logger.debug('[TokenManager] Performing token refresh');
     
@@ -625,19 +650,35 @@ async function performRefresh(generation: number): Promise<string | null> {
     
     logger.debug('[TokenManager] Calling /api/auth/refresh endpoint', { deviceId: tokenData.deviceId });
     
-    // Call refresh endpoint with deviceId (required by server)
-    const response = await fetch(`${config.apiBaseUrl}/api/auth/refresh`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Platform': 'ios-native'
-      },
-      body: JSON.stringify({
-        refreshToken: tokenData.refreshToken,
-        deviceId: tokenData.deviceId
-      }),
-      credentials: 'include'
-    });
+    // Call refresh endpoint with deviceId (required by server). A bounded
+    // request prevents a hung native connection from holding the mutex forever.
+    const abortController = new AbortController();
+    activeRefreshAbortController = abortController;
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      abortController.abort();
+    }, REFRESH_REQUEST_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(`${config.apiBaseUrl}/api/auth/refresh`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Platform': 'ios-native'
+        },
+        body: JSON.stringify({
+          refreshToken: tokenData.refreshToken,
+          deviceId: tokenData.deviceId
+        }),
+        credentials: 'include',
+        signal: abortController.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+      if (activeRefreshAbortController === abortController) {
+        activeRefreshAbortController = null;
+      }
+    }
     if (!isCurrentGeneration(generation)) {
       lastRefreshOutcome = 'stale';
       return null;
@@ -670,12 +711,7 @@ async function performRefresh(generation: number): Promise<string | null> {
         variant: 'destructive',
       });
       
-      // Schedule retry in 30 seconds
-      retryTimer = setTimeout(() => {
-         if (!isCurrentGeneration(generation)) return;
-        logger.debug('[TokenManager] Retrying token refresh after transient error');
-        void refreshAccessToken(generation);
-      }, 30000);
+      scheduleRefreshRetry(generation);
       
       // DON'T clear tokens - user stays authenticated
       return null;
@@ -688,12 +724,14 @@ async function performRefresh(generation: number): Promise<string | null> {
     } catch {
       lastRefreshOutcome = 'malformed_response';
       logger.error('[TokenManager] Token refresh returned malformed JSON');
+      scheduleRefreshRetry(generation);
       return null;
     }
     
     if (!newTokenData.accessToken || !newTokenData.refreshToken) {
       lastRefreshOutcome = 'malformed_response';
       logger.error('[TokenManager] Token refresh response was missing required fields');
+      scheduleRefreshRetry(generation);
       return null;
     }
     
@@ -720,10 +758,12 @@ async function performRefresh(generation: number): Promise<string | null> {
     
   } catch {
     // NETWORK ERROR (fetch failed, offline, etc.): Don't clear tokens
-    lastRefreshOutcome = (typeof navigator !== 'undefined' && navigator.onLine === false)
-      ? 'offline'
-      : 'network_error';
-    logger.error('[TokenManager] Token refresh network error');
+    lastRefreshOutcome = timedOut
+      ? 'timeout'
+      : (typeof navigator !== 'undefined' && navigator.onLine === false)
+        ? 'offline'
+        : 'network_error';
+    logger.error('[TokenManager] Token refresh network error', { timedOut });
     
     toast({
       title: 'Connection Error',
@@ -731,12 +771,7 @@ async function performRefresh(generation: number): Promise<string | null> {
       variant: 'destructive',
     });
     
-    // Schedule retry in 30 seconds
-    retryTimer = setTimeout(() => {
-      if (!isCurrentGeneration(generation)) return;
-      logger.debug('[TokenManager] Retrying token refresh after network error');
-      void refreshAccessToken(generation);
-    }, 30000);
+    scheduleRefreshRetry(generation);
     
     // DON'T clear tokens - user stays authenticated
     return null;

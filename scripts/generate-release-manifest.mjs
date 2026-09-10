@@ -3,11 +3,21 @@ import { execFile as execFileCallback } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { verifyMigrationIntegrity } from './migration-integrity.mjs';
 
 const execFile = promisify(execFileCallback);
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const requireCleanTree = process.argv.includes('--require-clean-tree') || process.env.REQUIRE_CLEAN_TREE === '1';
+
+async function readMigrationIntegrity() {
+  try {
+    await fs.access(path.resolve('scripts/migration-integrity.mjs'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+  const { verifyMigrationIntegrity } = await import('./migration-integrity.mjs');
+  return verifyMigrationIntegrity();
+}
 
 async function git(...args) {
   try {
@@ -34,7 +44,7 @@ const [commit, tree, status, npmVersion, pkg, lockfile, migrationIntegrity] = aw
   execFile('npm', ['--version'], { encoding: 'utf8' }).then(({ stdout }) => stdout.trim()),
   fs.readFile('package.json', 'utf8').then(JSON.parse),
   fs.readFile('package-lock.json'),
-  verifyMigrationIntegrity(),
+  readMigrationIntegrity(),
 ]);
 const dirty = status.length > 0;
 if (requireCleanTree && dirty) throw new Error('Refusing release evidence: git working tree is dirty.');
@@ -60,11 +70,13 @@ const releaseManifest = {
   package: { name: pkg.name, version: pkg.version },
   runtime: { node: process.version, npm: npmVersion },
   lockfile: { file: 'package-lock.json', sha256: sha256(lockfile) },
-  migrations: {
-    manifest: 'migrations/migration-manifest.json',
-    manifestSha256: migrationIntegrity.manifestSha256,
-    files: migrationIntegrity.migrations,
-  },
+  ...(migrationIntegrity ? {
+    migrations: {
+      manifest: 'migrations/migration-manifest.json',
+      manifestSha256: migrationIntegrity.manifestSha256,
+      files: migrationIntegrity.migrations,
+    },
+  } : {}),
   artifacts,
   ...(sourceDateEpoch === undefined ? {} : { sourceDateEpoch }),
 };

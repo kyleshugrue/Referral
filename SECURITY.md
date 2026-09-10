@@ -19,7 +19,7 @@ environment variables and is never part of this showcase tree.
 `RATE_LIMIT_MODE=postgres` uses atomic PostgreSQL windows and HMAC-derived
 pseudonymous request keys. `RATE_LIMIT_MODE=single-instance` is an explicit
 one-process topology choice, while `memory` is intended only for local
-development. PostgreSQL mode requires the `rate_limit_windows` migration.
+development. PostgreSQL mode requires a locally provisioned application schema.
 
 ## Showcase boundary
 

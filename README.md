@@ -90,11 +90,11 @@ database changes before applying them to any shared database.
 
 ## Testing and CI
 
-The public CI workflow runs the same application-quality checks that make this
-showcase useful to review: repository hygiene, migration validation, linting,
-the strict TypeScript gate, unit tests, a production build, bundle-budget
-checks, and browser smoke tests. It also validates the export in a disposable
-clean room.
+The public CI workflow runs the application-quality checks that make this
+showcase useful to review: repository hygiene, linting, the strict TypeScript
+gate, unit tests, a production build, bundle-budget checks, and browser smoke
+tests. It also validates the export in a disposable clean room. Database
+migration history and private schema tooling remain outside this repository.
 
 The canonical private source is exported through a deterministic allowlist.
 The public export is checked for exact file hashes, safe file types, privacy
@@ -106,8 +106,8 @@ Every update reaches public `main` only after both private and public CI pass.
 ## Source boundary and limitations
 
 This repository is a fresh, history-free public subset of the canonical
-private application. It contains buildable application source, migrations,
-tests, native templates, CI, and approved genuine demonstration assets. It does not contain
+private application. It contains buildable application source, tests, native
+templates, CI, and approved genuine demonstration assets. It does not contain
 credentials, user uploads, production data, private operational controls,
 historical Git objects, or the separately deployed Worker implementation.
 

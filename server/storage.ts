@@ -1525,49 +1525,46 @@ export class DatabaseStorage implements IStorage {
       .where(eq(connectionRequests.receiverId, userId))
       .innerJoin(users, eq(connectionRequests.senderId, users.id));
 
-    // Create array of requests with basic info
+    if (result.length === 0) return [];
+
     const requests = result.map(({ request, sender }) => ({
       ...request,
       sender,
       matchDescription: undefined as string | undefined
     }));
-
-    // For each request, check if there's a synergy match with a description
-    for (const request of requests) {
-      try {
-        logger.debug(`[getPendingRequestsReceived] Checking for synergy match between users ${userId} and ${request.senderId}`);
-        
-        // Check in the synergyMatches table for this pair of users
-        const synergyMatch = await db
-          .select()
-          .from(synergyMatches)
-          .where(
-            and(
-              eq(synergyMatches.userId, userId),
-              eq(synergyMatches.matchedUserId, request.senderId)
-            )
-          )
-          .limit(1);
-
-        if (synergyMatch.length > 0 && synergyMatch[0].description) {
-          logger.debug(`[getPendingRequestsReceived] Found synergy match with description for request ${request.id}`);
-          request.matchDescription = synergyMatch[0].description;
-        }
-      } catch (error) {
-        logger.error(`[getPendingRequestsReceived] Error checking synergy match for request ${request.id}:`, error);
-        // Continue with the next request if there's an error
-      }
+    const senderIds = [...new Set(requests.map((request) => request.senderId))];
+    const [synergyRows, blockRows] = await Promise.all([
+      db.select({
+        matchedUserId: synergyMatches.matchedUserId,
+        description: synergyMatches.description,
+      })
+        .from(synergyMatches)
+        .where(and(
+          eq(synergyMatches.userId, userId),
+          inArray(synergyMatches.matchedUserId, senderIds),
+        )),
+      db.select({
+        userId: userBlocks.userId,
+        blockedUserId: userBlocks.blockedUserId,
+      })
+        .from(userBlocks)
+        .where(or(
+          and(eq(userBlocks.userId, userId), inArray(userBlocks.blockedUserId, senderIds)),
+          and(eq(userBlocks.blockedUserId, userId), inArray(userBlocks.userId, senderIds)),
+        )),
+    ]);
+    const descriptions = new Map<number, string>();
+    for (const row of synergyRows) {
+      if (row.description) descriptions.set(row.matchedUserId, row.description);
     }
+    const blockedIds = new Set(blockRows.map((row) =>
+      row.userId === userId ? row.blockedUserId : row.userId,
+    ));
 
-    const visibleRequests = [];
-    for (const request of requests) {
-      const [blockedByReceiver, blockedBySender] = await Promise.all([
-        this.isUserBlocked(userId, request.senderId),
-        this.isUserBlocked(request.senderId, userId),
-      ]);
-      if (!blockedByReceiver && !blockedBySender) visibleRequests.push(request);
-    }
-    return visibleRequests;
+    return requests.filter((request) => {
+      request.matchDescription = descriptions.get(request.senderId);
+      return !blockedIds.has(request.senderId);
+    });
   }
 
   async getPendingRequestsSent(userId: number): Promise<(ConnectionRequest & { receiver: User })[]> {
@@ -1585,19 +1582,26 @@ export class DatabaseStorage implements IStorage {
       )
       .innerJoin(users, eq(connectionRequests.receiverId, users.id));
 
+    if (result.length === 0) return [];
+
     const requests = result.map(({ request, receiver }) => ({
       ...request,
       receiver,
     }));
-    const visibleRequests = [];
-    for (const request of requests) {
-      const [blockedBySender, blockedByReceiver] = await Promise.all([
-        this.isUserBlocked(userId, request.receiverId),
-        this.isUserBlocked(request.receiverId, userId),
-      ]);
-      if (!blockedBySender && !blockedByReceiver) visibleRequests.push(request);
-    }
-    return visibleRequests;
+    const receiverIds = [...new Set(requests.map((request) => request.receiverId))];
+    const blockRows = await db.select({
+      userId: userBlocks.userId,
+      blockedUserId: userBlocks.blockedUserId,
+    })
+      .from(userBlocks)
+      .where(or(
+        and(eq(userBlocks.userId, userId), inArray(userBlocks.blockedUserId, receiverIds)),
+        and(eq(userBlocks.blockedUserId, userId), inArray(userBlocks.userId, receiverIds)),
+      ));
+    const blockedIds = new Set(blockRows.map((row) =>
+      row.userId === userId ? row.blockedUserId : row.userId,
+    ));
+    return requests.filter((request) => !blockedIds.has(request.receiverId));
   }
 
   async getOutgoingRequests(userId: number): Promise<(ConnectionRequest & { receiver: User })[]> {
@@ -1725,10 +1729,16 @@ export class DatabaseStorage implements IStorage {
   async getConnections(userId: number): Promise<(Connection & { otherUser: User, isNew?: boolean })[]> {
     logger.debug(`[Storage] Getting connections for user ${userId}`);
     
-    // Get all connections for the user
     const userConnections = await db
-      .select()
+      .select({
+        connection: connections,
+        otherUser: users,
+      })
       .from(connections)
+      .innerJoin(users, or(
+        and(eq(connections.user1Id, userId), eq(users.id, connections.user2Id)),
+        and(eq(connections.user2Id, userId), eq(users.id, connections.user1Id)),
+      ))
       .where(
         or(
           eq(connections.user1Id, userId),
@@ -1737,9 +1747,10 @@ export class DatabaseStorage implements IStorage {
       )
       .orderBy(desc(connections.createdAt));
 
-    // Get all unread new connection notifications to mark which connections are new
+    if (userConnections.length === 0) return [];
+    const otherUserIds = userConnections.map(({ otherUser }) => otherUser.id);
     const unreadNotifications = await db
-      .select()
+      .select({ relatedId: notifications.relatedId })
       .from(notifications)
       .where(
         and(
@@ -1748,37 +1759,27 @@ export class DatabaseStorage implements IStorage {
           eq(notifications.read, false)
         )
       );
-    
     logger.debug(`[Storage] Found ${unreadNotifications.length} unread new connection notifications`);
-    
-    // Create a set of connection IDs that have unread notifications
     const newConnectionIds = new Set(unreadNotifications.map(n => n.relatedId));
-    
-    const result = [];
-    for (const conn of userConnections) {
-      const otherUserId = conn.user1Id === userId ? conn.user2Id : conn.user1Id;
-      const [blockedByViewer, blockedByOther] = await Promise.all([
-        this.isUserBlocked(userId, otherUserId),
-        this.isUserBlocked(otherUserId, userId),
-      ]);
-      if (blockedByViewer || blockedByOther) continue;
-
-      const [otherUser] = await db
-        .select()
-        .from(users)
-        .where(eq(users.id, otherUserId));
-
-      if (otherUser) {
-        // Check if this connection is new (has an unread notification)
-        const isNew = newConnectionIds.has(conn.id);
-        
-        result.push({
-          ...conn,
-          otherUser,
-          isNew  // Add the isNew flag
-        });
-      }
-    }
+    const blockRows = await db.select({
+      userId: userBlocks.userId,
+      blockedUserId: userBlocks.blockedUserId,
+    })
+      .from(userBlocks)
+      .where(or(
+        and(eq(userBlocks.userId, userId), inArray(userBlocks.blockedUserId, otherUserIds)),
+        and(eq(userBlocks.blockedUserId, userId), inArray(userBlocks.userId, otherUserIds)),
+      ));
+    const blockedIds = new Set(blockRows.map((row) =>
+      row.userId === userId ? row.blockedUserId : row.userId,
+    ));
+    const result = userConnections
+      .filter(({ otherUser }) => !blockedIds.has(otherUser.id))
+      .map(({ connection, otherUser }) => ({
+        ...connection,
+        otherUser,
+        isNew: newConnectionIds.has(connection.id),
+      }));
 
     logger.debug(`[Storage] Returning ${result.length} connections for user ${userId}`);
     return result;
@@ -2478,23 +2479,16 @@ export class DatabaseStorage implements IStorage {
       // Clean up any matches that are now connected
       if (connectedUserIds.length > 0) {
         logger.debug(`[getSavedSynergyMatches] Removing any synergy matches with connected users from database`);
-        // Delete synergy matches with connected users in background without waiting
-        for (const connectedId of connectedUserIds) {
-          try {
-            // Delete any synergy matches for the connected user
-            await db
-              .delete(synergyMatches)
-              .where(
-                and(
-                  eq(synergyMatches.userId, userId),
-                  eq(synergyMatches.matchedUserId, connectedId)
-                )
-              );
-            
-            logger.debug(`[getSavedSynergyMatches] Removed any matches with connected user ${connectedId}`);
-          } catch (err) {
-            logger.error(`[getSavedSynergyMatches] Error deleting match with connected user ${connectedId}:`, err);
-          }
+        try {
+          await db
+            .delete(synergyMatches)
+            .where(and(
+              eq(synergyMatches.userId, userId),
+              inArray(synergyMatches.matchedUserId, connectedUserIds),
+            ));
+          logger.debug(`[getSavedSynergyMatches] Removed matches with connected users`);
+        } catch (err) {
+          logger.error(`[getSavedSynergyMatches] Error deleting matches with connected users:`, err);
         }
       }
       

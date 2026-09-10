@@ -36,9 +36,9 @@ describe("public clean-room orchestration", () => {
     ]]);
     expect(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "workflow validation"))
       .toBeGreaterThan(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "npm ci"));
-    expect(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "db:migrate:disposable"))
-      .toBeGreaterThan(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "db:verify"));
-    expect(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "db:migrate:disposable"))
+    expect(CLEAN_ROOM_COMMANDS.some(([label]) => label === "db:verify")).toBe(false);
+    expect(CLEAN_ROOM_COMMANDS.some(([label]) => label === "db:migrate:disposable")).toBe(false);
+    expect(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "workflow validation"))
       .toBeLessThan(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "unit tests"));
     expect(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "repo:hygiene"))
       .toBeLessThan(CLEAN_ROOM_COMMANDS.findIndex(([label]) => label === "npm ci"));
@@ -163,6 +163,10 @@ describe("public clean-room orchestration", () => {
       stagedPaths: [".gitignore"],
       manifest,
     })).toThrow(/match/);
+    expect(() => assertStagedPublicPaths({
+      stagedPaths: ["migrations/0001_private.sql"],
+      manifest: { files: [{ path: "migrations/0001_private.sql" }] },
+    })).toThrow(/private path/);
   });
 
   test("requires canonical and public runtime trees to match exactly", async () => {
@@ -190,6 +194,11 @@ describe("public clean-room orchestration", () => {
       package: { name: "referral", version: "1.0.0" },
       runtime: { node: "v24.0.0", npm: "10.8.2" },
       lockfile: { file: "package-lock.json", sha256: "canonical-lockfile" },
+      migrations: {
+        manifest: "migrations/migration-manifest.json",
+        manifestSha256: "private-only",
+        files: ["0001_private.sql"],
+      },
     };
     await writeFile(path.join(canonical, "release-manifest.json"), JSON.stringify(baseManifest));
     await writeFile(path.join(publicOutput, "release-manifest.json"), JSON.stringify({

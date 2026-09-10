@@ -42,6 +42,7 @@ const CLEAN_ROOM_DATABASE_ENDPOINT = Object.freeze([
   "postgres",
   "@127.0.0.1:5432/postgres",
 ]);
+const PUBLIC_PRIVATE_PATH = /(^|\/)(?:\.agents|\.agent-state|\.local|replit_agent|migrations)(?:\/|$)/i;
 
 const fail = (message) => {
   throw new Error(message);
@@ -389,6 +390,9 @@ export const buildIntegrityManifest = async ({ root, paths, commit, tree }) => {
 
 export const assertStagedPublicPaths = ({ stagedPaths, manifest }) => {
   const staged = assertNoPathCollisions([...stagedPaths], "Staged public paths").sort();
+  if (staged.some((entry) => PUBLIC_PRIVATE_PATH.test(entry))) {
+    fail("Public clean-room staging contains a private path.");
+  }
   const expected = assertNoPathCollisions(
     manifest.files.map((entry) => normalizeRelativePath(entry.path)),
     "Integrity manifest paths",
@@ -452,11 +456,12 @@ const comparableRuntimeFile = async (root, relativePath) => {
   if (normalized.lockfile && typeof normalized.lockfile === "object") {
     delete normalized.lockfile.sha256;
   }
+  delete normalized.migrations;
   const normalizedBytes = Buffer.from(JSON.stringify(normalized));
   return {
     size: normalizedBytes.length,
     sha256: sha256(normalizedBytes),
-    ignoredMetadata: ["git.commit", "git.tree", "git.dirty", "lockfile.sha256"],
+    ignoredMetadata: ["git.commit", "git.tree", "git.dirty", "lockfile.sha256", "migrations"],
   };
 };
 
@@ -530,8 +535,6 @@ export const CLEAN_ROOM_COMMANDS = Object.freeze([
     "--registry=https://registry.npmjs.org/",
   ]],
   ["workflow validation", ["run", "workflows:validate"]],
-  ["db:verify", ["run", "db:verify"]],
-  ["db:migrate:disposable", ["run", "db:migrate:disposable"]],
   ["lint", ["run", "lint"]],
   ["typecheck:gate", ["run", "typecheck:gate"]],
   ["unit tests", ["run", "test:unit"]],
