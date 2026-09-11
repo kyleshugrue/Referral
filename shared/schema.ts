@@ -184,6 +184,36 @@ export const accountErasureJobs = pgTable("account_erasure_jobs", {
   leaseExpiryIdx: index("account_erasure_jobs_lease_expiry_idx").on(table.status, table.leaseExpiresAt),
 }));
 
+export const MEDIA_DELETION_STATUSES = ["pending", "processing", "completed", "retrying", "manual_review"] as const;
+export type MediaDeletionStatus = (typeof MEDIA_DELETION_STATUSES)[number];
+
+// Ordinary media deletion is separate from account erasure so clearing a
+// profile reference cannot lose the provider cleanup intent. userId and the
+// opaque reference are retained only in this private operational journal.
+export const mediaDeletionJobs = pgTable("media_deletion_jobs", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  mediaReference: text("media_reference").notNull(),
+  purpose: text("purpose").notNull(),
+  dedupeKey: text("dedupe_key").notNull(),
+  status: text("status").notNull().default("pending"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(5),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
+  lastErrorCode: text("last_error_code"),
+  lastErrorClass: text("last_error_class"),
+  lastErrorAt: timestamp("last_error_at", { withTimezone: true, mode: "string" }),
+  requestedAt: timestamp("requested_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
+  startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "string" }),
+  claimToken: text("claim_token"),
+  completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+}, (table) => ({
+  dedupeKeyUniqueIdx: uniqueIndex("media_deletion_jobs_dedupe_key_idx").on(table.dedupeKey),
+  statusAttemptIdx: index("media_deletion_jobs_status_attempt_idx").on(table.status, table.nextAttemptAt),
+  leaseExpiryIdx: index("media_deletion_jobs_lease_expiry_idx").on(table.status, table.leaseExpiresAt),
+}));
+
 // Immutable profile snapshots for rollback-proof job processing
 export const userProfileSnapshots = pgTable("user_profile_snapshots", {
   id: serial("id").primaryKey(),
@@ -861,3 +891,4 @@ export type CallbackNotification = typeof callbackNotificationQueue.$inferSelect
 export type RefreshToken = typeof refreshTokens.$inferSelect;
 export type RefreshTokenReuseEvent = typeof refreshTokenReuseEvents.$inferSelect;
 export type AccountErasureJob = typeof accountErasureJobs.$inferSelect;
+export type MediaDeletionJob = typeof mediaDeletionJobs.$inferSelect;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   firebaseStorageService,
+  isMissingStorageObjectError,
   isManagedMediaObjectKey,
 } from '../../services/firebase-storage';
 
@@ -45,5 +46,12 @@ describe('managed media object boundary', () => {
     await expect(firebaseStorageService.deleteLegacyLocalMediaForUser([
       '/uploads/../outside.txt',
     ])).rejects.toThrow('Invalid legacy media reference');
+  });
+
+  it('recognizes only provider not-found errors as already-cleaned objects', () => {
+    expect(isMissingStorageObjectError({ code: 404 })).toBe(true);
+    expect(isMissingStorageObjectError({ statusCode: '404' })).toBe(true);
+    expect(isMissingStorageObjectError({ code: 500 })).toBe(false);
+    expect(isMissingStorageObjectError(new Error('not found'))).toBe(false);
   });
 });

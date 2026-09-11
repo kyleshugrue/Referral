@@ -1,4 +1,4 @@
-import { users, connections, connectionRequests, messages, conversations, synergyMatches, notifications, userBlocks, matchGenerationJobs, matchGenerationDeadLetters, fcmTokens, callbackNotificationQueue, queuedPushNotifications, deliveryObligations, refreshTokens, refreshTokenReuseEvents, accountErasureJobs, userProfileSnapshots, passwordResetTokens, type User, type Connection, type ConnectionRequest, type Message, type Conversation, type SynergyMatch, type InsertSynergyMatch, type Notification, type InsertNotification, type UserBlock, type MatchGenerationJob, type InsertMatchGenerationJob, type MatchGenerationDeadLetter, type InsertMatchGenerationDeadLetter, type CallbackNotification, type RefreshToken, type InsertRefreshToken, type InsertRefreshTokenReuseEvent, type InsertUser, type AccountErasureJob } from "@shared/schema";
+import { users, connections, connectionRequests, messages, conversations, synergyMatches, notifications, userBlocks, matchGenerationJobs, matchGenerationDeadLetters, fcmTokens, callbackNotificationQueue, queuedPushNotifications, deliveryObligations, refreshTokens, refreshTokenReuseEvents, accountErasureJobs, mediaDeletionJobs, userProfileSnapshots, passwordResetTokens, type User, type Connection, type ConnectionRequest, type Message, type Conversation, type SynergyMatch, type InsertSynergyMatch, type Notification, type InsertNotification, type UserBlock, type MatchGenerationJob, type InsertMatchGenerationJob, type MatchGenerationDeadLetter, type InsertMatchGenerationDeadLetter, type CallbackNotification, type RefreshToken, type InsertRefreshToken, type InsertRefreshTokenReuseEvent, type InsertUser, type AccountErasureJob, type MediaDeletionJob, type MediaDeletionStatus } from "@shared/schema";
 import { buildMatchGenerationIdempotencyKey, getMatchGenerationScope } from "@shared/match-generation-contract";
 import { db } from "./db";
 import { eq, or, and, not, inArray, desc, sql, asc, ilike, lte, lt, gt, isNull } from "drizzle-orm";
@@ -14,7 +14,7 @@ import {
   type DatabasePool,
 } from './lib/database-client';
 import { locationCacheService } from './services/location-cache';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { broadcastMatchRefresh, broadcastMatchRefreshToUsers } from './websocket-utils';
 import { logger } from './lib/logger';
 import { parseServerEnvironment } from './lib/env';
@@ -30,6 +30,11 @@ import {
   type AccountErasureRetryClass,
 } from './lib/account-erasure-contract';
 import {
+  MEDIA_DELETION_LEASE_MS,
+  mediaDeletionRetryDelayMs,
+  type MediaDeletionRetryClass,
+} from './lib/media-deletion-contract';
+import {
   type ConversationPageOptions,
   normalizeConversationPageOptions,
   escapeLikePattern,
@@ -39,6 +44,11 @@ export { ProfileVersionConflictError } from './lib/profile-version-conflict';
 
 const PostgresSessionStore = connectPg(session);
 type UserWrite = Partial<InsertUser> & Record<string, unknown>;
+
+export type MediaDeletionRequest = {
+  reference: string;
+  purpose: 'photo' | 'resume' | 'resume-preview';
+};
 
 export interface UpdateUserOptions {
   expectedProfileVersion?: number;
@@ -69,6 +79,20 @@ export interface IStorage {
     errorCode: string,
     retryClass: AccountErasureRetryClass,
   ): Promise<'retrying' | 'manual_review' | 'stale'>;
+  clearUserMediaAndEnqueueDeletion(
+    userId: number,
+    deletions: MediaDeletionRequest[],
+    updates: Pick<UserWrite, 'photo' | 'resumeUrl' | 'resumePreviewUrls'>,
+  ): Promise<User>;
+  claimNextMediaDeletionJob(): Promise<MediaDeletionJob | undefined>;
+  recoverExpiredMediaDeletionJobs(limit: number): Promise<number>;
+  completeMediaDeletionJob(jobId: number, claimToken: string): Promise<boolean>;
+  failMediaDeletionJob(
+    jobId: number,
+    claimToken: string,
+    errorCode: string,
+    retryClass: MediaDeletionRetryClass,
+  ): Promise<MediaDeletionStatus | 'stale'>;
   createConnectionRequest(senderId: number, receiverId: number): Promise<ConnectionRequest>;
   getConnectionRequestById(requestId: number): Promise<ConnectionRequest | undefined>;
   getPendingRequestsReceived(userId: number): Promise<(ConnectionRequest & { sender: User })[]>;
@@ -1426,6 +1450,171 @@ export class DatabaseStorage implements IStorage {
         eq(accountErasureJobs.id, jobId),
         eq(accountErasureJobs.status, 'processing'),
         eq(accountErasureJobs.claimToken, claimToken),
+      ));
+      return status;
+    });
+  }
+
+  async clearUserMediaAndEnqueueDeletion(
+    userId: number,
+    deletions: MediaDeletionRequest[],
+    updates: Pick<UserWrite, 'photo' | 'resumeUrl' | 'resumePreviewUrls'>,
+  ): Promise<User> {
+    return db.transaction(async (tx) => {
+      const [currentUser] = await tx.select().from(users)
+        .where(eq(users.id, userId))
+        .limit(1)
+        .for('update');
+      if (!currentUser) throw new Error('User not found');
+
+      const uniqueDeletions = [...new Map(
+        deletions
+          .filter(({ reference, purpose }) => {
+            if (!reference) return false;
+            if (purpose === 'photo') return currentUser.photo === reference;
+            if (purpose === 'resume') return currentUser.resumeUrl === reference;
+            return currentUser.resumePreviewUrls?.includes(reference) ?? false;
+          })
+          .map((deletion) => [deletion.reference, deletion]),
+      ).values()];
+
+      for (const deletion of uniqueDeletions) {
+        const dedupeKey = createHash('sha256')
+          .update(`${userId}\0${deletion.reference}`)
+          .digest('hex');
+        await tx.insert(mediaDeletionJobs).values({
+          userId,
+          mediaReference: deletion.reference,
+          purpose: deletion.purpose,
+          dedupeKey,
+          status: 'pending',
+          maxAttempts: 5,
+        }).onConflictDoNothing({ target: mediaDeletionJobs.dedupeKey });
+      }
+
+      const [updatedUser] = await tx.update(users)
+        .set(updates)
+        .where(eq(users.id, userId))
+        .returning();
+      if (!updatedUser) throw new Error('Unable to clear user media');
+      return updatedUser;
+    });
+  }
+
+  async claimNextMediaDeletionJob(): Promise<MediaDeletionJob | undefined> {
+    return db.transaction(async (tx) => {
+      const [job] = await tx.select().from(mediaDeletionJobs)
+        .where(and(
+          inArray(mediaDeletionJobs.status, ['pending', 'retrying']),
+          lte(mediaDeletionJobs.nextAttemptAt, sql`now()`),
+          lt(mediaDeletionJobs.attemptCount, mediaDeletionJobs.maxAttempts),
+        ))
+        .orderBy(asc(mediaDeletionJobs.nextAttemptAt), asc(mediaDeletionJobs.id))
+        .limit(1)
+        .for('update', { skipLocked: true });
+      if (!job) return undefined;
+
+      const now = new Date().toISOString();
+      const claimToken = randomUUID();
+      const [claimed] = await tx.update(mediaDeletionJobs).set({
+        status: 'processing',
+        attemptCount: sql`${mediaDeletionJobs.attemptCount} + 1`,
+        startedAt: now,
+        claimToken,
+        leaseExpiresAt: new Date(Date.now() + MEDIA_DELETION_LEASE_MS).toISOString(),
+      }).where(and(
+        eq(mediaDeletionJobs.id, job.id),
+        inArray(mediaDeletionJobs.status, ['pending', 'retrying']),
+        lt(mediaDeletionJobs.attemptCount, mediaDeletionJobs.maxAttempts),
+      )).returning();
+      return claimed;
+    });
+  }
+
+  async recoverExpiredMediaDeletionJobs(limit: number): Promise<number> {
+    if (limit <= 0) return 0;
+    return db.transaction(async (tx) => {
+      const expiredJobs = await tx.select({
+        id: mediaDeletionJobs.id,
+        attemptCount: mediaDeletionJobs.attemptCount,
+        maxAttempts: mediaDeletionJobs.maxAttempts,
+      }).from(mediaDeletionJobs)
+        .where(and(
+          eq(mediaDeletionJobs.status, 'processing'),
+          lte(mediaDeletionJobs.leaseExpiresAt, sql`now()`),
+        ))
+        .orderBy(asc(mediaDeletionJobs.leaseExpiresAt), asc(mediaDeletionJobs.id))
+        .limit(limit)
+        .for('update', { skipLocked: true });
+      const now = new Date().toISOString();
+      for (const job of expiredJobs) {
+        await tx.update(mediaDeletionJobs).set({
+          status: job.attemptCount >= job.maxAttempts ? 'manual_review' : 'retrying',
+          nextAttemptAt: now,
+          lastErrorCode: 'LeaseExpired',
+          lastErrorClass: 'transient',
+          lastErrorAt: now,
+          claimToken: null,
+          leaseExpiresAt: null,
+        }).where(and(
+          eq(mediaDeletionJobs.id, job.id),
+          eq(mediaDeletionJobs.status, 'processing'),
+        ));
+      }
+      return expiredJobs.length;
+    });
+  }
+
+  async completeMediaDeletionJob(jobId: number, claimToken: string): Promise<boolean> {
+    const [updated] = await db.update(mediaDeletionJobs).set({
+      status: 'completed',
+      completedAt: new Date().toISOString(),
+      lastErrorCode: null,
+      lastErrorClass: null,
+      claimToken: null,
+      leaseExpiresAt: null,
+    }).where(and(
+      eq(mediaDeletionJobs.id, jobId),
+      eq(mediaDeletionJobs.status, 'processing'),
+      eq(mediaDeletionJobs.claimToken, claimToken),
+    )).returning({ id: mediaDeletionJobs.id });
+    return Boolean(updated);
+  }
+
+  async failMediaDeletionJob(
+    jobId: number,
+    claimToken: string,
+    errorCode: string,
+    retryClass: MediaDeletionRetryClass,
+  ): Promise<MediaDeletionStatus | 'stale'> {
+    return db.transaction(async (tx) => {
+      const [job] = await tx.select({
+        attemptCount: mediaDeletionJobs.attemptCount,
+        maxAttempts: mediaDeletionJobs.maxAttempts,
+      }).from(mediaDeletionJobs).where(and(
+        eq(mediaDeletionJobs.id, jobId),
+        eq(mediaDeletionJobs.status, 'processing'),
+        eq(mediaDeletionJobs.claimToken, claimToken),
+      )).limit(1).for('update');
+      if (!job) return 'stale';
+
+      const manualReview = retryClass === 'manual_review' || job.attemptCount >= job.maxAttempts;
+      const status: MediaDeletionStatus = manualReview ? 'manual_review' : 'retrying';
+      const now = new Date().toISOString();
+      await tx.update(mediaDeletionJobs).set({
+        status,
+        nextAttemptAt: manualReview
+          ? now
+          : new Date(Date.now() + mediaDeletionRetryDelayMs(job.attemptCount)).toISOString(),
+        lastErrorCode: errorCode.slice(0, 120),
+        lastErrorClass: retryClass,
+        lastErrorAt: now,
+        claimToken: null,
+        leaseExpiresAt: null,
+      }).where(and(
+        eq(mediaDeletionJobs.id, jobId),
+        eq(mediaDeletionJobs.status, 'processing'),
+        eq(mediaDeletionJobs.claimToken, claimToken),
       ));
       return status;
     });
@@ -4334,16 +4523,25 @@ export class DatabaseStorage implements IStorage {
         })
         .where(
           and(
-            eq(matchGenerationJobs.userId, userId),
             or(
               eq(matchGenerationJobs.status, 'PENDING'),
               eq(matchGenerationJobs.status, 'RETRYING')
+            ),
+            or(
+              and(
+                eq(matchGenerationJobs.userId, userId),
+                lt(matchGenerationJobs.userProfileVersion, newProfileVersion),
+              ),
+              and(
+                eq(matchGenerationJobs.targetUserId, userId),
+                lt(matchGenerationJobs.targetUserProfileVersion, newProfileVersion),
+              ),
             )
           )
         );
       
       const cancelledJobs = result.rowCount || 0;
-      logger.debug(`[CMDCC] Cancelled ${cancelledJobs} stale jobs for user ${userId}`);
+      logger.debug(`[CMDCC] Cancelled ${cancelledJobs} stale jobs affecting user ${userId}`);
       return cancelledJobs;
     } catch (error) {
       logger.error('[CMDCC] Error canceling stale jobs:', error);

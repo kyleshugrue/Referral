@@ -1534,23 +1534,16 @@ export async function registerRoutes(app: Express): Promise<void> {
       if (!currentUser) return res.status(404).json({ message: 'User not found' });
 
       const previousReference = currentUser.photo;
-      const updatedUser = await storage.updateUser(req.user.id, { photo: '' });
+      const updatedUser = await storage.clearUserMediaAndEnqueueDeletion(
+        req.user.id,
+        previousReference ? [{ reference: previousReference, purpose: 'photo' }] : [],
+        { photo: '' },
+      );
 
-      if (previousReference) {
-        const { firebaseStorageService } = await import('./services/firebase-storage');
-        if (previousReference.startsWith('/api/media/')) {
-          await firebaseStorageService.deleteMediaReference(previousReference).catch((error) => {
-            logger.warn('[Media] Photo object cleanup deferred', {
-              errorClass: error instanceof Error ? error.name : 'UnknownError',
-            });
-          });
-        } else if (previousReference.startsWith('/uploads/')) {
-           const localPath = resolveLegacyUploadPath(previousReference);
-           if (localPath) await cleanupTemporaryUpload(localPath);
-        }
-      }
-
-      return res.json(toSelfUserDto(updatedUser));
+      return res.status(previousReference ? 202 : 200).json({
+        ...toSelfUserDto(updatedUser),
+        mediaCleanup: previousReference ? 'queued' : 'none',
+      });
     } catch (error) {
       logger.error('[Media] Failed to clear profile photo', {
         errorClass: error instanceof Error ? error.name : 'UnknownError',
@@ -1569,22 +1562,22 @@ export async function registerRoutes(app: Express): Promise<void> {
         currentUser.resumeUrl,
         ...(currentUser.resumePreviewUrls ?? []),
       ].filter((reference): reference is string => Boolean(reference));
-      const updatedUser = await storage.updateUser(req.user.id, {
-        resumeUrl: '',
-        resumePreviewUrls: [],
+      const updatedUser = await storage.clearUserMediaAndEnqueueDeletion(
+        req.user.id,
+        previousReferences.map((reference, index) => ({
+          reference,
+          purpose: index === 0 ? 'resume' : 'resume-preview',
+        })),
+        {
+          resumeUrl: '',
+          resumePreviewUrls: [],
+        },
+      );
+
+      return res.status(previousReferences.length > 0 ? 202 : 200).json({
+        ...toSelfUserDto(updatedUser),
+        mediaCleanup: previousReferences.length > 0 ? 'queued' : 'none',
       });
-
-      const { firebaseStorageService } = await import('./services/firebase-storage');
-      await Promise.allSettled(previousReferences.map(async (reference) => {
-        if (reference.startsWith('/api/media/')) {
-          await firebaseStorageService.deleteMediaReference(reference);
-        } else if (reference.startsWith('/uploads/')) {
-           const localPath = resolveLegacyUploadPath(reference);
-           if (localPath) await cleanupTemporaryUpload(localPath);
-        }
-      }));
-
-      return res.json(toSelfUserDto(updatedUser));
     } catch (error) {
       logger.error('[Media] Failed to clear resume', {
         errorClass: error instanceof Error ? error.name : 'UnknownError',

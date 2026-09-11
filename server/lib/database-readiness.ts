@@ -4,6 +4,7 @@ export const REQUIRED_SCHEMA_TABLES = [
   'callback_notification_queue',
   'delivery_obligations',
   'account_erasure_jobs',
+  'media_deletion_jobs',
   'fcm_tokens',
   'match_generation_jobs',
   'refresh_tokens',
@@ -236,6 +237,25 @@ export const REQUIRED_SCHEMA_COLUMNS: readonly RequiredSchemaColumn[] = [
     'completed_at',
   ].map((columnName) => ({ tableName: 'account_erasure_jobs', columnName })),
   ...[
+    'id',
+    'user_id',
+    'media_reference',
+    'purpose',
+    'dedupe_key',
+    'status',
+    'attempt_count',
+    'max_attempts',
+    'next_attempt_at',
+    'last_error_code',
+    'last_error_class',
+    'last_error_at',
+    'requested_at',
+    'started_at',
+    'lease_expires_at',
+    'claim_token',
+    'completed_at',
+  ].map((columnName) => ({ tableName: 'media_deletion_jobs', columnName })),
+  ...[
     'auth_session_id',
     'revoked_at',
   ].map((columnName) => ({ tableName: 'refresh_tokens', columnName })),
@@ -274,6 +294,23 @@ const REQUIRED_SCHEMA_COLUMN_SHAPES: readonly RequiredSchemaColumnShape[] = [
   { tableName: 'account_erasure_jobs', columnName: 'firebase_deleted_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
   { tableName: 'account_erasure_jobs', columnName: 'media_deleted_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
   { tableName: 'account_erasure_jobs', columnName: 'completed_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
+  { tableName: 'media_deletion_jobs', columnName: 'id', expectedDataType: 'integer', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'media_deletion_jobs', columnName: 'user_id', expectedDataType: 'integer', expectedNullable: 'NO' },
+  { tableName: 'media_deletion_jobs', columnName: 'media_reference', expectedDataType: 'text', expectedNullable: 'NO' },
+  { tableName: 'media_deletion_jobs', columnName: 'purpose', expectedDataType: 'text', expectedNullable: 'NO' },
+  { tableName: 'media_deletion_jobs', columnName: 'dedupe_key', expectedDataType: 'text', expectedNullable: 'NO' },
+  { tableName: 'media_deletion_jobs', columnName: 'status', expectedDataType: 'text', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'media_deletion_jobs', columnName: 'attempt_count', expectedDataType: 'integer', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'media_deletion_jobs', columnName: 'max_attempts', expectedDataType: 'integer', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'media_deletion_jobs', columnName: 'next_attempt_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'media_deletion_jobs', columnName: 'last_error_code', expectedDataType: 'text', expectedNullable: 'YES' },
+  { tableName: 'media_deletion_jobs', columnName: 'last_error_class', expectedDataType: 'text', expectedNullable: 'YES' },
+  { tableName: 'media_deletion_jobs', columnName: 'last_error_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
+  { tableName: 'media_deletion_jobs', columnName: 'requested_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'media_deletion_jobs', columnName: 'started_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
+  { tableName: 'media_deletion_jobs', columnName: 'lease_expires_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
+  { tableName: 'media_deletion_jobs', columnName: 'claim_token', expectedDataType: 'text', expectedNullable: 'YES' },
+  { tableName: 'media_deletion_jobs', columnName: 'completed_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
 ];
 
 export const REQUIRED_SCHEMA_INDEXES: readonly RequiredSchemaIndex[] = [
@@ -282,6 +319,9 @@ export const REQUIRED_SCHEMA_INDEXES: readonly RequiredSchemaIndex[] = [
   { tableName: 'account_erasure_jobs', indexName: 'account_erasure_jobs_user_id_idx' },
   { tableName: 'account_erasure_jobs', indexName: 'account_erasure_jobs_status_attempt_idx' },
   { tableName: 'account_erasure_jobs', indexName: 'account_erasure_jobs_lease_expiry_idx' },
+  { tableName: 'media_deletion_jobs', indexName: 'media_deletion_jobs_dedupe_key_idx' },
+  { tableName: 'media_deletion_jobs', indexName: 'media_deletion_jobs_status_attempt_idx' },
+  { tableName: 'media_deletion_jobs', indexName: 'media_deletion_jobs_lease_expiry_idx' },
 ];
 
 export const REQUIRED_SCHEMA_CONSTRAINTS: readonly RequiredSchemaConstraint[] = [
@@ -290,6 +330,8 @@ export const REQUIRED_SCHEMA_CONSTRAINTS: readonly RequiredSchemaConstraint[] = 
   { tableName: 'delivery_obligations', constraintType: 'UNIQUE', columns: ['dedupe_key'] },
   { tableName: 'delivery_obligations', constraintType: 'FOREIGN KEY', columns: ['user_id'], referencedTable: 'users' },
   { tableName: 'account_erasure_jobs', constraintType: 'PRIMARY KEY', columns: ['id'] },
+  { tableName: 'media_deletion_jobs', constraintType: 'PRIMARY KEY', columns: ['id'] },
+  { tableName: 'media_deletion_jobs', constraintType: 'UNIQUE', columns: ['dedupe_key'] },
 ];
 
 function requiredSchemaColumnShapes(

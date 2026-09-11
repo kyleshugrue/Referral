@@ -45,10 +45,15 @@ import { createSchemaReadinessGate } from './lib/schema-readiness-gate';
 import { copyProxyResponseHeaders } from './lib/proxy-headers';
 import { verifyInternalAuth } from './lib/internal-auth';
 import { processAccountErasureJobs } from './services/account-erasure';
+import { processMediaDeletionJobs } from './services/media-deletion';
 import {
   ACCOUNT_ERASURE_BATCH_SIZE,
   ACCOUNT_ERASURE_SWEEP_INTERVAL_MS,
 } from './lib/account-erasure-contract';
+import {
+  MEDIA_DELETION_BATCH_SIZE,
+  MEDIA_DELETION_SWEEP_INTERVAL_MS,
+} from './lib/media-deletion-contract';
 import { getPublicReadinessResponse } from './lib/readiness-contract';
 import { internalLimiter, publicLookupLimiter } from './lib/rate-limits';
 
@@ -243,6 +248,25 @@ async function main() {
       void runAccountErasureSweep();
     }, ACCOUNT_ERASURE_SWEEP_INTERVAL_MS);
     accountErasureInterval.unref?.();
+
+    let mediaDeletionSweepRunning = false;
+    const runMediaDeletionSweep = async (): Promise<void> => {
+      if (!schemaReadiness.ready || mediaDeletionSweepRunning) return;
+      mediaDeletionSweepRunning = true;
+      try {
+        await processMediaDeletionJobs(MEDIA_DELETION_BATCH_SIZE);
+      } catch (error) {
+        logger.error('[MediaDeletion] Scheduled recovery sweep failed', {
+          errorClass: error instanceof Error ? error.name : 'UnknownError',
+        });
+      } finally {
+        mediaDeletionSweepRunning = false;
+      }
+    };
+    const mediaDeletionInterval = setInterval(() => {
+      void runMediaDeletionSweep();
+    }, MEDIA_DELETION_SWEEP_INTERVAL_MS);
+    mediaDeletionInterval.unref?.();
 
     // This is deliberately before setupAuth(), which installs
     // express-session and passport.session(). Health and readiness stay
@@ -582,7 +606,9 @@ async function main() {
         },
         () => clearInterval(queueRecoveryInterval),
         () => clearInterval(schemaReadinessInterval),
-         () => clearInterval(accountErasureInterval),
+        () => clearInterval(accountErasureInterval),
+        () => clearInterval(mediaDeletionInterval),
+         () => clearInterval(mediaDeletionInterval),
         () => {
           if (staleTokenCleanupInterval) clearInterval(staleTokenCleanupInterval);
         },

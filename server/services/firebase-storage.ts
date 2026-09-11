@@ -20,6 +20,15 @@ const MANAGED_MEDIA_PREFIXES = [
 const SIGNED_URL_TTL_MS = 10 * 60 * 1000;
 const MAX_MEDIA_ID_LENGTH = 512;
 
+export function isMissingStorageObjectError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: unknown; statusCode?: unknown };
+  return candidate.code === 404
+    || candidate.code === '404'
+    || candidate.statusCode === 404
+    || candidate.statusCode === '404';
+}
+
 export function isManagedMediaObjectKey(fileName: string): boolean {
   return MANAGED_MEDIA_PREFIXES.some((prefix) => fileName.startsWith(prefix))
     && !fileName.includes('..')
@@ -124,7 +133,13 @@ export class FirebaseStorageService {
       throw new Error('Invalid managed media reference');
     }
 
-    await this.bucket.file(fileName).delete();
+    try {
+      await this.bucket.file(fileName).delete();
+    } catch (error) {
+      // A second worker, account erasure, or a provider retry may already
+      // have removed the object. That is the terminal state we wanted.
+      if (!isMissingStorageObjectError(error)) throw error;
+    }
   }
 
   normalizeMediaReference(reference: string | null | undefined): string | null | undefined {
@@ -255,11 +270,20 @@ export class FirebaseStorageService {
     const listed = await Promise.all(prefixes.map((prefix) => this.bucket!.getFiles({ prefix })));
     const filesToCheck = listed.flatMap(([files]) => files);
     for (const file of filesToCheck) {
-      const [metadata] = await file.getMetadata();
-      const ownerId = metadata.metadata?.userId;
-      const ownerUid = metadata.metadata?.firebaseUid;
-      if (ownerId === String(userId) || (firebaseUid && ownerUid === firebaseUid)) {
-        await file.delete();
+      try {
+        const [metadata] = await file.getMetadata();
+        const ownerId = metadata.metadata?.userId;
+        const ownerUid = metadata.metadata?.firebaseUid;
+        if (ownerId === String(userId) || (firebaseUid && ownerUid === firebaseUid)) {
+          try {
+            await file.delete();
+          } catch (error) {
+            if (!isMissingStorageObjectError(error)) throw error;
+          }
+        }
+      } catch (error) {
+        if (isMissingStorageObjectError(error)) continue;
+        throw error;
       }
     }
     logger.info('[Firebase Storage] Deleted owned media for account-erasure job');
