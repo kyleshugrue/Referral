@@ -529,9 +529,7 @@ export const editableProfileSchema = enforceProfileAggregateLimit(insertUserSche
   profileVisible: true,
   emailNotifications: true,
   readReceipts: true,
-}).partial().extend({
-  registrationCompleted: z.boolean().optional(),
-}));
+ }).partial());
 
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type EditableProfile = z.infer<typeof editableProfileSchema>;

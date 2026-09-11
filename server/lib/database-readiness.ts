@@ -3,6 +3,7 @@ import { URL } from 'node:url';
 export const REQUIRED_SCHEMA_TABLES = [
   'callback_notification_queue',
   'delivery_obligations',
+  'queued_push_notifications',
   'account_erasure_jobs',
   'media_deletion_jobs',
   'fcm_tokens',
@@ -259,6 +260,18 @@ export const REQUIRED_SCHEMA_COLUMNS: readonly RequiredSchemaColumn[] = [
     'auth_session_id',
     'revoked_at',
   ].map((columnName) => ({ tableName: 'refresh_tokens', columnName })),
+  ...[
+    'id',
+    'user_id',
+    'payload',
+    'priority',
+    'enqueued_at',
+    'expires_at',
+    'attempt_count',
+    'status',
+    'last_attempt_at',
+    'error_message',
+  ].map((columnName) => ({ tableName: 'queued_push_notifications', columnName })),
 ] as const;
 
 const REQUIRED_SCHEMA_COLUMN_SHAPES: readonly RequiredSchemaColumnShape[] = [
@@ -266,6 +279,16 @@ const REQUIRED_SCHEMA_COLUMN_SHAPES: readonly RequiredSchemaColumnShape[] = [
   { tableName: 'users', columnName: 'auth_epoch', expectedDataType: 'integer', expectedNullable: 'NO', requiresDefault: true },
   { tableName: 'refresh_tokens', columnName: 'auth_session_id', expectedDataType: 'text', expectedNullable: 'NO' },
   { tableName: 'refresh_tokens', columnName: 'revoked_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
+  { tableName: 'queued_push_notifications', columnName: 'id', expectedDataType: 'integer', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'queued_push_notifications', columnName: 'user_id', expectedDataType: 'integer', expectedNullable: 'NO' },
+  { tableName: 'queued_push_notifications', columnName: 'payload', expectedDataType: 'text', expectedNullable: 'NO' },
+  { tableName: 'queued_push_notifications', columnName: 'priority', expectedDataType: 'text', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'queued_push_notifications', columnName: 'enqueued_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'queued_push_notifications', columnName: 'expires_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'NO' },
+  { tableName: 'queued_push_notifications', columnName: 'attempt_count', expectedDataType: 'integer', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'queued_push_notifications', columnName: 'status', expectedDataType: 'text', expectedNullable: 'NO', requiresDefault: true },
+  { tableName: 'queued_push_notifications', columnName: 'last_attempt_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
+  { tableName: 'queued_push_notifications', columnName: 'error_message', expectedDataType: 'text', expectedNullable: 'YES' },
   { tableName: 'users', columnName: 'deletion_requested_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
   { tableName: 'users', columnName: 'deletion_completed_at', expectedDataType: 'timestamp with time zone', expectedNullable: 'YES' },
   { tableName: 'callback_notification_queue', columnName: 'dedupe_key', expectedDataType: 'text', expectedNullable: 'YES' },
@@ -322,6 +345,7 @@ export const REQUIRED_SCHEMA_INDEXES: readonly RequiredSchemaIndex[] = [
   { tableName: 'media_deletion_jobs', indexName: 'media_deletion_jobs_dedupe_key_idx' },
   { tableName: 'media_deletion_jobs', indexName: 'media_deletion_jobs_status_attempt_idx' },
   { tableName: 'media_deletion_jobs', indexName: 'media_deletion_jobs_lease_expiry_idx' },
+  { tableName: 'queued_push_notifications', indexName: 'queued_push_notifications_status_idx' },
 ];
 
 export const REQUIRED_SCHEMA_CONSTRAINTS: readonly RequiredSchemaConstraint[] = [
@@ -332,6 +356,8 @@ export const REQUIRED_SCHEMA_CONSTRAINTS: readonly RequiredSchemaConstraint[] = 
   { tableName: 'account_erasure_jobs', constraintType: 'PRIMARY KEY', columns: ['id'] },
   { tableName: 'media_deletion_jobs', constraintType: 'PRIMARY KEY', columns: ['id'] },
   { tableName: 'media_deletion_jobs', constraintType: 'UNIQUE', columns: ['dedupe_key'] },
+  { tableName: 'queued_push_notifications', constraintType: 'PRIMARY KEY', columns: ['id'] },
+  { tableName: 'queued_push_notifications', constraintType: 'FOREIGN KEY', columns: ['user_id'], referencedTable: 'users' },
 ];
 
 function requiredSchemaColumnShapes(

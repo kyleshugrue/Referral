@@ -28,7 +28,10 @@ export function getTrustedClientIp(
   for (let index = chain.length - 1; index >= 0; index--) {
     if (!isTrustedProxyAddress(chain[index])) return chain[index];
   }
-  return chain[0] || socketAddress;
+  // If every forwarded hop is trusted/private, there is no client identity
+  // that can be validated from the header. Never promote an arbitrary
+  // leftmost value to an identity in that case.
+  return socketAddress;
 }
 
 /**

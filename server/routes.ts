@@ -1746,7 +1746,7 @@ export async function registerRoutes(app: Express): Promise<void> {
           }
           
           // Only update the resume fields, preserving all other fields
-           savedUser = await storage.updateUser(userId, {
+           savedUser = await storage.replaceUserMediaAndEnqueueDeletion(userId, {
             resumeUrl: result.url,
             resumePreviewUrls: result.previewUrls
           });
@@ -1866,9 +1866,7 @@ export async function registerRoutes(app: Express): Promise<void> {
           }
           
           // Only update the photo field, preserving all other fields
-           savedUser = await storage.updateUser(userId, {
-            photo: fileUrl
-          });
+           savedUser = await storage.replaceUserMediaAndEnqueueDeletion(userId, { photo: fileUrl });
           
            logger.debug('[Photo Upload] Successfully updated photo for authenticated user');
         } catch (updateError) {

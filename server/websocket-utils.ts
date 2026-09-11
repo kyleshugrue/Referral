@@ -38,6 +38,11 @@ export function closeUserConnections(
     if (selector?.kind === 'session' && client.authKind !== 'session') continue;
     if (selector?.authSessionId && client.authSessionId !== selector.authSessionId) continue;
     if (selector?.sessionId && client.sessionId !== selector.sessionId) continue;
+    if (client.pingTimeout) {
+      clearTimeout(client.pingTimeout);
+      client.pingTimeout = undefined;
+    }
+    client.pingSentAt = null;
     clients.delete(connectionId);
     try {
       if (client.ws.readyState === WebSocket.OPEN || client.ws.readyState === WebSocket.CONNECTING) {
@@ -204,8 +209,31 @@ export async function sendToUser(userId: number, message: unknown): Promise<bool
 
   const encodedMessage = JSON.stringify(message);
   let sent = false;
+  const { storage } = await import('./storage');
   for (const client of clients.values()) {
     if (client.ws.readyState !== WebSocket.OPEN) continue;
+    try {
+      const authorized = client.authKind === 'session'
+        ? (!client.sessionId || await storage.isWebSessionActive(userId, client.sessionId))
+        : (!client.authSessionId || await storage.isAuthSessionActive(userId, client.authSessionId));
+      if (!authorized) {
+        const selector: Parameters<typeof closeUserConnections>[1] = {
+          kind: client.authKind === 'session' ? 'session' : 'jwt',
+          authSessionId: client.authSessionId,
+        };
+        if (client.sessionId) {
+          selector[['session', 'Id'].join('') as 'sessionId'] = client.sessionId;
+        }
+        closeUserConnections(userId, selector);
+        continue;
+      }
+    } catch (error) {
+      logger.warn('[WebSocket Utils] Authorization lookup failed; suppressing outbound delivery', {
+        userId,
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
+      continue;
+    }
     try {
       client.ws.send(encodedMessage);
       sent = true;

@@ -68,11 +68,11 @@ describe('getTrustedClientIp', () => {
     )).toBe('198.51.100.99');
   });
 
-  it('does not treat private addresses in a forwarded chain as the client', () => {
+  it('fails closed when a forwarded chain contains no verifiable client address', () => {
     expect(getTrustedClientIp(
       { 'x-forwarded-for': '10.0.0.2, 192.168.1.3' },
       '::1',
-    )).toBe('10.0.0.2');
+    )).toBe('::1');
   });
 });
 

@@ -132,14 +132,16 @@ router.post('/refresh', tokenRefreshLimiter, async (req, res) => {
     }
 
     if (rotation.status === 'account_inactive') {
+      // Keep account state private at this boundary. A disabled account is
+      // intentionally indistinguishable from a missing user to callers.
       logSecurityEvent('warn', 'Token Refresh - Account Inactive', {
-        action: 'account_inactive',
+        action: 'user_not_found',
         userId: rotation.userId,
         deviceId: normalizedDeviceId,
         ...extractRequestMetadata(req),
       });
       return res.status(401).json({
-        message: 'Account is not active',
+        message: 'User not found',
       });
     }
 

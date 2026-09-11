@@ -159,6 +159,19 @@ router.patch('/', requireAuthJWT, profileMutationLimiter, async (req, res) => {
     // Use validated data instead of raw req.body
     // Cast to Record type to allow dynamic property access needed by existing code patterns
     const updateData = parseResult.data as Record<string, unknown>;
+    // Completion is a server-validated claim, not part of the generic
+    // editable profile contract. Accept it only as a boolean at this
+    // dedicated authenticated mutation boundary, then validate the candidate
+    // profile below before persisting it.
+    if (Object.prototype.hasOwnProperty.call(sanitizedBody, 'registrationCompleted')) {
+      if (typeof sanitizedBody.registrationCompleted !== 'boolean') {
+        return res.status(422).json({
+          message: 'Invalid profile data',
+          errors: { registrationCompleted: ['Expected a boolean'] },
+        });
+      }
+      updateData.registrationCompleted = sanitizedBody.registrationCompleted;
+    }
 
     // CRITICAL: Track which fields were explicitly sent in the request body
     // This allows distinguishing between "field not sent" (undefined) vs "field intentionally cleared" (empty string/array)

@@ -43,6 +43,7 @@ describe('database readiness safeguards', () => {
         rows: [
           { table_name: 'callback_notification_queue' },
           { table_name: 'delivery_obligations' },
+          { table_name: 'queued_push_notifications' },
           { table_name: 'account_erasure_jobs' },
           { table_name: 'media_deletion_jobs' },
           { table_name: 'fcm_tokens' },
@@ -69,6 +70,18 @@ describe('database readiness safeguards', () => {
           { table_name: 'delivery_obligations', column_name: 'status' },
           { table_name: 'delivery_obligations', column_name: 'created_at' },
           { table_name: 'delivery_obligations', column_name: 'completed_at' },
+          ...[
+            'id',
+            'user_id',
+            'payload',
+            'priority',
+            'enqueued_at',
+            'expires_at',
+            'attempt_count',
+            'status',
+            'last_attempt_at',
+            'error_message',
+          ].map((column_name) => ({ table_name: 'queued_push_notifications', column_name })),
           { table_name: 'account_erasure_jobs', column_name: 'id' },
           { table_name: 'account_erasure_jobs', column_name: 'user_id' },
           { table_name: 'account_erasure_jobs', column_name: 'status' },
@@ -158,6 +171,7 @@ describe('database readiness safeguards', () => {
           { indexname: 'media_deletion_jobs_dedupe_key_idx' },
           { indexname: 'media_deletion_jobs_status_attempt_idx' },
           { indexname: 'media_deletion_jobs_lease_expiry_idx' },
+          { indexname: 'queued_push_notifications_status_idx' },
         ],
       })
       .mockResolvedValueOnce({
@@ -169,6 +183,8 @@ describe('database readiness safeguards', () => {
           { table_name: 'account_erasure_jobs', constraint_type: 'PRIMARY KEY', column_names: ['id'], foreign_table_name: null },
           { table_name: 'media_deletion_jobs', constraint_type: 'PRIMARY KEY', column_names: ['id'], foreign_table_name: null },
           { table_name: 'media_deletion_jobs', constraint_type: 'UNIQUE', column_names: ['dedupe_key'], foreign_table_name: null },
+          { table_name: 'queued_push_notifications', constraint_type: 'PRIMARY KEY', column_names: ['id'], foreign_table_name: null },
+          { table_name: 'queued_push_notifications', constraint_type: 'FOREIGN KEY', column_names: ['user_id'], foreign_table_name: 'users' },
         ],
       });
     await expect(checkDatabaseReadiness({ query })).resolves.toEqual({
@@ -196,6 +212,7 @@ describe('database readiness safeguards', () => {
        missingTables: [
          'callback_notification_queue',
          'delivery_obligations',
+          'queued_push_notifications',
          'account_erasure_jobs',
           'media_deletion_jobs',
          'fcm_tokens',

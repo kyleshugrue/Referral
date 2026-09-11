@@ -1,7 +1,7 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 import * as firebaseLib from "./firebase";
 import { config } from "./config";
-import { getCurrentAccessToken, refreshAccessToken, waitForTokensReady, isRefreshInProgress, waitForRefreshComplete } from './token-manager';
+import { getAuthGeneration, getCurrentAccessToken, refreshAccessToken, waitForTokensReady, isRefreshInProgress, waitForRefreshComplete } from './token-manager';
 import { Capacitor } from "@capacitor/core";
 import { getCsrfHeaders } from './csrf';
 
@@ -56,7 +56,8 @@ export async function apiRequest(
   url: string,
   data?: unknown | undefined,
   retryCount: number = 0,
-  maxRetries: number = 2
+  maxRetries: number = 2,
+  requestGeneration: number = getAuthGeneration(),
 ): Promise<Response> {
   // CRITICAL: Wait for token initialization to complete before making requests
   // This prevents race condition on iOS app startup where queries fire before tokens load
@@ -132,7 +133,13 @@ export async function apiRequest(
     });
 
     // Handle 401: Attempt token refresh once (JWT only, iOS native)
-    if (res.status === 401 && accessToken && accessToken !== 'PENDING_REFRESH') {
+    if (
+      res.status === 401 &&
+      accessToken &&
+      accessToken !== 'PENDING_REFRESH' &&
+      Capacitor.isNativePlatform() &&
+      getAuthGeneration() === requestGeneration
+    ) {
       console.log(`[API] Got 401 for ${method} ${url}, attempting token refresh`);
       
       // CRITICAL: Check if another refresh is already in progress (synchronous lock)
@@ -148,7 +155,8 @@ export async function apiRequest(
       
       // CRITICAL: Always re-read the fresh token from the manager after refresh
       // This ensures we get the token that was set during the successful refresh
-      const freshToken = getCurrentAccessToken();
+       const freshToken = getCurrentAccessToken();
+       if (getAuthGeneration() !== requestGeneration) return res;
       
        console.log('[API] Refresh complete');
       
@@ -205,7 +213,7 @@ export async function apiRequest(
         // Wait longer between each retry
         const delay = Math.min(1000 * Math.pow(2, retryCount), 4000);
         await new Promise(resolve => setTimeout(resolve, delay));
-        return apiRequest(method, url, data, retryCount + 1, maxRetries);
+       return apiRequest(method, url, data, retryCount + 1, maxRetries, requestGeneration);
       }
     }
 
@@ -219,7 +227,7 @@ export async function apiRequest(
       // Exponential backoff with a cap
       const delay = Math.min(1000 * Math.pow(2, retryCount), 4000);
       await new Promise(resolve => setTimeout(resolve, delay));
-      return apiRequest(method, url, data, retryCount + 1, maxRetries);
+      return apiRequest(method, url, data, retryCount + 1, maxRetries, requestGeneration);
     }
     throw err;
   }
@@ -231,6 +239,7 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey, signal }) => {
+    const requestGeneration = getAuthGeneration();
     // CRITICAL: Wait for token initialization to complete before making queries
     // This prevents race condition on iOS app startup where queries fire before tokens load
     await waitForTokensReady();
@@ -309,7 +318,13 @@ export const getQueryFn: <T>(options: {
     });
 
     // Handle 401: Attempt token refresh once (JWT only, iOS native)
-    if (res.status === 401 && jwtAccessToken && jwtAccessToken !== 'PENDING_REFRESH') {
+     if (
+       res.status === 401 &&
+       jwtAccessToken &&
+       jwtAccessToken !== 'PENDING_REFRESH' &&
+       Capacitor.isNativePlatform() &&
+       getAuthGeneration() === requestGeneration
+     ) {
       console.log(`[QueryClient] Query got 401 for ${url}, attempting token refresh`);
       
       // CRITICAL: Check if another refresh is already in progress (synchronous lock)
@@ -325,7 +340,12 @@ export const getQueryFn: <T>(options: {
       
       // CRITICAL: Always re-read the fresh token from the manager after refresh
       // This ensures we get the token that was set during the successful refresh
-      const freshToken = getCurrentAccessToken();
+       const freshToken = getCurrentAccessToken();
+       if (getAuthGeneration() !== requestGeneration) {
+         return unauthorizedBehavior === "returnNull" ? null : (() => {
+           throw new Error("Authentication changed during query");
+         })();
+       }
       
        console.log('[QueryClient] Refresh complete');
       

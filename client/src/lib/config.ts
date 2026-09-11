@@ -45,23 +45,27 @@ function getEnvironmentConfig(): AppConfig {
     };
   }
   
-  // For web platforms, use the existing logic
-  const isDevelopment = 
-    window.location.hostname === 'localhost' || 
-    window.location.hostname === '127.0.0.1' ||
-    window.location.hostname.includes('replit.dev');
+  // For web platforms, use the existing logic. Keep configuration importable
+  // during SSR/tests where no browser global exists.
+  const browserOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+  const browserHostname = typeof window !== 'undefined' ? window.location.hostname : '';
+  const browserProtocol = typeof window !== 'undefined' ? window.location.protocol : '';
+  const isDevelopment =
+    browserHostname === 'localhost' ||
+    browserHostname === '127.0.0.1' ||
+    browserHostname.includes('replit.dev');
 
-  const isSecure = window.location.protocol === 'https:' || isDevelopment;
+  const isSecure = browserProtocol === 'https:' || isDevelopment;
 
   // Base URL configuration for web
   let apiBaseUrl: string;
   
   if (isDevelopment) {
     // Development: use current origin (localhost or replit dev)
-    apiBaseUrl = window.location.origin;
+    apiBaseUrl = browserOrigin;
   } else {
     // Production: use environment variable or fallback to current origin
-    apiBaseUrl = import.meta.env.VITE_API_BASE_URL || window.location.origin;
+    apiBaseUrl = import.meta.env.VITE_API_BASE_URL || browserOrigin;
   }
 
   return {

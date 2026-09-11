@@ -4,6 +4,7 @@ import { Server as HTTPServer } from 'http';
 import { randomUUID } from 'crypto';
 import { storage } from './storage';
 import { sessionMiddleware } from './auth';
+import passport from 'passport';
 import { logger } from './lib/logger';
 import type { Request, Response } from 'express';
 import type { Session } from 'express-session';
@@ -137,11 +138,26 @@ export function setupWebSocketServer(server: HTTPServer) {
             write: () => {},
           } as unknown as Response;
 
-          // Parse session for authentication
+           // Parse the session, then run the same Passport middleware chain
+           // used by HTTP requests so serialized browser sessions are
+           // deserialized during the upgrade as well.
           await new Promise<void>((resolve, reject) => {
             sessionMiddleware(info.req as Request, mockRes, (err?: unknown) => {
               if (err) reject(err);
-              else resolve();
+               else if (!(info.req as SessionRequest).session) {
+                 resolve();
+               } else {
+                 passport.initialize()(info.req as Request, mockRes, (initializeError?: unknown) => {
+                   if (initializeError) {
+                     reject(initializeError);
+                     return;
+                   }
+                   passport.session()(info.req as Request, mockRes, (sessionError?: unknown) => {
+                     if (sessionError) reject(sessionError);
+                     else resolve();
+                   });
+                 });
+               }
             });
           });
 
@@ -490,18 +506,13 @@ export function setupWebSocketServer(server: HTTPServer) {
                   content: content.trim()
                 });
 
-                // Send to recipient if online
-                const recipientClients = connectedClients.get(receiverId);
-                let recipientOnline = false;
-                for (const recipientClient of recipientClients?.values() ?? []) {
-                  if (recipientClient.ws.readyState !== WebSocket.OPEN) continue;
-                  recipientOnline = true;
-                  logger.debug(`[WebSocket] Sending message to online recipient ${receiverId}`);
-                  recipientClient.ws.send(JSON.stringify({
-                    type: 'chat',
-                    message: toSafeMessage(savedMessage)
-                  }));
-                }
+                // Send through the centralized outbound path so storage-backed
+                // session revocation is checked before every delivery.
+                const { sendToUser } = await import('./websocket-utils');
+                const recipientOnline = await sendToUser(receiverId, {
+                  type: 'chat',
+                  message: toSafeMessage(savedMessage),
+                });
                 if (!recipientOnline) {
                   logger.debug(`[WebSocket] Recipient ${receiverId} is offline, message stored only`);
                 }

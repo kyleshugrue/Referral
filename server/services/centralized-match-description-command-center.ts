@@ -248,9 +248,11 @@ class CentralizedMatchDescriptionCommandCenter {
     };
 
     try {
-      // Step 1: Increment user profile version (atomic)
-      const updatedUser = await storage.incrementUserProfileVersion(userId);
-      console.log(`[CMDCC] Updated user ${userId} profile version to ${updatedUser.profileVersion}`);
+      // The profile route already performed the optimistic, atomic versioned
+      // write. Re-read that committed row instead of incrementing twice.
+      const updatedUser = await storage.getUser(userId);
+      if (!updatedUser) throw new Error(`User ${userId} not found`);
+      console.log(`[CMDCC] Processing committed user ${userId} profile version ${updatedUser.profileVersion}`);
 
       // Step 2: Cancel any pending/stale background jobs
       const cancelledJobs = await storage.cancelStaleJobsForUser(userId, updatedUser.profileVersion);
@@ -379,7 +381,7 @@ class CentralizedMatchDescriptionCommandCenter {
       console.log(`[CMDCC] Profile update complete: ${result.deletedStaleContent} stale matches deleted, ${validMatches.length} valid matches updated`);
 
       // Queue background regeneration for valid matches that need new descriptions
-      await this.queueDescriptionRegeneration(validMatches, updatedUser);
+      await this.queueDescriptionRegeneration(validMatches, updatedUser, changes);
 
       // ========== BIDIRECTIONAL MATCH PROPAGATION ==========
       // Step 5: Find all users who have matches with this updated user
@@ -498,9 +500,10 @@ class CentralizedMatchDescriptionCommandCenter {
         }
       }
 
-      // Delete all stale matches
+      // Delete only the stale match row; another match for the same user may
+      // still be valid and must not be removed as collateral.
       for (const staleMatch of staleMatches) {
-        await storage.clearSynergyMatchesForUser(staleMatch.userId);
+        await storage.deleteSynergyMatchById(staleMatch.id);
         result.deletedStaleContent++;
       }
 
@@ -559,13 +562,16 @@ class CentralizedMatchDescriptionCommandCenter {
         // Queue match regeneration for affected user if they had stale matches
         if (staleMarkedCount > 0) {
           try {
+            const affectedUser = await storage.getUser(affectedUserId);
+            if (!affectedUser) throw new Error(`Affected user ${affectedUserId} not found`);
             const regenerationJob = await backgroundJobQueue.queueJob(
               affectedUserId,
               'MATCH_DESCRIPTION',
               {
                 userId: affectedUserId,
                 priority: 3, // higher priority for cross-user updates
-                userProfileVersion: sourceUserProfileVersion,
+                userProfileVersion: affectedUser.profileVersion,
+                targetUserProfileVersion: sourceUserProfileVersion,
                 profileUpdated: true
               },
               3 // higher priority
@@ -672,18 +678,13 @@ class CentralizedMatchDescriptionCommandCenter {
    */
   private async queueDescriptionRegeneration(
     validMatches: SynergyMatch[], 
-    updatedUser: User
+    updatedUser: User,
+    changedFields: string[] = [],
   ): Promise<void> {
     try {
       // Queue regeneration for matches that need updated descriptions
       const regenerationPromises = validMatches
-        .filter(match => {
-          // Regenerate if match description might be affected by profile changes
-          return match.description && 
-                 (match.description.includes(updatedUser.currentCompany!) ||
-                  match.description.includes(updatedUser.currentLocation!) ||
-                  match.description.includes(updatedUser.title!));
-        })
+        .filter(match => Boolean(match.description) && changedFields.length > 0)
         .map(match => {
           return backgroundJobQueue.queueJob(
             updatedUser.id,

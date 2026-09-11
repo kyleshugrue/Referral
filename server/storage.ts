@@ -84,6 +84,10 @@ export interface IStorage {
     deletions: MediaDeletionRequest[],
     updates: Pick<UserWrite, 'photo' | 'resumeUrl' | 'resumePreviewUrls'>,
   ): Promise<User>;
+  replaceUserMediaAndEnqueueDeletion(
+    userId: number,
+    updates: Pick<UserWrite, 'photo' | 'resumeUrl' | 'resumePreviewUrls'>,
+  ): Promise<User>;
   claimNextMediaDeletionJob(): Promise<MediaDeletionJob | undefined>;
   recoverExpiredMediaDeletionJobs(limit: number): Promise<number>;
   completeMediaDeletionJob(jobId: number, claimToken: string): Promise<boolean>;
@@ -108,6 +112,7 @@ export interface IStorage {
   generateMatchesForUser(userId: number): Promise<(User & { matchDescription?: string | null; matchScore?: number | null; matchReasons?: string[] })[]>;
   getSavedSynergyMatches(userId: number): Promise<(SynergyMatch & { matchedUser: User })[]>;
   getSynergyMatchById(id: number): Promise<SynergyMatch | null>;
+  deleteSynergyMatchById(id: number): Promise<void>;
   saveSynergyMatch(match: InsertSynergyMatch): Promise<SynergyMatch>;
   claimSynergyMatchGeneration(match: InsertSynergyMatch & { generationJobKey: string }): Promise<SynergyMatch | undefined>;
   updateSynergyMatchForJob(
@@ -965,7 +970,7 @@ export class DatabaseStorage implements IStorage {
             if (finalData.currentLocation !== undefined) {
               logger.debug(`[updateUser] Background: Caching current location for user ${id}`);
               locationPromises.push(
-                locationCacheService.updateUserCurrentLocation(id, finalData.currentLocation)
+                locationCacheService.updateUserCurrentLocation(id, finalData.currentLocation, user.profileVersion)
                   .catch(error => logger.error(`[updateUser] Background: Error caching current location for user ${id}:`, error))
               );
             }
@@ -973,7 +978,7 @@ export class DatabaseStorage implements IStorage {
             if (finalData.desiredLocations !== undefined && Array.isArray(finalData.desiredLocations)) {
               logger.debug(`[updateUser] Background: Caching desired locations for user ${id}`);
               locationPromises.push(
-                locationCacheService.updateUserDesiredLocations(id, finalData.desiredLocations)
+                locationCacheService.updateUserDesiredLocations(id, finalData.desiredLocations, user.profileVersion)
                   .catch(error => logger.error(`[updateUser] Background: Error caching desired locations for user ${id}:`, error))
               );
             }
@@ -1467,8 +1472,28 @@ export class DatabaseStorage implements IStorage {
         .for('update');
       if (!currentUser) throw new Error('User not found');
 
-      const uniqueDeletions = [...new Map(
-        deletions
+       const inferredDeletions: MediaDeletionRequest[] = [...deletions];
+       if (Object.prototype.hasOwnProperty.call(updates, 'photo') &&
+           currentUser.photo &&
+           updates.photo !== currentUser.photo) {
+         inferredDeletions.push({ reference: currentUser.photo, purpose: 'photo' });
+       }
+       if (Object.prototype.hasOwnProperty.call(updates, 'resumeUrl') &&
+           currentUser.resumeUrl &&
+           updates.resumeUrl !== currentUser.resumeUrl) {
+         inferredDeletions.push({ reference: currentUser.resumeUrl, purpose: 'resume' });
+       }
+       if (Object.prototype.hasOwnProperty.call(updates, 'resumePreviewUrls')) {
+         const nextPreviews = Array.isArray(updates.resumePreviewUrls) ? updates.resumePreviewUrls : [];
+         for (const reference of currentUser.resumePreviewUrls ?? []) {
+           if (!nextPreviews.includes(reference)) {
+             inferredDeletions.push({ reference, purpose: 'resume-preview' });
+           }
+         }
+       }
+
+       const uniqueDeletions = [...new Map(
+         inferredDeletions
           .filter(({ reference, purpose }) => {
             if (!reference) return false;
             if (purpose === 'photo') return currentUser.photo === reference;
@@ -1499,6 +1524,13 @@ export class DatabaseStorage implements IStorage {
       if (!updatedUser) throw new Error('Unable to clear user media');
       return updatedUser;
     });
+  }
+
+  async replaceUserMediaAndEnqueueDeletion(
+    userId: number,
+    updates: Pick<UserWrite, 'photo' | 'resumeUrl' | 'resumePreviewUrls'>,
+  ): Promise<User> {
+    return this.clearUserMediaAndEnqueueDeletion(userId, [], updates);
   }
 
   async claimNextMediaDeletionJob(): Promise<MediaDeletionJob | undefined> {
@@ -2167,6 +2199,19 @@ export class DatabaseStorage implements IStorage {
           read: false,
           createdAt: new Date().toISOString(),
         }).onConflictDoNothing();
+
+        await tx.insert(deliveryObligations).values({
+          userId: message.receiverId,
+          eventType: 'message',
+          payload: JSON.stringify({
+            messageId: newMessage.id,
+            senderId: message.senderId,
+            receiverId: message.receiverId,
+          }),
+          dedupeKey: `message:${newMessage.id}`,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          status: 'pending',
+        }).onConflictDoNothing({ target: deliveryObligations.dedupeKey });
 
         return { ...newMessage, sender, receiver };
       });
@@ -2916,6 +2961,10 @@ export class DatabaseStorage implements IStorage {
       logger.error('[clearSynergyMatchesForUser] Error clearing synergy matches:', error);
       throw error;
     }
+  }
+
+  async deleteSynergyMatchById(id: number): Promise<void> {
+    await db.delete(synergyMatches).where(eq(synergyMatches.id, id));
   }
 
   async markMatchesAsGenerating(userId: number): Promise<number> {
@@ -4751,7 +4800,7 @@ export class DatabaseStorage implements IStorage {
     return (result.rows[0] as {id: number, userId: number, payload: string, priority: string, attemptCount: number}) || null;
   }
 
-  async updateQueuedNotificationStatus(id: number, status: string, errorMessage?: string): Promise<void> {
+  async updateQueuedNotificationStatus(id: number, status: 'pending' | 'processing' | 'completed' | 'failed', errorMessage?: string): Promise<void> {
     try {
       if (errorMessage) {
         await db.execute(sql`
@@ -5110,6 +5159,7 @@ export class DatabaseStorage implements IStorage {
               OR last_attempt_at < NOW() - (LEAST(POWER(2, attempt_count), 30) * INTERVAL '1 second')
             )
           OR status = 'processing'
+            AND attempt_count < 5
             AND last_attempt_at < NOW() - INTERVAL '10 minutes'
         )
           AND expires_at > NOW()

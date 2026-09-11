@@ -1,6 +1,6 @@
 import { db } from '../db';
 import { locationCoordinates, users } from '@shared/schema';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { geocodingService } from './geocoding';
 import { logger } from '../lib/logger';
 
@@ -142,18 +142,28 @@ export class LocationCacheService {
   /**
    * Update user's current location with coordinates
    */
-  async updateUserCurrentLocation(userId: number, locationName: string): Promise<LocationUpdateResult> {
+  async updateUserCurrentLocation(
+    userId: number,
+    locationName: string,
+    expectedProfileVersion?: number,
+  ): Promise<LocationUpdateResult> {
+    const userPredicate = expectedProfileVersion === undefined
+      ? eq(users.id, userId)
+      : and(eq(users.id, userId), eq(users.profileVersion, expectedProfileVersion));
     if (!locationName?.trim()) {
       try {
         // Clear current location
-        await db
+        const result = await db
           .update(users)
           .set({
             currentLocation: null,
             currentLocationLat: null,
             currentLocationLng: null
           })
-          .where(eq(users.id, userId));
+          .where(userPredicate);
+        if ((result.rowCount ?? 0) === 0) {
+          return { success: false, fromCache: false, error: 'Profile changed before location update completed' };
+        }
 
         logger.operational('[LocationCache] Cleared current location', {
           userId,
@@ -176,14 +186,17 @@ export class LocationCacheService {
     }
 
     try {
-      await db
+      const result = await db
         .update(users)
         .set({
           currentLocation: locationName.trim(),
           currentLocationLat: coordinatesResult.coordinates!.lat,
           currentLocationLng: coordinatesResult.coordinates!.lng
         })
-        .where(eq(users.id, userId));
+        .where(userPredicate);
+      if ((result.rowCount ?? 0) === 0) {
+        return { success: false, fromCache: coordinatesResult.fromCache, error: 'Profile changed before location update completed' };
+      }
 
       logger.operational('[LocationCache] Updated current location', {
         userId,
@@ -203,7 +216,11 @@ export class LocationCacheService {
   /**
    * Update user's desired locations with coordinates
    */
-  async updateUserDesiredLocations(userId: number, desiredLocations: string[]): Promise<{
+  async updateUserDesiredLocations(
+    userId: number,
+    desiredLocations: string[],
+    expectedProfileVersion?: number,
+  ): Promise<{
     success: boolean;
     results: Array<{ location: string; success: boolean; fromCache: boolean; error?: string }>;
   }> {
@@ -246,13 +263,26 @@ export class LocationCacheService {
 
     try {
       // Update user's desired locations and coordinates
-      await db
+      const userPredicate = expectedProfileVersion === undefined
+        ? eq(users.id, userId)
+        : and(eq(users.id, userId), eq(users.profileVersion, expectedProfileVersion));
+      const updateResult = await db
         .update(users)
         .set({
           desiredLocations: validLocations,
           desiredLocationCoords: validLocationCoords
         })
-        .where(eq(users.id, userId));
+        .where(userPredicate);
+      if ((updateResult.rowCount ?? 0) === 0) {
+        return {
+          success: false,
+          results: results.map((result) => ({
+            ...result,
+            success: false,
+            error: 'Profile changed before location update completed',
+          })),
+        };
+      }
 
       logger.operational('[LocationCache] Updated desired locations', {
         userId,

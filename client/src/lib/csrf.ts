@@ -1,4 +1,5 @@
 import { Capacitor } from '@capacitor/core';
+import { config } from './config';
 
 let csrfToken: string | null = null;
 let csrfTokenRequest: Promise<string | null> | null = null;
@@ -15,7 +16,8 @@ export async function getCsrfToken(): Promise<string | null> {
   if (csrfToken) return csrfToken;
   if (csrfTokenRequest) return csrfTokenRequest;
 
-  csrfTokenRequest = fetch('/api/csrf-token', {
+  const csrfUrl = `${config.apiBaseUrl.replace(/\/+$/, '')}/api/csrf-token`;
+  csrfTokenRequest = fetch(csrfUrl, {
     credentials: 'include',
     headers: { Accept: 'application/json' },
   })
