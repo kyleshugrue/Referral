@@ -1,6 +1,7 @@
 import { WebSocket, WebSocketServer } from 'ws';
 import { IncomingMessage } from 'http';
 import { Server as HTTPServer } from 'http';
+import { randomUUID } from 'crypto';
 import { storage } from './storage';
 import { sessionMiddleware } from './auth';
 import { logger } from './lib/logger';
@@ -31,6 +32,7 @@ interface SessionRequest extends IncomingMessage {
 }
 
 interface ConnectedClient {
+  connectionId: string;
   ws: WebSocket;
   userId: number;
   lastPong: number;
@@ -45,7 +47,7 @@ interface ConnectedClient {
 }
 
 // Track connected users with additional metadata
-const connectedClients = new Map<number, ConnectedClient>();
+const connectedClients: import('./websocket-utils').ConnectedClients = new Map();
 const websocketAdmissionGuard = createWebSocketAdmissionGuard();
 
 // Export the utility function to get access to connected clients in other files
@@ -66,6 +68,12 @@ const RECONNECT_RESET_TIME = 60000; // 1 minute - time to reset reconnect counte
 
 // EMERGENCY KILL-SWITCH: Set to false to disable all WebSocket connections
 const WS_ENABLED = process.env.WS_ENABLED !== 'false';
+
+function getConnectedSocketCount(): number {
+  let count = 0;
+  for (const clients of connectedClients.values()) count += clients.size;
+  return count;
+}
 
 export function setupWebSocketServer(server: HTTPServer) {
   logger.debug('[WebSocket] Initializing WebSocket server on path /ws');
@@ -221,16 +229,19 @@ export function setupWebSocketServer(server: HTTPServer) {
   // Setup periodic connection cleanup
   const cleanupInterval = setInterval(() => {
     const now = Date.now();
-    for (const [userId, client] of connectedClients.entries()) {
+    for (const [userId, clients] of connectedClients.entries()) {
+      for (const [connectionId, client] of clients.entries()) {
         if (now - client.lastPong > PING_INTERVAL + PING_TIMEOUT) {
-        logger.debug(`[WebSocket] Cleaning up stale connection for user ${userId}`);
-        try {
-          client.ws.terminate();
-        } catch (error) {
-          logger.error(`[WebSocket] Error terminating connection for user ${userId}:`, error);
+          logger.debug(`[WebSocket] Cleaning up stale connection for user ${userId}`);
+          try {
+            client.ws.terminate();
+          } catch (error) {
+            logger.error(`[WebSocket] Error terminating connection for user ${userId}:`, error);
+          }
+          clients.delete(connectionId);
         }
-        connectedClients.delete(userId);
       }
+      if (clients.size === 0) connectedClients.delete(userId);
     }
   }, CLEANUP_INTERVAL);
 
@@ -265,55 +276,39 @@ export function setupWebSocketServer(server: HTTPServer) {
       
       logger.debug(`[WebSocket] Connection handler: userId=${userId}`);
 
-      // Handle existing connection - CRITICAL FIX for reconnection loop
-      const existingClient = connectedClients.get(userId);
       const now = Date.now();
-      
-      if (existingClient) {
-        logger.debug('[WebSocket] Found existing connection for user:', userId);
-        
-        // Reset reconnect counter if enough time has passed since first connection
-        const timeSinceFirstConnect = now - existingClient.firstConnectTime;
-        const shouldResetReconnectCount = timeSinceFirstConnect > RECONNECT_RESET_TIME;
-        
-        if (shouldResetReconnectCount) {
-          logger.debug(`[WebSocket] Resetting reconnect counter for user ${userId} after ${Math.round(timeSinceFirstConnect / 60000)} minutes`);
-        }
-        
-        const currentReconnectAttempts = shouldResetReconnectCount ? 0 : existingClient.reconnectAttempts;
-        
-        // If max reconnect attempts reached and not enough time passed, clear the connection and allow reconnect
-        if (currentReconnectAttempts >= MAX_RECONNECT_ATTEMPTS && !shouldResetReconnectCount) {
-          logger.debug(`[WebSocket] Too many reconnection attempts for user ${userId} (${currentReconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}). Time since first connect: ${Math.round(timeSinceFirstConnect / 60000)} minutes - clearing connection to allow reconnect`);
-          // Clear the existing connection to allow fresh reconnection
-          connectedClients.delete(userId);
-        }
-
-        // CRITICAL FIX: Remove existing client BEFORE closing to prevent instance mismatch
-        connectedClients.delete(userId);
-        
-        // Close existing connection gracefully
-        try {
-          if (existingClient.ws.readyState === WebSocket.OPEN) {
-            existingClient.ws.close(1000, 'New connection established');
-          }
-        } catch (error) {
-          logger.error('[WebSocket] Error closing existing connection:', error);
-        }
-      }
-
       // Extract platform information from User-Agent or other headers
       const userAgent = request.headers['user-agent'] || '';
       const platform = userAgent.includes('Capacitor')
         ? (userAgent.includes('iPhone') || userAgent.includes('iOS') ? 'ios-native' : 'android-native')
         : 'web';
 
+      // Keep one socket per authenticated session/device, while allowing a
+      // user to have multiple active sessions at the same time.
+      const authRequest = request as SessionRequest;
+      const connectionId = authRequest.authSessionId ?? authRequest.webSessionId ?? randomUUID();
+      const userClients = connectedClients.get(userId) ?? new Map<string, ConnectedClient>();
+      const existingClient = userClients.get(connectionId);
+      const timeSinceFirstConnect = existingClient ? now - existingClient.firstConnectTime : 0;
+      const shouldResetReconnectCount = !existingClient || timeSinceFirstConnect > RECONNECT_RESET_TIME;
+      if (existingClient) {
+        userClients.delete(connectionId);
+        try {
+          if (existingClient.ws.readyState === WebSocket.OPEN) {
+            existingClient.ws.close(1000, 'New connection established');
+          }
+        } catch (error) {
+          logger.error('[WebSocket] Error closing existing session connection:', error);
+        }
+      }
+
       // Store new connection with metadata
-      const newReconnectAttempts = existingClient ? 
-        (now - existingClient.firstConnectTime > RECONNECT_RESET_TIME ? 1 : existingClient.reconnectAttempts + 1) :
-        1;
+      const newReconnectAttempts = shouldResetReconnectCount
+        ? 1
+        : (existingClient?.reconnectAttempts ?? 0) + 1;
         
-      connectedClients.set(userId, {
+      userClients.set(connectionId, {
+        connectionId,
         ws,
         userId,
         lastPong: now,
@@ -325,9 +320,10 @@ export function setupWebSocketServer(server: HTTPServer) {
         authKind: (request as SessionRequest).authKind,
         sessionId: (request as SessionRequest).webSessionId,
       });
+      connectedClients.set(userId, userClients);
 
-      const client = connectedClients.get(userId);
-      logger.debug(`[WebSocket] User ${userId} connected (${platform}, attempt ${client?.reconnectAttempts}). Total connected users: ${connectedClients.size}`);
+      const client = userClients.get(connectionId);
+      logger.debug(`[WebSocket] User ${userId} connected (${platform}, attempt ${client?.reconnectAttempts}). Total connected sockets: ${getConnectedSocketCount()}`);
 
       logSecurityEvent('info', 'WebSocket - Connected', {
         action: 'websocket_connected',
@@ -348,7 +344,7 @@ export function setupWebSocketServer(server: HTTPServer) {
       // Setup ping/pong for connection monitoring
       pingInterval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
-          const client = connectedClients.get(userId!);
+          const client = connectedClients.get(userId!)?.get(connectionId);
           if (!client || client.pingSentAt !== null) {
             return;
           }
@@ -356,7 +352,7 @@ export function setupWebSocketServer(server: HTTPServer) {
           client.pingSentAt = pingSentAt;
           ws.ping(String(pingSentAt));
           client.pingTimeout = setTimeout(() => {
-            const current = connectedClients.get(userId!);
+            const current = connectedClients.get(userId!)?.get(connectionId);
             if (current?.ws === ws && current.pingSentAt === pingSentAt) {
               logger.debug(`[WebSocket] Pong timeout; terminating stale connection for user ${userId}`);
               current.pingTimeout = undefined;
@@ -370,7 +366,7 @@ export function setupWebSocketServer(server: HTTPServer) {
       const messageGuard = createWebSocketMessageGuard();
       ws.on('message', async (data) => {
         try {
-          const currentClient = connectedClients.get(userId!);
+          const currentClient = connectedClients.get(userId!)?.get(connectionId);
           if (
             !currentClient ||
             currentClient.ws !== ws ||
@@ -495,14 +491,18 @@ export function setupWebSocketServer(server: HTTPServer) {
                 });
 
                 // Send to recipient if online
-                const recipientClient = connectedClients.get(receiverId);
-                if (recipientClient?.ws.readyState === WebSocket.OPEN) {
+                const recipientClients = connectedClients.get(receiverId);
+                let recipientOnline = false;
+                for (const recipientClient of recipientClients?.values() ?? []) {
+                  if (recipientClient.ws.readyState !== WebSocket.OPEN) continue;
+                  recipientOnline = true;
                   logger.debug(`[WebSocket] Sending message to online recipient ${receiverId}`);
                   recipientClient.ws.send(JSON.stringify({
                     type: 'chat',
                     message: toSafeMessage(savedMessage)
                   }));
-                } else {
+                }
+                if (!recipientOnline) {
                   logger.debug(`[WebSocket] Recipient ${receiverId} is offline, message stored only`);
                 }
 
@@ -583,7 +583,8 @@ export function setupWebSocketServer(server: HTTPServer) {
         clearInterval(pingInterval);
 
         if (userId) {
-          const client = connectedClients.get(userId);
+          const clients = connectedClients.get(userId);
+          const client = clients?.get(connectionId);
           if (client) {
             if (client.pingTimeout) {
               clearTimeout(client.pingTimeout);
@@ -595,7 +596,8 @@ export function setupWebSocketServer(server: HTTPServer) {
               // For clean disconnections (code 1000) or if max attempts reached, remove client
               if (code === 1000 || client.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
                 logger.debug(`[WebSocket] Removing user ${userId} from connected clients (clean: ${code === 1000}, maxAttempts: ${client.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS})`);
-                connectedClients.delete(userId);
+                clients?.delete(connectionId);
+                if (clients?.size === 0) connectedClients.delete(userId);
               } else {
                 logger.debug(`[WebSocket] Keeping user ${userId} in connected clients for potential reconnection (attempt ${client.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
               }
@@ -608,7 +610,7 @@ export function setupWebSocketServer(server: HTTPServer) {
 
       // Handle pong responses
       ws.on('pong', (payload) => {
-        const client = connectedClients.get(userId!);
+        const client = connectedClients.get(userId!)?.get(connectionId);
         if (client?.ws === ws && client.pingSentAt !== null) {
           const expectedPayload = String(client.pingSentAt);
           if (payload.toString() !== expectedPayload) {
@@ -638,12 +640,14 @@ export function setupWebSocketServer(server: HTTPServer) {
   // Cleanup on server shutdown
   return (): Promise<void> => new Promise((resolve, reject) => {
     clearInterval(cleanupInterval);
-    for (const client of connectedClients.values()) {
-      try {
-        if (client.pingTimeout) clearTimeout(client.pingTimeout);
-        client.ws.close(1000, 'Server shutting down');
-      } catch (error) {
-        logger.error('[WebSocket] Error during shutdown cleanup:', error);
+    for (const clients of connectedClients.values()) {
+      for (const client of clients.values()) {
+        try {
+          if (client.pingTimeout) clearTimeout(client.pingTimeout);
+          client.ws.close(1000, 'Server shutting down');
+        } catch (error) {
+          logger.error('[WebSocket] Error during shutdown cleanup:', error);
+        }
       }
     }
     connectedClients.clear();

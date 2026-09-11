@@ -2,23 +2,28 @@ import { WebSocket } from 'ws';
 import { logger } from './lib/logger';
 
 // We need to access the connected clients map
-interface ConnectedClient {
+export interface ConnectedClient {
+  connectionId: string;
   ws: WebSocket;
   userId: number;
   lastPong: number;
   pingSentAt: number | null;
   pingTimeout?: NodeJS.Timeout;
   reconnectAttempts: number;
+  firstConnectTime: number;
+  platform?: string;
   authSessionId?: string;
   authKind?: 'jwt' | 'session' | 'ticket';
   sessionId?: string;
 }
 
+export type ConnectedClients = Map<number, Map<string, ConnectedClient>>;
+
 // We'll need to reference external resources, so import from a getter function
-let connectedClientsRef: Map<number, ConnectedClient> | null = null;
+let connectedClientsRef: ConnectedClients | null = null;
 
 // Function to set the reference to connected clients
-export function setConnectedClientsRef(clientsMap: Map<number, ConnectedClient>) {
+export function setConnectedClientsRef(clientsMap: ConnectedClients) {
   connectedClientsRef = clientsMap;
 }
 
@@ -26,23 +31,27 @@ export function closeUserConnections(
   userId: number,
   selector?: { kind?: 'jwt' | 'session'; authSessionId?: string; sessionId?: string },
 ): void {
-  const client = connectedClientsRef?.get(userId);
-  if (!client) return;
-  if (selector?.kind === 'jwt' && client.authKind !== 'jwt' && client.authKind !== 'ticket') return;
-  if (selector?.kind === 'session' && client.authKind !== 'session') return;
-  if (selector?.authSessionId && client.authSessionId !== selector.authSessionId) return;
-  if (selector?.sessionId && client.sessionId !== selector.sessionId) return;
-  connectedClientsRef?.delete(userId);
-  try {
-    if (client.ws.readyState === WebSocket.OPEN || client.ws.readyState === WebSocket.CONNECTING) {
-      client.ws.close(4001, 'Authorization revoked');
+  const clients = connectedClientsRef?.get(userId);
+  if (!clients) return;
+  for (const [connectionId, client] of clients) {
+    if (selector?.kind === 'jwt' && client.authKind !== 'jwt' && client.authKind !== 'ticket') continue;
+    if (selector?.kind === 'session' && client.authKind !== 'session') continue;
+    if (selector?.authSessionId && client.authSessionId !== selector.authSessionId) continue;
+    if (selector?.sessionId && client.sessionId !== selector.sessionId) continue;
+    clients.delete(connectionId);
+    try {
+      if (client.ws.readyState === WebSocket.OPEN || client.ws.readyState === WebSocket.CONNECTING) {
+        client.ws.close(4001, 'Authorization revoked');
+      }
+    } catch (error) {
+      logger.warn('[WebSocket Utils] Failed to close revoked connection', {
+        userId,
+        connectionId,
+        errorClass: error instanceof Error ? error.name : 'UnknownError',
+      });
     }
-  } catch (error) {
-    logger.warn('[WebSocket Utils] Failed to close revoked connection', {
-      userId,
-      errorClass: error instanceof Error ? error.name : 'UnknownError',
-    });
   }
+  if (clients.size === 0) connectedClientsRef?.delete(userId);
 }
 
 /**
@@ -53,7 +62,9 @@ export function getConnectedClientCount(): number {
   if (!connectedClientsRef) {
     return 0;
   }
-  return connectedClientsRef.size;
+  let count = 0;
+  for (const clients of connectedClientsRef.values()) count += clients.size;
+  return count;
 }
 
 /**
@@ -64,31 +75,13 @@ export function getConnectedClientCount(): number {
  * @returns Promise that resolves to true if notification was sent, false otherwise
  */
 export async function notifyConnectionRequest(userId: number, senderId: number, requestId: number): Promise<boolean> {
-  if (!connectedClientsRef) {
-    logger.error('[WebSocket Utils] Connected clients reference not set');
-    return false;
-  }
-
-  const client = connectedClientsRef.get(userId);
-  if (!client || client.ws.readyState !== WebSocket.OPEN) {
-    logger.debug(`[WebSocket Utils] User ${userId} is not connected or socket not open, cannot notify about new connection request ${requestId}`);
-    return false;
-  }
-
-  try {
-    client.ws.send(JSON.stringify({
+  return sendToUser(userId, {
       type: 'connectionRequest',
       requestId: requestId,
       senderId: senderId,
       userId: userId,
       timestamp: new Date().toISOString()
-    }));
-    logger.debug(`[WebSocket Utils] Sent connection request notification to user ${userId} for request ${requestId} from user ${senderId}`);
-    return true;
-  } catch (error) {
-    logger.error(`[WebSocket Utils] Error sending connection request notification to user ${userId}:`, error);
-    return false;
-  }
+  });
 }
 
 /**
@@ -99,59 +92,23 @@ export async function notifyConnectionRequest(userId: number, senderId: number, 
  * @returns Promise that resolves to true if notification was sent, false otherwise
  */
 export async function notifyConnectionAccepted(userId: number, requestId: number, acceptedById: number): Promise<boolean> {
-  if (!connectedClientsRef) {
-    logger.error('[WebSocket Utils] Connected clients reference not set');
-    return false;
-  }
-
-  const client = connectedClientsRef.get(userId);
-  if (!client || client.ws.readyState !== WebSocket.OPEN) {
-    logger.debug(`[WebSocket Utils] User ${userId} is not connected or socket not open, cannot notify about accepted request ${requestId}`);
-    return false;
-  }
-
-  try {
-    client.ws.send(JSON.stringify({
+  return sendToUser(userId, {
       type: 'connectionAccepted',
       requestId: requestId,
       acceptedById: acceptedById,
       userId: userId,
       timestamp: new Date().toISOString()
-    }));
-    logger.debug(`[WebSocket Utils] Sent connection accepted notification to user ${userId} for request ${requestId}`);
-    return true;
-  } catch (error) {
-    logger.error(`[WebSocket Utils] Error sending connection accepted notification to user ${userId}:`, error);
-    return false;
-  }
+  });
 }
 
 export async function notifyConnectionRequestRejected(userId: number, requestId: number, rejectedById: number): Promise<boolean> {
-  if (!connectedClientsRef) {
-    logger.error('[WebSocket Utils] Connected clients reference not set');
-    return false;
-  }
-
-  const client = connectedClientsRef.get(userId);
-  if (!client || client.ws.readyState !== WebSocket.OPEN) {
-    logger.debug(`[WebSocket Utils] User ${userId} is not connected or socket not open, cannot notify about rejected request ${requestId}`);
-    return false;
-  }
-
-  try {
-    client.ws.send(JSON.stringify({
+  return sendToUser(userId, {
       type: 'connectionRejected',
       requestId: requestId,
       senderId: userId,           // The user who sent the original request (receiving this notification)
       rejectedById: rejectedById, // The user who rejected the request (remove from sender's cache)
       receivedRejection: true     // Flag to indicate this was received by the sender
-    }));
-    logger.debug(`[WebSocket Utils] Sent connection rejection notification to user ${userId} for request ${requestId}, rejected by user ${rejectedById}`);
-    return true;
-  } catch (error) {
-    logger.error(`[WebSocket Utils] Error sending rejection notification to user ${userId}:`, error);
-    return false;
-  }
+  });
 }
 
 // Match event interfaces
@@ -182,31 +139,12 @@ interface MatchEvent {
  * @returns Promise that resolves to true if notification was sent, false otherwise
  */
 export async function broadcastNewMatch(userId: number, matchData: MatchEventData): Promise<boolean> {
-  if (!connectedClientsRef) {
-    logger.error('[WebSocket Utils] Connected clients reference not set');
-    return false;
-  }
-
-  const client = connectedClientsRef.get(userId);
-  if (!client || client.ws.readyState !== WebSocket.OPEN) {
-    logger.debug(`[WebSocket Utils] User ${userId} is not connected or socket not open, cannot send new match notification`);
-    return false;
-  }
-
-  try {
-    const event: MatchEvent = {
+  const event: MatchEvent = {
       type: 'newMatch',
       timestamp: new Date().toISOString(),
       matchData
-    };
-
-    client.ws.send(JSON.stringify(event));
-    logger.debug(`[WebSocket Utils] Sent new match notification to user ${userId} for match ${matchData.profileId}`);
-    return true;
-  } catch (error) {
-    logger.error(`[WebSocket Utils] Error sending new match notification to user ${userId}:`, error);
-    return false;
-  }
+  };
+  return sendToUser(userId, event);
 }
 
 /**
@@ -215,31 +153,12 @@ export async function broadcastNewMatch(userId: number, matchData: MatchEventDat
  * @returns Promise that resolves to true if notification was sent, false otherwise
  */
 export async function broadcastMatchRefresh(userId: number): Promise<boolean> {
-  if (!connectedClientsRef) {
-    logger.error('[WebSocket Utils] Connected clients reference not set');
-    return false;
-  }
-
-  const client = connectedClientsRef.get(userId);
-  if (!client || client.ws.readyState !== WebSocket.OPEN) {
-    logger.debug(`[WebSocket Utils] User ${userId} is not connected or socket not open, cannot send match refresh notification`);
-    return false;
-  }
-
-  try {
-    const event: MatchEvent = {
+  const event: MatchEvent = {
       type: 'matchesUpdated',
       timestamp: new Date().toISOString(),
       message: 'Your matches have been updated'
-    };
-
-    client.ws.send(JSON.stringify(event));
-    logger.debug(`[WebSocket Utils] Sent match refresh notification to user ${userId}`);
-    return true;
-  } catch (error) {
-    logger.error(`[WebSocket Utils] Error sending match refresh notification to user ${userId}:`, error);
-    return false;
-  }
+  };
+  return sendToUser(userId, event);
 }
 
 /**
@@ -277,18 +196,23 @@ export async function sendToUser(userId: number, message: unknown): Promise<bool
     return false;
   }
 
-  const client = connectedClientsRef.get(userId);
-  if (!client || client.ws.readyState !== WebSocket.OPEN) {
+  const clients = connectedClientsRef.get(userId);
+  if (!clients || clients.size === 0) {
     logger.debug(`[WebSocket Utils] User ${userId} is not connected or socket not open`);
     return false;
   }
 
-  try {
-    client.ws.send(JSON.stringify(message));
-    logger.debug(`[WebSocket Utils] Sent message to user ${userId}`);
-    return true;
-  } catch (error) {
-    logger.error(`[WebSocket Utils] Error sending message to user ${userId}:`, error);
-    return false;
+  const encodedMessage = JSON.stringify(message);
+  let sent = false;
+  for (const client of clients.values()) {
+    if (client.ws.readyState !== WebSocket.OPEN) continue;
+    try {
+      client.ws.send(encodedMessage);
+      sent = true;
+    } catch (error) {
+      logger.error(`[WebSocket Utils] Error sending message to user ${userId}:`, error);
+    }
   }
+  if (sent) logger.debug(`[WebSocket Utils] Sent message to ${clients.size} connection(s) for user ${userId}`);
+  return sent;
 }

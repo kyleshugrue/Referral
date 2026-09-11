@@ -231,6 +231,39 @@ describe("WebSocket handler integration", () => {
     expect(connection.messages).not.toContainEqual(expect.objectContaining({ type: "test-response" }));
   });
 
+  it("keeps independent authenticated sessions connected for the same user", async () => {
+    tickets.set("device-a-ticket", {
+      userId: syntheticUser.id,
+      sessionId: null,
+      authSessionId: "device-session-a",
+    });
+    tickets.set("device-b-ticket", {
+      userId: syntheticUser.id,
+      sessionId: null,
+      authSessionId: "device-session-b",
+    });
+
+    const deviceA = await openSocket(port, ["referral-ws-ticket.device-a-ticket"]);
+    const deviceB = await openSocket(port, ["referral-ws-ticket.device-b-ticket"]);
+    await Promise.all([
+      waitForMessage(deviceA.socket, deviceA.messages, (message) => message.type === "connected"),
+      waitForMessage(deviceB.socket, deviceB.messages, (message) => message.type === "connected"),
+    ]);
+
+    deviceA.socket.send(JSON.stringify({ type: "test", content: "device-a" }));
+    deviceB.socket.send(JSON.stringify({ type: "test", content: "device-b" }));
+    await expect(waitForMessage(deviceA.socket, deviceA.messages, (message) => message.type === "test-response"))
+      .resolves.toMatchObject({ content: "device-a" });
+    await expect(waitForMessage(deviceB.socket, deviceB.messages, (message) => message.type === "test-response"))
+      .resolves.toMatchObject({ content: "device-b" });
+
+    const closeA = waitForClose(deviceA.socket);
+    const closeB = waitForClose(deviceB.socket);
+    deviceA.socket.close();
+    deviceB.socket.close();
+    await Promise.all([closeA, closeB]);
+  });
+
   it("closes active clients cleanly during server shutdown", async () => {
     tickets.set("shutdown-ticket", { userId: syntheticUser.id, sessionId: null });
     const connection = await openSocket(port, ["referral-ws-ticket.shutdown-ticket"]);

@@ -86,3 +86,5 @@ The UI renders cached matches immediately while fresh ones generate.
 A WebSocket server (`ws`) attached to the Express HTTP server handles chat messages, match-ready notifications, and connection events. iOS push notifications are sent by the Worker VM through APNs.
 
 Direct conversations are the only supported chat contract. Conversation and message authorization requires an accepted connection, group-chat routes return `410 Gone`, and WebSocket admission uses the same authenticated identity/privacy rules.
+
+The WebSocket registry is keyed by user and authenticated session/device. Multiple devices can remain connected for one user, notifications broadcast to all open sessions, and session-scoped revocation removes only the matching connection.

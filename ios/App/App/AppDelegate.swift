@@ -37,12 +37,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         
         // Get initial FCM token on launch (critical for first boot)
         Messaging.messaging().token { token, error in
-            let timestamp = ISO8601DateFormatter().string(from: Date())
             if let error = error {
-                print("[\(timestamp)] [AppDelegate] ❌ Error fetching FCM registration token: \(error)")
+                _ = error
+                print("[AppDelegate] FCM registration token fetch failed")
             } else if let token = token {
-                print("[\(timestamp)] [AppDelegate] ✅ FCM registration token received: \(token)")
-                print("[\(timestamp)] [AppDelegate] 📤 Posting FCMTokenReceived notification to Capacitor bridge")
+                print("[AppDelegate] FCM registration token received")
+                print("[AppDelegate] Posting FCMTokenReceived notification")
                 NotificationCenter.default.post(name: NSNotification.Name("FCMTokenReceived"), object: token)
             }
         }
@@ -65,6 +65,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
+        clearNativeNotificationResidue()
         // Restart any tasks that were paused (or not yet started) while the application was inactive. If the application was previously in the background, optionally refresh the user interface.
     }
 
@@ -136,143 +137,30 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
     
     // MARK: - Background Data Processing
     private func handleConnectionRequest(_ userInfo: [AnyHashable: Any]) -> Bool {
-        // Parse connection request data
-        guard let senderName = userInfo["sender_name"] as? String else { return false }
-        
-        // Update badge count
         incrementBadgeCount()
-        
-        // Persist pending request locally with cap and basic deduplication
-        var pendingRequests = UserDefaults.standard.stringArray(forKey: "pendingConnectionRequests") ?? []
-        let requestData = "\(senderName)|\(Date().timeIntervalSince1970)"
-        
-        // Basic deduplication - avoid duplicate entries for same sender within 5 minutes
-        let now = Date().timeIntervalSince1970
-        pendingRequests = pendingRequests.filter { entry in
-            let parts = entry.components(separatedBy: "|")
-            guard parts.count == 2, let timestamp = Double(parts[1]) else { return true }
-            return parts[0] != senderName || (now - timestamp) > 300 // 5 minutes
-        }
-        
-        pendingRequests.append(requestData)
-        
-        // Cap at 100 entries to prevent unbounded growth
-        if pendingRequests.count > 100 {
-            pendingRequests = Array(pendingRequests.suffix(100))
-        }
-        
-        UserDefaults.standard.set(pendingRequests, forKey: "pendingConnectionRequests")
-        
-        // Schedule local notification for data-only push
-        scheduleLocalNotification(title: "New Connection Request", body: "\(senderName) wants to connect with you", type: "connection_request", userInfo: userInfo)
-        
-        print("Processed connection request from \(senderName)")
+        scheduleLocalNotification(type: "connection_request", userInfo: userInfo)
+        print("[AppDelegate] Processed connection request notification")
         return true
     }
     
     private func handleConnectionAccepted(_ userInfo: [AnyHashable: Any]) -> Bool {
-        // Parse connection accepted data
-        guard let accepterName = userInfo["accepter_name"] as? String else { return false }
-        
-        // Update badge count
         incrementBadgeCount()
-        
-        // Persist accepted connection locally with cap and basic deduplication
-        var acceptedConnections = UserDefaults.standard.stringArray(forKey: "acceptedConnections") ?? []
-        let connectionData = "\(accepterName)|\(Date().timeIntervalSince1970)"
-        
-        // Basic deduplication - avoid duplicate entries for same accepter within 5 minutes
-        let now = Date().timeIntervalSince1970
-        acceptedConnections = acceptedConnections.filter { entry in
-            let parts = entry.components(separatedBy: "|")
-            guard parts.count == 2, let timestamp = Double(parts[1]) else { return true }
-            return parts[0] != accepterName || (now - timestamp) > 300 // 5 minutes
-        }
-        
-        acceptedConnections.append(connectionData)
-        
-        // Cap at 100 entries to prevent unbounded growth
-        if acceptedConnections.count > 100 {
-            acceptedConnections = Array(acceptedConnections.suffix(100))
-        }
-        
-        UserDefaults.standard.set(acceptedConnections, forKey: "acceptedConnections")
-        
-        // Schedule local notification
-        scheduleLocalNotification(title: "Connection Accepted", body: "\(accepterName) accepted your connection request", type: "connection_accepted", userInfo: userInfo)
-        
-        print("Processed connection accepted from \(accepterName)")
+        scheduleLocalNotification(type: "connection_accepted", userInfo: userInfo)
+        print("[AppDelegate] Processed connection accepted notification")
         return true
     }
     
     private func handleNewConnection(_ userInfo: [AnyHashable: Any]) -> Bool {
-        // Parse new connection data
-        guard let connectionName = userInfo["connection_name"] as? String else { return false }
-        
-        // Update badge count
         incrementBadgeCount()
-        
-        // Persist new connection locally with cap and basic deduplication
-        var newConnections = UserDefaults.standard.stringArray(forKey: "newConnections") ?? []
-        let connectionData = "\(connectionName)|\(Date().timeIntervalSince1970)"
-        
-        // Basic deduplication - avoid duplicate entries for same connection within 5 minutes
-        let now = Date().timeIntervalSince1970
-        newConnections = newConnections.filter { entry in
-            let parts = entry.components(separatedBy: "|")
-            guard parts.count == 2, let timestamp = Double(parts[1]) else { return true }
-            return parts[0] != connectionName || (now - timestamp) > 300 // 5 minutes
-        }
-        
-        newConnections.append(connectionData)
-        
-        // Cap at 100 entries to prevent unbounded growth
-        if newConnections.count > 100 {
-            newConnections = Array(newConnections.suffix(100))
-        }
-        
-        UserDefaults.standard.set(newConnections, forKey: "newConnections")
-        
-        // Schedule local notification
-        scheduleLocalNotification(title: "New Connection", body: "You're now connected with \(connectionName)", type: "new_connection", userInfo: userInfo)
-        
-        print("Processed new connection: \(connectionName)")
+        scheduleLocalNotification(type: "new_connection", userInfo: userInfo)
+        print("[AppDelegate] Processed new connection notification")
         return true
     }
     
     private func handleNewMessage(_ userInfo: [AnyHashable: Any]) -> Bool {
-        // Parse message data
-        guard let senderName = userInfo["sender_name"] as? String,
-              let messagePreview = userInfo["message_preview"] as? String else { return false }
-        
-        // Update badge count
         incrementBadgeCount()
-        
-        // Persist message locally with cap and basic deduplication
-        var newMessages = UserDefaults.standard.stringArray(forKey: "newMessages") ?? []
-        let messageData = "\(senderName)|\(messagePreview)|\(Date().timeIntervalSince1970)"
-        
-        // Basic deduplication - avoid duplicate entries for same message within 1 minute
-        let now = Date().timeIntervalSince1970
-        newMessages = newMessages.filter { entry in
-            let parts = entry.components(separatedBy: "|")
-            guard parts.count == 3, let timestamp = Double(parts[2]) else { return true }
-            return parts[0] != senderName || parts[1] != messagePreview || (now - timestamp) > 60 // 1 minute
-        }
-        
-        newMessages.append(messageData)
-        
-        // Cap at 100 entries to prevent unbounded growth
-        if newMessages.count > 100 {
-            newMessages = Array(newMessages.suffix(100))
-        }
-        
-        UserDefaults.standard.set(newMessages, forKey: "newMessages")
-        
-        // Schedule local notification
-        scheduleLocalNotification(title: "New Message from \(senderName)", body: messagePreview, type: "new_message", userInfo: userInfo)
-        
-        print("Processed new message from \(senderName)")
+        scheduleLocalNotification(type: "new_message", userInfo: userInfo)
+        print("[AppDelegate] Processed new message notification")
         return true
     }
     
@@ -284,7 +172,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         }
     }
     
-    private func scheduleLocalNotification(title: String, body: String, type: String, userInfo: [AnyHashable: Any]) {
+    private func scheduleLocalNotification(type: String, userInfo: [AnyHashable: Any]) {
         // CRITICAL: Only schedule local notifications for data-only pushes
         // If the push already has an alert, don't create duplicate notification
         if let aps = userInfo["aps"] as? [String: Any], aps["alert"] != nil {
@@ -293,8 +181,19 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         }
         
         let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
+        switch type {
+        case "connection_request":
+            content.title = "New connection request"
+        case "connection_accepted":
+            content.title = "Connection request accepted"
+        case "new_connection":
+            content.title = "New connection"
+        case "new_message":
+            content.title = "New message"
+        default:
+            content.title = "New notification"
+        }
+        content.body = "Open Referral to view your notification."
         content.sound = .default
         content.userInfo = ["type": type, "source": "background_data"]
         
@@ -305,9 +204,17 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
         
         UNUserNotificationCenter.current().add(request) { error in
             if let error = error {
-                print("Failed to schedule local notification: \(error)")
+                _ = error
+                print("[AppDelegate] Local notification scheduling failed")
             }
         }
+    }
+
+    private func clearNativeNotificationResidue() {
+        let center = UNUserNotificationCenter.current()
+        center.removeAllDeliveredNotifications()
+        center.removeAllPendingNotificationRequests()
+        UIApplication.shared.applicationIconBadgeNumber = 0
     }
 
     
@@ -333,14 +240,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterD
     
     // MARK: - MessagingDelegate Methods
     func messaging(_ messaging: Messaging, didReceiveRegistrationToken fcmToken: String?) {
-        let timestamp = ISO8601DateFormatter().string(from: Date())
         // Forward FCM token to Capacitor for use in web layer
         if let token = fcmToken {
-            print("[\(timestamp)] [AppDelegate] ✅ MessagingDelegate: FCM token refresh received: \(token)")
-            print("[\(timestamp)] [AppDelegate] 📤 Posting FCMTokenReceived notification to Capacitor bridge")
+            print("[AppDelegate] FCM token refresh received")
+            print("[AppDelegate] Posting FCMTokenReceived notification")
             NotificationCenter.default.post(name: NSNotification.Name("FCMTokenReceived"), object: token)
         } else {
-            print("[\(timestamp)] [AppDelegate] ❌ MessagingDelegate: FCM token is nil")
+            print("[AppDelegate] FCM token refresh did not provide a token")
         }
     }
     

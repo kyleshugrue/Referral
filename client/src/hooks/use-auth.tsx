@@ -110,6 +110,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   
   // Sync Firebase user with our backend
   const syncUserWithBackend = useCallback(async (fbUser: FirebaseUser) => {
+    const activeFirebaseUser = firebaseLib.auth?.currentUser;
+    if (activeFirebaseUser && activeFirebaseUser.uid !== fbUser.uid) {
+      logger.debug('[Auth] Ignoring stale Firebase user sync');
+      return;
+    }
+
     const generation = beginAuthSession();
     logger.debug("🔄 [SYNC DEBUG] Starting syncUserWithBackend", {
       emailVerified: fbUser.emailVerified,
@@ -217,6 +223,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             expiresAt: Date.now() + 15 * 60 * 1000 // Default 15 min, setTokens will extract from JWT
           }, generation);
           
+          if (getAuthGeneration() !== generation) {
+            logger.debug('[Auth] Ignoring stale token sync result');
+            return;
+          }
+
           // Update AuthContext state so API client uses JWT tokens
           setAccessToken(jwtAccessToken);
           
@@ -241,6 +252,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       
       // CRITICAL: Set the cache data and mark it as fresh
+      if (getAuthGeneration() !== generation || firebaseLib.auth?.currentUser?.uid !== fbUser.uid) {
+        logger.debug('[Auth] Ignoring stale Firebase cache sync result');
+        return;
+      }
       logger.debug("💾 [SYNC DEBUG] Updating React Query cache with user data...");
       queryClient.setQueryData(["/api/user"], userData);
       logger.debug("✅ [SYNC DEBUG] Cache updated successfully - sync complete!");
@@ -275,6 +290,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           syncUserWithBackend(user);
         } else {
           logger.debug("🚫 [AUTH DEBUG] No Firebase user, skipping backend sync");
+          beginAuthSession();
+          setAccessToken(null);
+          queryClient.setQueryData(["/api/user"], null);
         }
       });
 
@@ -891,9 +909,57 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // private snapshot only long enough to authenticate revocation.
       const tokenToRevoke = accessToken;
       await clearTokens();
+      const logoutGeneration = getAuthGeneration();
       setAccessToken(null);
 
+      // Complete all local account cleanup before remote revocation or Firebase
+      // network work. This prevents a slow/offline logout from leaving account
+      // A's cache, socket, or native residue in place while account B starts.
+      try {
+        const registrationFlags = [
+          'registrationComplete',
+          'forceRegistrationFlow',
+          'registrationData',
+          'pendingRegistrationData',
+          'emailVerificationUiComplete',
+          'emailVerificationHandled',
+          'emailVerified',
+          'registrationRedirectReady',
+          'forceNavigateToNetwork',
+          'emailVerificationSent',
+          'pendingConnectionRequests',
+          'acceptedConnections',
+          'newConnections',
+          'newMessages',
+          'synergyMatchesRefreshing',
+          'synergyMatchesRefreshingStartTime'
+        ];
+        registrationFlags.forEach(flag => localStorage.removeItem(flag));
+      } catch (storageError) {
+        logger.error("Error clearing localStorage flags during logout:", storageError);
+      }
+
+      try {
+        queryClient.clear();
+      } catch (cacheError) {
+        logger.error("Error clearing query cache during logout:", cacheError);
+      }
+
+      try {
+        disconnectGlobalWebSocket();
+      } catch (wsError) {
+        logger.error("Error disconnecting WebSocket during logout:", wsError);
+      }
+      queryClient.setQueryData(["/api/user"], null);
+
       const remoteRevocation = await revokeNativeSession(tokenToRevoke);
+
+      // A newer login owns the Firebase state and browser session now. The
+      // old logout may still revoke its captured native token, but must not
+      // sign out or clear the newer account.
+      if (getAuthGeneration() !== logoutGeneration) {
+        return remoteRevocation;
+      }
 
       try {
         await safeLogoutUser();
@@ -929,50 +995,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
       }
       
-      // Clear all registration-related localStorage flags to prevent state mismatch on next login
-      try {
-        const registrationFlags = [
-          'registrationComplete',
-          'forceRegistrationFlow',
-          'registrationData',
-          'pendingRegistrationData',
-          'emailVerificationUiComplete',
-          'emailVerificationHandled',
-          'emailVerified',
-          'registrationRedirectReady',
-          'forceNavigateToNetwork',
-          'emailVerificationSent',
-          'pendingConnectionRequests',
-          'synergyMatchesRefreshing',
-          'synergyMatchesRefreshingStartTime'
-        ];
-        
-        registrationFlags.forEach(flag => {
-          localStorage.removeItem(flag);
-        });
-        
-        logger.debug("Logout: Cleared all registration-related localStorage flags");
-      } catch (storageError) {
-        logger.error("Error clearing localStorage flags during logout:", storageError);
-      }
-
-      // Clear all query cache to prevent stale data on next login
-      try {
-        queryClient.clear();
-        logger.debug("Logout: Cleared all cached query data");
-      } catch (cacheError) {
-        logger.error("Error clearing query cache during logout:", cacheError);
-      }
-
-      // Disconnect WebSocket to prevent connection issues on next login
-      try {
-        disconnectGlobalWebSocket();
-        logger.debug("Logout: Disconnected WebSocket connection");
-      } catch (wsError) {
-        logger.error("Error disconnecting WebSocket during logout:", wsError);
-      }
-      
-      queryClient.setQueryData(["/api/user"], null);
     },
     onError: (error: Error) => {
       logger.error("Logout error:", error);
