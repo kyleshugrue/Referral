@@ -259,6 +259,74 @@ describe("P0 HTTP security regressions", () => {
   });
 
   describe("profile mass assignment", () => {
+    it("rejects a stale cross-route profile write with the canonical conflict response", async () => {
+      const owner = makeUser({ id: 1 });
+      await startHarness([owner]);
+      const token = authToken(owner.id);
+      const version = owner.profileVersion;
+
+      const canonicalResponse = await requestJson(port, "/api/user", {
+        method: "PATCH",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "if-match": `"${version}"`,
+        },
+        body: JSON.stringify({ currentCompany: "Canonical Co" }),
+      });
+      expect(canonicalResponse.status).toBe(200);
+      expect(state.users.get(owner.id)?.profileVersion).toBe(version + 1);
+
+      const legacyResponse = await requestJson(port, "/api/users/1", {
+        method: "PATCH",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "if-match": `"${version}"`,
+        },
+        body: JSON.stringify({ currentLocation: "Boston" }),
+      });
+
+      expect(legacyResponse.status).toBe(409);
+      expect(legacyResponse.body).toMatchObject({
+        code: "PROFILE_VERSION_CONFLICT",
+        profileVersion: version + 1,
+      });
+      expect(state.users.get(owner.id)).toMatchObject({
+        currentCompany: "Canonical Co",
+        currentLocation: "New York",
+        profileVersion: version + 1,
+      });
+    });
+
+    it("allows only one same-route match-relevant write from the same profile version", async () => {
+      const owner = makeUser({ id: 1 });
+      await startHarness([owner]);
+      const token = authToken(owner.id);
+
+      const responses = await Promise.all([
+        requestJson(port, "/api/users/1", {
+          method: "PATCH",
+          headers: { authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            currentLocation: "Boston",
+            profileVersion: owner.profileVersion,
+          }),
+        }),
+        requestJson(port, "/api/users/1", {
+          method: "PATCH",
+          headers: { authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            currentLocation: "Chicago",
+            profileVersion: owner.profileVersion,
+          }),
+        }),
+      ]);
+
+      expect(responses.filter((response) => response.status === 200)).toHaveLength(1);
+      expect(responses.filter((response) => response.status === 409)).toHaveLength(1);
+      expect(state.users.get(owner.id)?.profileVersion).toBe(2);
+      expect(["Boston", "Chicago"]).toContain(state.users.get(owner.id)?.currentLocation);
+    });
+
     it("filters server-managed fields on PATCH /api/users/:id", async () => {
       const owner = makeUser({ id: 1 });
       await startHarness([owner]);

@@ -73,6 +73,8 @@ import {
   getDiscoverabilityState,
 } from "./lib/discoverability-policy";
 import { closeUserConnections } from "./websocket-utils";
+import { ProfileVersionConflictError } from "./lib/profile-version-conflict";
+import { prepareProfileVersionedUpdate } from "./lib/profile-concurrency";
 
 const PRIVACY_LAST_MODIFIED = process.env.PRIVACY_LAST_MODIFIED?.trim() || "2026-09-05";
 const PRIVACY_LAST_MODIFIED_DISPLAY = PRIVACY_LAST_MODIFIED
@@ -1117,17 +1119,6 @@ export async function registerRoutes(app: Express): Promise<void> {
       }
       const profileData = parseResult.data;
       
-      // Check if this is a profile update that would affect matching
-      // CRITICAL: Only these 5 fields should trigger match regeneration
-      const matchingRelatedFields = [
-        'currentCompany', 'currentLocation', 'industry', 
-        'desiredCompanies', 'desiredLocations'
-      ];
-      
-      const affectsMatching = Object.keys(profileData).some(key => 
-        matchingRelatedFields.includes(key)
-      );
-      
       // Password changes are not supported - Firebase authentication is used exclusively
       if ((req.body as Record<string, unknown>).currentPassword || (req.body as Record<string, unknown>).newPassword) {
         logger.error(`[User Update] Password change requested for user ${userId} - not supported with Firebase authentication`);
@@ -1150,7 +1141,17 @@ export async function registerRoutes(app: Express): Promise<void> {
          action: 'profile-preferences-validated',
        });
       
-      const updatedUser = await storage.updateUser(userId, updateData);
+      const preparedProfileUpdate = prepareProfileVersionedUpdate(
+        existingUser,
+        updateData,
+        req,
+      );
+      const affectsMatching = preparedProfileUpdate.hasMatchRelevantChanges;
+      const updatedUser = await storage.updateUser(
+        userId,
+        preparedProfileUpdate.updateData,
+        { expectedProfileVersion: preparedProfileUpdate.expectedProfileVersion },
+      );
       
       // Create immutable snapshot for rollback safety
       try {
@@ -1161,11 +1162,18 @@ export async function registerRoutes(app: Express): Promise<void> {
         const snapshot = await snapshotService.createSnapshot(userId, profileData);
         
         // Update user's currentSnapshotId pointer
-        await storage.updateUser(userId, { currentSnapshotId: snapshot.id });
+        await storage.updateUser(
+          userId,
+          { currentSnapshotId: snapshot.id },
+          { expectedProfileVersion: updatedUser.profileVersion },
+        );
         
         logger.debug(`[User Update] Created snapshot ${snapshot.id} for user ${userId}`);
       } catch (snapshotError) {
         logger.error('[User Update] Failed to create snapshot', { userId, error: snapshotError });
+        if (snapshotError instanceof ProfileVersionConflictError) {
+          throw snapshotError;
+        }
         // Don't fail the update if snapshot creation fails
       }
       
@@ -1174,10 +1182,7 @@ export async function registerRoutes(app: Express): Promise<void> {
         try {
           logger.debug(`[User Update] Update affects matching criteria. Using CMDCC for bidirectional propagation...`);
           
-          // Get the changed fields that affect matching
-      const changedFields = Object.keys(profileData).filter(key => 
-            matchingRelatedFields.includes(key)
-          );
+          const changedFields = preparedProfileUpdate.changedMatchFields;
           
            logger.operational('[User Update] Matching fields changed', {
              userId,
@@ -1210,6 +1215,13 @@ export async function registerRoutes(app: Express): Promise<void> {
       res.json(toSelfUserDto(updatedUser));
     } catch (error) {
       logger.error('[User Update] Error:', error);
+      if (error instanceof ProfileVersionConflictError) {
+        return res.status(409).json({
+          message: 'Profile changed before this update was saved. Refresh and retry with the latest profile.',
+          code: 'PROFILE_VERSION_CONFLICT',
+          profileVersion: error.actualProfileVersion,
+        });
+      }
       res.status(500).json({ message: "Failed to update user" });
     }
   });

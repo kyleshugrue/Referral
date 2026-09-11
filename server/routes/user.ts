@@ -1,5 +1,7 @@
 import { Router } from 'express';
-import { ProfileVersionConflictError, storage } from '../storage';
+import { storage } from '../storage';
+import { ProfileVersionConflictError } from '../lib/profile-version-conflict';
+import { prepareProfileVersionedUpdate } from '../lib/profile-concurrency';
 import { locationCacheService } from '../services/location-cache';
 import { db } from '../db';
 import { users, editableProfileSchema } from '@shared/schema';
@@ -21,20 +23,6 @@ import { normalizeStringArray } from '../lib/registration-input';
 const router = Router();
 router.use(profileReadLimiter);
 
-function parseExpectedProfileVersion(req: { headers: Record<string, unknown>; body?: unknown }): number | undefined {
-  const header = req.headers['if-match'];
-  const bodyVersion = req.body && typeof req.body === 'object'
-    ? (req.body as Record<string, unknown>).profileVersion
-    : undefined;
-  const rawValue = header ?? bodyVersion;
-  if (Array.isArray(rawValue)) return undefined;
-  const raw = typeof rawValue === 'string'
-    ? rawValue.replace(/^W\/"?|"?$/g, '')
-    : rawValue;
-  const version = typeof raw === 'number' ? raw : Number(raw);
-  return Number.isInteger(version) && version > 0 ? version : undefined;
-}
-
 async function createCurrentProfileSnapshot(user: User): Promise<{ id: number; contentHash: string }> {
   const profileData: ProfileData = {
     bio: user.bio,
@@ -55,9 +43,11 @@ async function createCurrentProfileSnapshot(user: User): Promise<{ id: number; c
     institution: user.institution,
   };
   const snapshot = await snapshotService.createSnapshot(user.id, profileData);
-  await db.update(users)
-    .set({ currentSnapshotId: snapshot.id })
-    .where(eq(users.id, user.id));
+  await storage.updateUser(
+    user.id,
+    { currentSnapshotId: snapshot.id },
+    { expectedProfileVersion: user.profileVersion },
+  );
   return snapshot;
 }
 
@@ -323,52 +313,30 @@ router.patch('/', requireAuthJWT, profileMutationLimiter, async (req, res) => {
 
     // Check if match-relevant fields are being updated to trigger synergy match refresh
     // CRITICAL: Only these 5 fields should trigger match regeneration
-    const matchRelevantFields = [
-      'currentCompany',
-      'currentLocation',
-      'industry',
-      'desiredCompanies',
-      'desiredLocations'
-    ];
-
-    const hasMatchRelevantChanges = matchRelevantFields.some(field => {
-      const newValue = (finalUpdateData as Record<string, unknown>)[field];
-      const oldValue = (existingUser as Record<string, unknown>)[field];
-      
-      // Handle array fields
-      if (Array.isArray(newValue) || Array.isArray(oldValue)) {
-        return JSON.stringify(newValue) !== JSON.stringify(oldValue);
-      }
-      
-      // Handle string fields
-      return newValue !== undefined && newValue !== oldValue;
-    });
+    const preparedProfileUpdate = prepareProfileVersionedUpdate(
+      existingUser,
+      finalUpdateData,
+      req,
+    );
+    const versionedUpdateData = preparedProfileUpdate.updateData;
+    const hasMatchRelevantChanges = preparedProfileUpdate.hasMatchRelevantChanges;
+    const changedMatchFields = preparedProfileUpdate.changedMatchFields;
 
     console.log(`[UserRoute] Match-relevant changes detected: ${hasMatchRelevantChanges}`);
     if (hasMatchRelevantChanges) {
       console.log(`[UserRoute] Fields being updated that affect matching:`, 
-        matchRelevantFields.filter(field => {
-          const newValue = (finalUpdateData as Record<string, unknown>)[field];
-          const oldValue = (existingUser as Record<string, unknown>)[field];
-          if (Array.isArray(newValue) || Array.isArray(oldValue)) {
-            return JSON.stringify(newValue) !== JSON.stringify(oldValue);
-          }
-          return newValue !== undefined && newValue !== oldValue;
-        })
+        changedMatchFields,
       );
     }
 
-    // If match-relevant fields changed, increment profile version and cancel stale jobs
-    let newProfileVersion = existingUser.profileVersion || 1;
+    const newProfileVersion = preparedProfileUpdate.nextProfileVersion;
     if (hasMatchRelevantChanges) {
-      newProfileVersion = (existingUser.profileVersion || 1) + 1;
-      finalUpdateData.profileVersion = newProfileVersion;
       logger.debug(`[UserRoute] Incrementing profile version to ${newProfileVersion} for user ${userId}`);
     }
 
     // Update user in database first
-    const updatedUser = await storage.updateUser(userId, finalUpdateData, {
-      expectedProfileVersion: parseExpectedProfileVersion(req) ?? existingUser.profileVersion,
+    const updatedUser = await storage.updateUser(userId, versionedUpdateData, {
+      expectedProfileVersion: preparedProfileUpdate.expectedProfileVersion,
     });
     console.log(`[UserRoute] User ${userId} updated successfully`);
     let profileSnapshotCreated = false;

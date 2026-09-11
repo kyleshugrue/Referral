@@ -34,6 +34,8 @@ import {
   normalizeConversationPageOptions,
   escapeLikePattern,
 } from './lib/conversation-pagination';
+import { ProfileVersionConflictError } from './lib/profile-version-conflict';
+export { ProfileVersionConflictError } from './lib/profile-version-conflict';
 
 const PostgresSessionStore = connectPg(session);
 type UserWrite = Partial<InsertUser> & Record<string, unknown>;
@@ -219,18 +221,6 @@ export class FirebaseIdentityConflictError extends Error {
   constructor(message = 'Firebase identity conflicts with an existing account') {
     super(message);
     this.name = 'FirebaseIdentityConflictError';
-  }
-}
-
-export class ProfileVersionConflictError extends Error {
-  readonly expectedProfileVersion: number;
-  readonly actualProfileVersion?: number;
-
-  constructor(expectedProfileVersion: number, actualProfileVersion?: number) {
-    super('Profile changed since this edit was started');
-    this.name = 'ProfileVersionConflictError';
-    this.expectedProfileVersion = expectedProfileVersion;
-    this.actualProfileVersion = actualProfileVersion;
   }
 }
 

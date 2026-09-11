@@ -4,6 +4,7 @@ import session, { type SessionData } from "express-session";
 import { setupAuth } from "../auth";
 import { registerRoutes } from "../routes";
 import { publicLookupLimiter } from "../lib/rate-limits";
+import { ProfileVersionConflictError } from "../lib/profile-version-conflict";
 
 export interface HarnessUser {
   id: number;
@@ -61,7 +62,11 @@ export interface HarnessState {
     relatedId: number;
     read: boolean;
   }>;
-  updateCalls: Array<{ userId: number; data: Record<string, unknown> }>;
+  updateCalls: Array<{
+    userId: number;
+    data: Record<string, unknown>;
+    expectedProfileVersion?: number;
+  }>;
   acceptCalls: number[];
   refreshTokens: Array<Record<string, unknown>>;
   nextUserId: number;
@@ -117,10 +122,27 @@ function makeStorage(state: HarnessState) {
       state.usersByEmail.set(user.email, user);
       return user;
     },
-    updateUser: async (userId: number, data: Record<string, unknown>) => {
+    updateUser: async (
+      userId: number,
+      data: Record<string, unknown>,
+      options: { expectedProfileVersion?: number } = {},
+    ) => {
       const existing = state.users.get(userId);
       if (!existing) return undefined;
-      state.updateCalls.push({ userId, data: { ...data } });
+      if (
+        options.expectedProfileVersion !== undefined &&
+        existing.profileVersion !== options.expectedProfileVersion
+      ) {
+        throw new ProfileVersionConflictError(
+          options.expectedProfileVersion,
+          existing.profileVersion,
+        );
+      }
+      state.updateCalls.push({
+        userId,
+        data: { ...data },
+        expectedProfileVersion: options.expectedProfileVersion,
+      });
       Object.assign(existing, data);
       if (existing.firebaseUid) state.usersByFirebaseUid.set(existing.firebaseUid, existing);
       state.usersByEmail.set(existing.email, existing);
