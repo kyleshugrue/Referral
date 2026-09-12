@@ -608,7 +608,6 @@ async function main() {
         () => clearInterval(schemaReadinessInterval),
         () => clearInterval(accountErasureInterval),
         () => clearInterval(mediaDeletionInterval),
-         () => clearInterval(mediaDeletionInterval),
         () => {
           if (staleTokenCleanupInterval) clearInterval(staleTokenCleanupInterval);
         },
@@ -658,6 +657,7 @@ async function main() {
         () => clearInterval(queueRecoveryInterval),
         () => clearInterval(schemaReadinessInterval),
          () => clearInterval(accountErasureInterval),
+         () => clearInterval(mediaDeletionInterval),
         () => {
           if (staleTokenCleanupInterval) clearInterval(staleTokenCleanupInterval);
         },
