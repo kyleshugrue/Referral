@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { clearCsrfToken, fetchWithCsrf } from '../csrf';
+import { clearCsrfToken, fetchWithCsrf, getCsrfToken } from '../csrf';
 
 describe('csrf-aware client requests', () => {
   beforeEach(() => {
@@ -34,5 +34,29 @@ describe('csrf-aware client requests', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/user');
+  });
+
+  it('does not restore a token from a request started before the session was cleared', async () => {
+    let resolveRequest!: (response: Response) => void;
+    const pendingResponse = new Promise<Response>((resolve) => {
+      resolveRequest = resolve;
+    });
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockReturnValueOnce(pendingResponse)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ csrfToken: 'new-session-token' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+
+    const staleRequest = getCsrfToken();
+    clearCsrfToken();
+    resolveRequest(new Response(JSON.stringify({ csrfToken: 'old-session-token' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+
+    await expect(staleRequest).resolves.toBeNull();
+    await expect(getCsrfToken()).resolves.toBe('new-session-token');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -535,36 +535,12 @@ export class BackgroundJobQueue {
    */
   async cancelStaleJobsForUser(userId: number, newProfileVersion: number): Promise<number> {
     console.log(`[BackgroundJobQueue] Cancelling stale jobs for user ${userId} (new profile version: ${newProfileVersion})`);
-    
-    const allPendingJobs = await this.storage.getPendingMatchGenerationJobs(100);
-    const pendingJobs = allPendingJobs.filter(job => 
-      job.userId === userId || JSON.parse(job.metadata || '{}').targetUserId === userId
-    );
-    let cancelledCount = 0;
-    
-    for (const job of pendingJobs) {
-      try {
-        const metadata = JSON.parse(job.metadata || '{}') as JobMetadata;
-        
-        // Cancel if job was created with an older profile version
-        if (metadata.userProfileVersion && metadata.userProfileVersion < newProfileVersion) {
-          await this.updateJobStatus(job.id, 'CANCELLED');
-          cancelledCount++;
-          console.log(`[BackgroundJobQueue] Cancelled stale job ${job.id} (profile version ${metadata.userProfileVersion} < ${newProfileVersion})`);
-        }
-        
-        // Also cancel jobs where this user is the target and their profile version is stale
-        if (metadata.targetUserId === userId && metadata.targetUserProfileVersion && metadata.targetUserProfileVersion < newProfileVersion) {
-          await this.updateJobStatus(job.id, 'CANCELLED');
-          cancelledCount++;
-          console.log(`[BackgroundJobQueue] Cancelled stale job ${job.id} (target profile version ${metadata.targetUserProfileVersion} < ${newProfileVersion})`);
-        }
-      } catch (error) {
-        console.error(`[BackgroundJobQueue] Error processing job ${job.id} for cancellation:`, error);
-      }
-    }
-    
-    console.log(`[BackgroundJobQueue] Cancelled ${cancelledCount} stale jobs for user ${userId}`);
+
+    // Cancellation is an atomic, storage-filtered operation. A bounded read
+    // followed by per-job updates can miss affected work behind unrelated
+    // jobs, double-count one directed job, and crash on malformed metadata.
+    const cancelledCount = await this.storage.cancelStaleJobsForUser(userId, newProfileVersion);
+    console.log(`[BackgroundJobQueue] Cancelled ${cancelledCount} stale jobs affecting user ${userId}`);
     return cancelledCount;
   }
 

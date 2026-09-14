@@ -62,6 +62,9 @@ export async function apiRequest(
   // CRITICAL: Wait for token initialization to complete before making requests
   // This prevents race condition on iOS app startup where queries fire before tokens load
   await waitForTokensReady();
+  if (getAuthGeneration() !== requestGeneration) {
+    throw new Error("Authentication changed during request");
+  }
   
   // Add additional logs for debugging connection requests
   const isConnectionRequest = url.includes('/connections/request/');
@@ -124,6 +127,9 @@ export async function apiRequest(
     if (!Capacitor.isNativePlatform()) {
       Object.assign(headers, await getCsrfHeaders(method));
     }
+    if (getAuthGeneration() !== requestGeneration) {
+      throw new Error("Authentication changed during request");
+    }
 
     let res = await fetch(absoluteUrl, {
       method,
@@ -131,6 +137,9 @@ export async function apiRequest(
       body: data ? JSON.stringify(data) : undefined,
       credentials: "include",
     });
+    if (getAuthGeneration() !== requestGeneration) {
+      throw new Error("Authentication changed during request");
+    }
 
     // Handle 401: Attempt token refresh once (JWT only, iOS native)
     if (
@@ -156,7 +165,9 @@ export async function apiRequest(
       // CRITICAL: Always re-read the fresh token from the manager after refresh
       // This ensures we get the token that was set during the successful refresh
        const freshToken = getCurrentAccessToken();
-       if (getAuthGeneration() !== requestGeneration) return res;
+        if (getAuthGeneration() !== requestGeneration) {
+          throw new Error("Authentication changed during request");
+        }
       
        console.log('[API] Refresh complete');
       
@@ -171,6 +182,9 @@ export async function apiRequest(
           body: data ? JSON.stringify(data) : undefined,
           credentials: "include",
         });
+        if (getAuthGeneration() !== requestGeneration) {
+          throw new Error("Authentication changed during request");
+        }
         
         console.log(`[API] Retry result: ${res.status} for ${method} ${url}`);
       } else if (newAccessToken) {
@@ -184,6 +198,9 @@ export async function apiRequest(
           body: data ? JSON.stringify(data) : undefined,
           credentials: "include",
         });
+        if (getAuthGeneration() !== requestGeneration) {
+          throw new Error("Authentication changed during request");
+        }
         
         console.log(`[API] Retry result: ${res.status} for ${method} ${url}`);
       } else {
@@ -243,6 +260,9 @@ export const getQueryFn: <T>(options: {
     // CRITICAL: Wait for token initialization to complete before making queries
     // This prevents race condition on iOS app startup where queries fire before tokens load
     await waitForTokensReady();
+    if (getAuthGeneration() !== requestGeneration) {
+      throw new Error("Authentication changed during query");
+    }
     
     // Handle different query key formats
     let url = "";
@@ -306,6 +326,9 @@ export const getQueryFn: <T>(options: {
         console.warn("Failed to get Firebase token for query:", error);
       }
     }
+    if (getAuthGeneration() !== requestGeneration) {
+      throw new Error("Authentication changed during query");
+    }
     
     // Convert relative URL to absolute URL for native platforms
     const absoluteUrl = getAbsoluteUrl(url);
@@ -316,6 +339,9 @@ export const getQueryFn: <T>(options: {
       signal,
       credentials: "include",
     });
+    if (getAuthGeneration() !== requestGeneration) {
+      throw new Error("Authentication changed during query");
+    }
 
     // Handle 401: Attempt token refresh once (JWT only, iOS native)
      if (
@@ -342,9 +368,7 @@ export const getQueryFn: <T>(options: {
       // This ensures we get the token that was set during the successful refresh
        const freshToken = getCurrentAccessToken();
        if (getAuthGeneration() !== requestGeneration) {
-         return unauthorizedBehavior === "returnNull" ? null : (() => {
-           throw new Error("Authentication changed during query");
-         })();
+          throw new Error("Authentication changed during query");
        }
       
        console.log('[QueryClient] Refresh complete');
@@ -359,6 +383,9 @@ export const getQueryFn: <T>(options: {
           signal,
           credentials: "include",
         });
+        if (getAuthGeneration() !== requestGeneration) {
+          throw new Error("Authentication changed during query");
+        }
         
         console.log(`[QueryClient] Retry result: ${res.status} for query ${url}`);
       } else if (newAccessToken) {
@@ -371,12 +398,19 @@ export const getQueryFn: <T>(options: {
           signal,
           credentials: "include",
         });
+        if (getAuthGeneration() !== requestGeneration) {
+          throw new Error("Authentication changed during query");
+        }
         
         console.log(`[QueryClient] Retry result: ${res.status} for query ${url}`);
       } else {
         // Refresh failed - logout will be triggered by token manager
         console.error('[QueryClient] Token refresh failed completely for query');
       }
+    }
+
+    if (getAuthGeneration() !== requestGeneration) {
+      throw new Error("Authentication changed during query");
     }
 
     // Handle custom 401 behavior
