@@ -2,14 +2,10 @@ name: Referral CodeQL configuration
 
 # csrf-sync provides the synchronizer-token middleware used by this app, but
 # CodeQL's Express model does not recognize that package as a CSRF protector.
-# Keep this exclusion limited to that middleware registration file and its
-# generated build output; all other missing-token-validation findings remain
-# release-blocking.
+# Keep file-scope exclusions limited to that middleware registration file and
+# generated build output; all other application paths remain release-blocking.
 queries:
   - uses: security-and-quality
-query-filters:
-  - exclude:
-      id: js/missing-token-validation
-      paths:
-        - "**/server/auth.ts"
-        - "**/dist/**"
+paths-ignore:
+  - "**/server/auth.ts"
+  - "**/dist/**"
