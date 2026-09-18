@@ -14,7 +14,9 @@ import YAML from "yaml";
 
 const WORKFLOW_EXTENSIONS = new Set([".yml", ".yaml"]);
 const EXPRESSION_PATTERN = /\x24\{\{[\s\S]*?\}\}/g;
-const ACTION_REFERENCE_PATTERN = /^\s*uses:\s*([^\s#]+)/gm;
+const ACTION_REFERENCE_PATTERN = /^\s*(?:-\s*)?uses:\s*([^\s#]+)/gm;
+const CODEQL_ACTION_REFERENCE_PATTERN =
+  /^\s*(?:-\s*)?uses:\s*github\/codeql-action\/[^@\s#]+@([^\s#]+)(?:\s+#\s*(v\d+(?:\.\d+(?:\.\d+)?)?))?\s*$/gim;
 const NPM_RUN_PATTERN = /\bnpm\s+run\b([^\r\n]*)/g;
 const PRIVATE_WORKFLOW_MARKERS = [
   "check:codeql",
@@ -83,6 +85,22 @@ const validateExpressions = (document, filePath) => {
   });
 };
 
+const validateCodeQLActionReferences = (text, filePath) => {
+  for (const match of text.matchAll(CODEQL_ACTION_REFERENCE_PATTERN)) {
+    const reference = match[1];
+    const version = match[2];
+    if (/^v3(?:\.|$)/i.test(reference)) {
+      fail(`${filePath}: CodeQL action v3 is retired; use the supported v4 major version.`);
+    }
+    if (!/^[0-9a-f]{40}$/i.test(reference)) {
+      fail(`${filePath}: CodeQL action must use a full commit SHA, not ${reference}.`);
+    }
+    if (!/^v4(?:\.\d+(?:\.\d+)?)?$/.test(version ?? "")) {
+      fail(`${filePath}: CodeQL action must use the supported v4 major version annotation.`);
+    }
+  }
+};
+
 const validateStep = (step, label) => {
   assertMapping(step, label);
   const uses = mappingValue(step, "uses");
@@ -136,6 +154,7 @@ export const validateWorkflowText = (text, filePath = "<workflow>") => {
     validateJob(pair.value, jobId, filePath);
   }
   validateExpressions(document, filePath);
+  validateCodeQLActionReferences(text, filePath);
   return { filePath, jobCount: jobs.items.length };
 };
 
