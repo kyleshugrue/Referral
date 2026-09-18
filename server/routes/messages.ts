@@ -2,7 +2,10 @@ import { Router } from "express";
 import { storage } from "../storage";
 import { requireAuthJWT } from '../auth';
 import { requireCompleteRegistration } from '../middleware/require-complete-registration';
-import { validateDirectMessageInput } from '../lib/message-validation';
+import {
+  validateDirectMessageInput,
+  validateMessageIdempotencyKey,
+} from '../lib/message-validation';
 import { logger } from '../lib/logger';
 import { toMessageDto, toMessageSummaryDto } from "../lib/privacy-dto";
 import { parseStrictPositiveInteger } from "../lib/request-validation";
@@ -105,6 +108,7 @@ router.post("/:userId", async (req, res) => {
     const senderId = req.user!.id;
     const receiverId = parseStrictPositiveInteger(req.params.userId);
     const { content } = req.body;
+    const idempotencyKey = req.get('Idempotency-Key') ?? req.body?.idempotencyKey;
 
     if (!receiverId) {
       return res.status(400).json({ message: "Invalid user ID" });
@@ -112,6 +116,10 @@ router.post("/:userId", async (req, res) => {
     const validation = validateDirectMessageInput(receiverId, content);
     if (!validation.ok) {
       return res.status(400).json({ message: validation.message });
+    }
+    const idempotencyValidation = validateMessageIdempotencyKey(idempotencyKey);
+    if (!idempotencyValidation.ok) {
+      return res.status(400).json({ message: idempotencyValidation.message });
     }
 
     const connection = await storage.getConnectionBetweenUsers(senderId, receiverId);
@@ -123,7 +131,8 @@ router.post("/:userId", async (req, res) => {
     const message = await storage.createMessage({
       senderId,
       receiverId,
-      content: validation.content
+      content: validation.content,
+      idempotencyKey: idempotencyValidation.key,
     });
 
     // Send push notification to iOS native users only

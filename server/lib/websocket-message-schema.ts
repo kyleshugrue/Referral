@@ -1,5 +1,9 @@
 import { z } from 'zod';
 import { MAX_WEBSOCKET_CHAT_CONTENT_LENGTH } from './websocket-security';
+import {
+  isValidMessageIdempotencyKey,
+  MESSAGE_IDEMPOTENCY_KEY_MAX_LENGTH,
+} from './message-validation';
 
 /**
  * Messages accepted by the WebSocket handler.
@@ -19,6 +23,10 @@ export const messageSchema = z.discriminatedUnion('type', [
     type: z.literal('chat'),
     receiverId: positiveId,
     content: z.string().trim().min(1).max(MAX_WEBSOCKET_CHAT_CONTENT_LENGTH),
+    idempotencyKey: z.string()
+      .min(1)
+      .max(MESSAGE_IDEMPOTENCY_KEY_MAX_LENGTH)
+      .refine(isValidMessageIdempotencyKey, 'Invalid idempotency key'),
   }).strict(),
   z.object({
     type: z.literal('loadMessages'),

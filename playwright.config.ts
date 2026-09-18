@@ -16,10 +16,12 @@ export default defineConfig({
   fullyParallel: false,
   retries: 0,
   reporter: [['list']],
+  outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR || 'browser-artifacts/task-276',
   timeout: 30_000,
   use: {
     baseURL: process.env.SMOKE_BASE_URL || 'http://localhost:5000',
-    trace: 'retain-on-failure',
+    trace: process.env.WEB_EVIDENCE === 'true' ? 'on' : 'retain-on-failure',
+    screenshot: process.env.WEB_EVIDENCE === 'true' ? 'on' : 'only-on-failure',
   },
   projects: [
     {

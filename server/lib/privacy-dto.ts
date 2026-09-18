@@ -66,7 +66,7 @@ export type ConnectionRequestDto = Pick<
 
 export type MessageDto = Pick<
   Message,
-  "id" | "conversationId" | "senderId" | "receiverId" | "content" | "createdAt" | "deliveredAt" | "readAt"
+  "id" | "conversationId" | "senderId" | "receiverId" | "idempotencyKey" | "content" | "createdAt" | "deliveredAt" | "readAt"
 > & {
   sender: MiniProfileDto;
   receiver: MiniProfileDto;
@@ -74,7 +74,7 @@ export type MessageDto = Pick<
 
 export type MessageSummaryDto = Pick<
   Message,
-  "id" | "conversationId" | "senderId" | "receiverId" | "content" | "createdAt" | "deliveredAt" | "readAt"
+  "id" | "conversationId" | "senderId" | "receiverId" | "idempotencyKey" | "content" | "createdAt" | "deliveredAt" | "readAt"
 >;
 
 export type ConversationDto = Pick<
@@ -199,6 +199,7 @@ export function toMessageDto(
     conversationId: message.conversationId,
     senderId: message.senderId,
     receiverId: message.receiverId,
+    idempotencyKey: message.idempotencyKey,
     content: message.content,
     createdAt: message.createdAt,
     deliveredAt: message.deliveredAt,
@@ -214,6 +215,7 @@ export function toMessageSummaryDto(message: Message): MessageSummaryDto {
     conversationId: message.conversationId,
     senderId: message.senderId,
     receiverId: message.receiverId,
+    idempotencyKey: message.idempotencyKey,
     content: message.content,
     createdAt: message.createdAt,
     deliveredAt: message.deliveredAt,

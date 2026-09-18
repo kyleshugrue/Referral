@@ -16,6 +16,7 @@ import { openAuthenticatedWebSocket } from "@/lib/websocket-ticket";
 import { logger } from "@/lib/logger";
 import { apiRequest } from "@/lib/queryClient";
 import { mergeMessages } from "@/lib/message-history";
+import { createMessageIdempotencyKey } from "@/lib/message-idempotency";
 
 interface MessageDialogProps {
   open: boolean;
@@ -33,6 +34,7 @@ interface WebSocketMessage {
   receiverId?: number;
   content?: string;
   partnerId?: number;
+  idempotencyKey?: string;
 }
 
 interface PendingMessage {
@@ -41,6 +43,7 @@ interface PendingMessage {
   receiverId: number;
   senderId: number;
   createdAt: string;
+  idempotencyKey: string;
   status: 'pending' | 'failed';
 }
 
@@ -772,6 +775,7 @@ export default function MessageDialog({ open, onOpenChange, otherUser }: Message
       receiverId,
       senderId: currentUser?.id || 0,
       createdAt: new Date().toISOString(),
+      idempotencyKey: createMessageIdempotencyKey(),
       status: 'pending'
     };
 
@@ -868,7 +872,8 @@ export default function MessageDialog({ open, onOpenChange, otherUser }: Message
     const message: WebSocketMessage = {
       type: 'chat',
       receiverId: pendingMsg.receiverId,
-      content: pendingMsg.content
+      content: pendingMsg.content,
+      idempotencyKey: pendingMsg.idempotencyKey,
     };
     
     // If online, try to send immediately

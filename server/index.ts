@@ -503,7 +503,7 @@ async function main() {
         matchingRadius: 25,
         yearsOfExperience: 5,
         bio: 'Synthetic browser smoke identity',
-        photo: '/placeholder.jpg',
+        photo: '/app-icon-192.png',
         resumeUrl: null,
         resumePreviewUrls: [],
         interests: [],

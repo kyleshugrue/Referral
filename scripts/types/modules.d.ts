@@ -50,6 +50,7 @@ declare module '*.mjs' {
   export const normalizeTrufflehogReport: any;
   export const SCANNER_TIMEOUTS: any;
   export const scanThirdPartyExport: (...args: any[]) => Promise<any>;
+  export const buildIndependentScanEvidence: any;
   export const classifyScannerDiagnostic: any;
   export const TRUFFLEHOG_SCAN_ARGS: any;
   export const validateBinaryPath: any;
@@ -71,6 +72,7 @@ declare module '*.mjs' {
   export const classifyGitState: any;
   export const classifyProviderMessage: any;
   export const safeRemoteIdentity: any;
+  export const classifyGitFailure: any;
   export const selectionPolicyIdentity: any;
   export const classifyWorkflowRuns: any;
   export const classifyWorkflowRun: any;

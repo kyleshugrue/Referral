@@ -21,6 +21,7 @@ import { waitForTokensReady, onAccessTokenChange } from "@/lib/token-manager";
 import { openAuthenticatedWebSocket } from "@/lib/websocket-ticket";
 import { AlwaysVisibleBackButton } from "@/components/chat-back-button";
 import { mergeMessages, type MessagePage } from "@/lib/message-history";
+import { createMessageIdempotencyKey } from "@/lib/message-idempotency";
 
 export default function ChatPage() {
   const [location, navigate] = useLocation();
@@ -42,7 +43,12 @@ export default function ChatPage() {
   const { hapticFeedback } = useCapacitor();
   
   // Message queue for when WebSocket is disconnected
-  const messageQueueRef = useRef<{type: string; content?: string; receiverId?: number;}[]>([]);
+  const messageQueueRef = useRef<{
+    type: string;
+    content?: string;
+    receiverId?: number;
+    idempotencyKey?: string;
+  }[]>([]);
 
   // Reference to the message container for auto-scrolling
   const messageContainerRef = useRef<HTMLDivElement>(null);
@@ -200,6 +206,12 @@ export default function ChatPage() {
   // WebSocket connection setup effect  
   useEffect(() => {
     if (!currentUser?.id || !userId) return;
+    // The synthetic CI smoke build exercises the REST/API boundary and must
+    // not attempt a live authenticated socket against the fixture server.
+    if (import.meta.env.VITE_SMOKE_TEST === 'true') {
+      setConnectionState("disconnected");
+      return;
+    }
     
     let tokenUnsubscribe: (() => void) | null = null;
     let isUnmounted = false;
@@ -541,13 +553,15 @@ export default function ChatPage() {
     const messageToSend = {
       type: 'chat',
       receiverId: Number(userId),
-      content: messageContent
+      content: messageContent,
+      idempotencyKey: createMessageIdempotencyKey(),
     };
 
     // Create temporary message for optimistic update
     const tempMessage: ExtendedMessage = {
       id: Date.now(), // Temporary ID that will be replaced when server confirms
       conversationId: conversation?.id || 0,
+      idempotencyKey: messageToSend.idempotencyKey,
       senderId: currentUser?.id || 0,
       receiverId: Number(userId),
       content: messageContent,

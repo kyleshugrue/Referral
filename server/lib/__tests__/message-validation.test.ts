@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { validateDirectMessageInput } from '../message-validation';
+import {
+  validateDirectMessageInput,
+  validateMessageIdempotencyKey,
+} from '../message-validation';
 
 describe('validateDirectMessageInput (messaging operation)', () => {
   it('accepts a valid receiver id and trims content', () => {
@@ -40,5 +43,20 @@ describe('validateDirectMessageInput (messaging operation)', () => {
       ok: false,
       message: 'Message content is too long',
     });
+  });
+});
+
+describe('validateMessageIdempotencyKey', () => {
+  it('accepts a bounded visible key', () => {
+    expect(validateMessageIdempotencyKey('message-123')).toEqual({
+      ok: true,
+      key: 'message-123',
+    });
+  });
+
+  it('rejects missing, padded, control, and oversized keys', () => {
+    for (const value of [undefined, '', ' padded', 'padded ', 'line\nbreak', 'x'.repeat(129)]) {
+      expect(validateMessageIdempotencyKey(value)).toMatchObject({ ok: false });
+    }
   });
 });

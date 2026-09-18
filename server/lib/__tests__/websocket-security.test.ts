@@ -63,9 +63,14 @@ describe('createWebSocketAdmissionGuard', () => {
 
 describe('WebSocket chat schema', () => {
   it('bounds chat content while leaving normal messages valid', () => {
-    expect(messageSchema.safeParse({ type: 'chat', receiverId: 2, content: 'hello' }).success).toBe(true);
     expect(messageSchema.safeParse({
-      type: 'chat', receiverId: 2, content: 'x'.repeat(4_001),
+      type: 'chat', receiverId: 2, content: 'hello', idempotencyKey: 'message-123',
+    }).success).toBe(true);
+    expect(messageSchema.safeParse({
+      type: 'chat', receiverId: 2, content: 'x'.repeat(4_001), idempotencyKey: 'message-123',
+    }).success).toBe(false);
+    expect(messageSchema.safeParse({
+      type: 'chat', receiverId: 2, content: 'hello',
     }).success).toBe(false);
   });
 

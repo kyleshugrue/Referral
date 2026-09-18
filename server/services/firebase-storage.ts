@@ -37,6 +37,37 @@ export function isManagedMediaObjectKey(fileName: string): boolean {
     && !fileName.includes('\0');
 }
 
+export function extractManagedMediaObjectKey(url: string, bucketName: string | undefined): string | null {
+  if (!bucketName) return null;
+  try {
+    const parsed = new URL(url);
+    let encodedPath: string | undefined;
+    if (parsed.hostname === 'storage.googleapis.com') {
+      const segments = parsed.pathname.split('/').filter(Boolean);
+      if (segments.length < 2 || segments[0] !== bucketName) return null;
+      encodedPath = segments.slice(1).join('/');
+    } else if (parsed.hostname === 'firebasestorage.googleapis.com') {
+      const match = parsed.pathname.match(/^\/v0\/b\/([^/]+)\/o\/(.+)$/);
+      if (!match || match[1] !== bucketName) return null;
+      encodedPath = match[2];
+    }
+    if (!encodedPath) return null;
+    const fileName = decodeURIComponent(encodedPath);
+    return isManagedMediaObjectKey(fileName) ? fileName : null;
+  } catch {
+    return null;
+  }
+}
+
+export function ownedMediaPrefixesForUser(userId: number): string[] {
+  return [
+    `profile-pictures/user-${userId}-`,
+    `resumes/user-${userId}-`,
+    `resume-previews/resumes/user-${userId}-`,
+    `legacy/user-${userId}/`,
+  ];
+}
+
 export interface UploadResult {
   url: string;
   fileName: string;
@@ -262,11 +293,7 @@ export class FirebaseStorageService {
     }
     // Uploads created by this service are namespaced by database user ID.
     // Never enumerate an entire shared bucket during an erasure request.
-    const prefixes = [
-      `profile-pictures/user-${userId}-`,
-      `resumes/user-${userId}-`,
-      `resume-previews/resumes/user-${userId}-`,
-    ];
+    const prefixes = ownedMediaPrefixesForUser(userId);
     const listed = await Promise.all(prefixes.map((prefix) => this.bucket!.getFiles({ prefix })));
     const filesToCheck = listed.flatMap(([files]) => files);
     for (const file of filesToCheck) {
@@ -312,19 +339,7 @@ export class FirebaseStorageService {
 
   // Extract filename from Firebase Storage URL for deletion
   extractFileName(url: string): string | null {
-    try {
-      const parsed = new URL(url);
-      const encodedPath = parsed.hostname === 'storage.googleapis.com'
-        ? parsed.pathname.split('/').slice(2).join('/')
-        : parsed.hostname === 'firebasestorage.googleapis.com'
-          ? parsed.pathname.match(/^\/v0\/b\/[^/]+\/o\/(.+)$/)?.[1]
-          : undefined;
-      if (!encodedPath) return null;
-      const fileName = decodeURIComponent(encodedPath);
-      return this.isAllowedObjectKey(fileName) ? fileName : null;
-    } catch {
-      return null;
-    }
+    return extractManagedMediaObjectKey(url, this.bucket?.name);
   }
 
   async uploadResume(fileBuffer: Buffer, originalName: string, userId?: number, firebaseUid?: string): Promise<ResumeUploadResult> {

@@ -286,6 +286,7 @@ export const messages = pgTable("messages", {
   receiverId: integer("receiver_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
+  idempotencyKey: text("idempotency_key").notNull(),
   content: text("content").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().default(sql`now()`),
   deliveredAt: timestamp("delivered_at", { withTimezone: true, mode: "string" }),
@@ -295,6 +296,8 @@ export const messages = pgTable("messages", {
   receiverDeliveryIdx: index("messages_receiver_delivery_idx").on(table.receiverId, table.deliveredAt),
   receiverReadIdx: index("messages_receiver_read_idx").on(table.receiverId, table.readAt),
   conversationCreatedIdx: index("messages_conversation_created_idx").on(table.conversationId, table.createdAt, table.id),
+  idempotencyUniqueIdx: uniqueIndex("messages_sender_conversation_idempotency_key_unique")
+    .on(table.senderId, table.conversationId, table.idempotencyKey),
 }));
 
 // Update relations

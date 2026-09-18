@@ -141,14 +141,15 @@ export default function ProfileDialog({
     refetchOnMount: true,
   });
 
-  const authorizedResumeUrl = authorizedProfile?.id === profile.id
+  const hasAuthorizedProfile = authorizedProfile?.id != null && authorizedProfile.id === profile.id;
+  const authorizedResumeUrl = hasAuthorizedProfile
     ? authorizedProfile.resumeUrl
     : null;
   const authorizedResumePreviewUrls = useMemo(
-    () => authorizedProfile?.id === profile.id
+    () => hasAuthorizedProfile
       ? (authorizedProfile.resumePreviewUrls ?? [])
       : [],
-    [authorizedProfile, profile.id],
+    [authorizedProfile, hasAuthorizedProfile],
   );
 
   // Initialize request status when dialog opens 

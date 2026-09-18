@@ -735,7 +735,10 @@ describe("P0 HTTP security regressions", () => {
       const response = await requestJson(port, "/api/messages/2", {
         method: "POST",
         headers: { authorization: `Bearer ${authToken(sender.id)}` },
-        body: JSON.stringify({ content: "private message" }),
+         body: JSON.stringify({
+           content: "private message",
+           idempotencyKey: "p0-connection-required-message",
+         }),
       });
 
       expect(response.status).toBe(403);

@@ -129,7 +129,12 @@ export interface IStorage {
   hasCompletedMatchGeneration(userId: number): Promise<boolean>;
   findUsersMatchingWithUser(userId: number): Promise<number[]>;
   findPotentialMatchUserIds(userId: number): Promise<number[]>;
-  createMessage(message: { senderId: number; receiverId: number; content: string; }): Promise<Message & { sender: User, receiver: User }>;
+  createMessage(message: {
+    senderId: number;
+    receiverId: number;
+    content: string;
+    idempotencyKey: string;
+  }): Promise<Message & { sender: User, receiver: User }>;
   sessionStore: session.Store;
   getMessages(user1Id: number, user2Id: number): Promise<(Message & { sender: User, receiver: User })[]>;
   getMessagesPage(
@@ -2132,7 +2137,12 @@ export class DatabaseStorage implements IStorage {
     }
 }
 
-  async createMessage(message: { senderId: number; receiverId: number; content: string; }): Promise<Message & { sender: User, receiver: User }> {
+  async createMessage(message: {
+    senderId: number;
+    receiverId: number;
+    content: string;
+    idempotencyKey: string;
+  }): Promise<Message & { sender: User, receiver: User }> {
     try {
       return await db.transaction(async (tx) => {
         const [connection] = await tx
@@ -2175,16 +2185,39 @@ export class DatabaseStorage implements IStorage {
           .values({
             senderId: message.senderId,
             receiverId: message.receiverId,
+            idempotencyKey: message.idempotencyKey,
             content: message.content,
             conversationId: conversation.id,
             createdAt: new Date().toISOString(),
           })
+          .onConflictDoNothing({
+            target: [messages.senderId, messages.conversationId, messages.idempotencyKey],
+          })
           .returning();
 
-        await tx
-          .update(conversations)
-          .set({ lastMessageAt: new Date().toISOString() })
-          .where(eq(conversations.id, conversation.id));
+        let persistedMessage = newMessage;
+        const created = Boolean(newMessage);
+        if (!persistedMessage) {
+          [persistedMessage] = await tx
+            .select()
+            .from(messages)
+            .where(and(
+              eq(messages.senderId, message.senderId),
+              eq(messages.conversationId, conversation.id),
+              eq(messages.idempotencyKey, message.idempotencyKey),
+            ))
+            .limit(1);
+        }
+        if (!persistedMessage) {
+          throw new Error("Idempotent message was not found after conflict");
+        }
+
+        if (created) {
+          await tx
+            .update(conversations)
+            .set({ lastMessageAt: new Date().toISOString() })
+            .where(eq(conversations.id, conversation.id));
+        }
 
         const [[sender], [receiver]] = await Promise.all([
           tx.select().from(users).where(eq(users.id, message.senderId)),
@@ -2192,28 +2225,30 @@ export class DatabaseStorage implements IStorage {
         ]);
         if (!sender || !receiver) throw new Error("Could not find sender or receiver");
 
-        await tx.insert(notifications).values({
-          userId: message.receiverId,
-          type: "message",
-          relatedId: newMessage.id,
-          read: false,
-          createdAt: new Date().toISOString(),
-        }).onConflictDoNothing();
+        if (created) {
+          await tx.insert(notifications).values({
+            userId: message.receiverId,
+            type: "message",
+            relatedId: persistedMessage.id,
+            read: false,
+            createdAt: new Date().toISOString(),
+          }).onConflictDoNothing();
 
-        await tx.insert(deliveryObligations).values({
-          userId: message.receiverId,
-          eventType: 'message',
-          payload: JSON.stringify({
-            messageId: newMessage.id,
-            senderId: message.senderId,
-            receiverId: message.receiverId,
-          }),
-          dedupeKey: `message:${newMessage.id}`,
-          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-          status: 'pending',
-        }).onConflictDoNothing({ target: deliveryObligations.dedupeKey });
+          await tx.insert(deliveryObligations).values({
+            userId: message.receiverId,
+            eventType: 'message',
+            payload: JSON.stringify({
+              messageId: persistedMessage.id,
+              senderId: message.senderId,
+              receiverId: message.receiverId,
+            }),
+            dedupeKey: `message:${persistedMessage.id}`,
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+            status: 'pending',
+          }).onConflictDoNothing({ target: deliveryObligations.dedupeKey });
+        }
 
-        return { ...newMessage, sender, receiver };
+        return { ...persistedMessage, sender, receiver };
       });
     } catch (error) {
       logger.error('Error in createMessage:', error);

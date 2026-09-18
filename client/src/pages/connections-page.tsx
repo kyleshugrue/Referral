@@ -19,6 +19,7 @@ import { ExtendedMessage } from "@/types/message";
 import { useGlobalWebSocket, CONNECTION_STATES } from "@/hooks/use-global-websocket";
 import { type MessagePage } from "@/lib/message-history";
 import { logger } from "@/lib/logger";
+import { createMessageIdempotencyKey } from "@/lib/message-idempotency";
 
 // Define the type for connection data
 interface Connection {
@@ -210,7 +211,8 @@ export default function ConnectionsPage() {
     const message: WebSocketMessage = {
       type: 'chat',
       receiverId: activeConversationId,
-      content: newMessage.trim()
+      content: newMessage.trim(),
+      idempotencyKey: createMessageIdempotencyKey(),
     };
     
     // Create temp message ID to track status
@@ -220,6 +222,7 @@ export default function ConnectionsPage() {
     const optimisticMessage: ExtendedMessage = {
       id: parseInt(tempId.replace('temp-', ''), 10), // Convert to numeric ID for compatibility
       conversationId: activeConversation?.id || 0,
+      idempotencyKey: String(message.idempotencyKey),
       content: newMessage.trim(),
       senderId: currentUser.id,
       receiverId: activeConversationId,
@@ -254,9 +257,10 @@ export default function ConnectionsPage() {
       } else {
         // Send via API as backup if WebSocket not connected
         // Use apiRequest for proper JWT token handling on iOS
-        const response = await apiRequest('POST', '/api/messages', {
+        const response = await apiRequest('POST', `/api/messages/${message.receiverId}`, {
           content: message.content,
           receiverId: message.receiverId,
+          idempotencyKey: message.idempotencyKey,
         });
         
         if (!response.ok) {

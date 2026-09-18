@@ -477,7 +477,7 @@ export function setupWebSocketServer(server: HTTPServer) {
 
             case 'chat':
               try {
-                const { receiverId, content } = validatedMessage;
+                const { receiverId, content, idempotencyKey } = validatedMessage;
                 if (!receiverId) {
                   throw new Error('Invalid receiver ID');
                 }
@@ -503,7 +503,8 @@ export function setupWebSocketServer(server: HTTPServer) {
                 const savedMessage = await storage.createMessage({
                   senderId: userId!,
                   receiverId,
-                  content: content.trim()
+                  content: content.trim(),
+                  idempotencyKey,
                 });
 
                 // Send through the centralized outbound path so storage-backed

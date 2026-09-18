@@ -7,6 +7,7 @@ import ErrorMessage from "@/components/error-message";
 import { getInitials } from "@/lib/avatar-utils";
 import { ExtendedMessage } from "@/types/message";
 import { useToast } from "@/hooks/use-toast";
+import { createMessageIdempotencyKey } from "@/lib/message-idempotency";
 import { apiRequest } from "@/lib/queryClient";
 import { fetchWithCsrf } from "@/lib/csrf";
 import { EMPTY_MESSAGE_PAGE, mergeMessages, updateMessagePage, type MessagePage } from "@/lib/message-history";
@@ -79,10 +80,11 @@ export function MessageList({ conversationId, recipientId, otherUser, onProfileC
     
     try {
       // Make API call to retry sending the message
-      const response = await fetchWithCsrf('/api/messages', {
+      const response = await fetchWithCsrf(`/api/messages/${recipientId}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'Idempotency-Key': failedMessage.idempotencyKey || createMessageIdempotencyKey(),
         },
         body: JSON.stringify({
           content: failedMessage.content,

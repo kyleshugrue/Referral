@@ -202,7 +202,7 @@ export default function SearchableInterestSelect({
                   type="button"
                   onClick={() => handleRemove(value)}
                   disabled={disabled}
-                  className="ml-1 ring-offset-background rounded-full outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="ml-1 min-h-6 min-w-6 inline-flex items-center justify-center ring-offset-background rounded-full outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <X className="h-3 w-3" />
                   <span className="sr-only">Remove {value}</span>
@@ -261,7 +261,7 @@ export default function SearchableInterestSelect({
                 type="button"
                 onClick={() => handleRemove(value)}
                 disabled={disabled}
-                className="ml-1 ring-offset-background rounded-full outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="ml-1 min-h-6 min-w-6 inline-flex items-center justify-center ring-offset-background rounded-full outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <X className="h-3 w-3" />
                 <span className="sr-only">Remove {value}</span>
@@ -290,7 +290,7 @@ export default function SearchableInterestSelect({
             aria-label={ariaLabel || (id ? undefined : placeholder)}
             aria-labelledby={ariaLabelledBy}
             placeholder={selected.length === 0 ? placeholder : "Add more..."}
-            className="flex-1 bg-transparent outline-none border-0 p-0 text-sm placeholder:text-muted-foreground min-w-[120px] disabled:cursor-not-allowed"
+            className="flex-1 min-h-6 bg-transparent outline-none border-0 p-0 text-sm placeholder:text-muted-foreground min-w-[120px] disabled:cursor-not-allowed"
           />
         </div>
         {isOpen && filteredOptions.length > 0 && !allowCustom && (

@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   firebaseStorageService,
+  extractManagedMediaObjectKey,
   isMissingStorageObjectError,
   isManagedMediaObjectKey,
+  ownedMediaPrefixesForUser,
 } from '../../services/firebase-storage';
 
 describe('managed media object boundary', () => {
@@ -33,13 +35,35 @@ describe('managed media object boundary', () => {
       .toThrow('Invalid managed media identifier');
   });
 
+  it('includes migrated legacy media in the bounded erasure prefixes', () => {
+    expect(ownedMediaPrefixesForUser(7)).toEqual([
+      'profile-pictures/user-7-',
+      'resumes/user-7-',
+      'resume-previews/resumes/user-7-',
+      'legacy/user-7/',
+    ]);
+  });
+
   it('rejects arbitrary URLs when extracting deletion candidates', () => {
     expect(firebaseStorageService.extractFileName(
       'https://attacker.invalid/profile-pictures/photo.jpg',
     )).toBeNull();
-    expect(firebaseStorageService.extractFileName(
-      'https://storage.googleapis.com/bucket/resumes/user-7-resume.pdf',
+    expect(extractManagedMediaObjectKey(
+      'https://storage.googleapis.com/referral-bucket/resumes/user-7-resume.pdf',
+      'referral-bucket',
     )).toBe('resumes/user-7-resume.pdf');
+    expect(extractManagedMediaObjectKey(
+      'https://storage.googleapis.com/other-bucket/resumes/user-7-resume.pdf',
+      'referral-bucket',
+    )).toBeNull();
+    expect(extractManagedMediaObjectKey(
+      'https://firebasestorage.googleapis.com/v0/b/referral-bucket/o/legacy%2Fuser-7%2Fphoto.jpg',
+      'referral-bucket',
+    )).toBe('legacy/user-7/photo.jpg');
+    expect(extractManagedMediaObjectKey(
+      'https://firebasestorage.googleapis.com/v0/b/other-bucket/o/resumes%2Fuser-7-resume.pdf',
+      'referral-bucket',
+    )).toBeNull();
   });
 
   it('rejects traversal when erasing legacy local media references', async () => {
